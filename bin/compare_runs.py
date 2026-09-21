@@ -226,7 +226,7 @@ def main(argv=None) -> int:
     ia, ib = index(rows_a), index(rows_b)
     with open(os.path.join(args.outdir, "paired_calls.tsv"), "w",
               newline="") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["subject", "seq_id", "taxon",
                     f"call_{args.label_a}", f"call_{args.label_b}",
                     f"reads_{args.label_a}", f"reads_{args.label_b}",

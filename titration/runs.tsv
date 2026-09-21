@@ -1,0 +1,2 @@
+run_id	platform	path	barcode_repeats	dna_input_ng	lot_pol	lot_primer	lot_extract	lot_plasmid
+TITR01	illumina	titration/reads		10	POL-LOT	IDX-LOT	EXT-LOT	PL-LOT

@@ -353,12 +353,12 @@ def main(argv=None) -> int:
     os.makedirs(args.outdir, exist_ok=True)
     with open(os.path.join(args.outdir, "corr_factors.tsv"), "w",
               newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(factors[0]), delimiter="\t")
+        w = csv.DictWriter(fh, fieldnames=list(factors[0]), delimiter="\t", lineterminator="\n")
         w.writeheader()
         w.writerows(factors)
     with open(os.path.join(args.outdir, "mock_recovery.tsv"), "w",
               newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(recovery[0]), delimiter="\t")
+        w = csv.DictWriter(fh, fieldnames=list(recovery[0]), delimiter="\t", lineterminator="\n")
         w.writeheader()
         w.writerows(recovery)
 
@@ -390,7 +390,7 @@ def main(argv=None) -> int:
             if r["seq_id"] in got:
                 r["corr_factor"] = got[r["seq_id"]]
         with open(args.update_reference, "w", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=list(refs[0]), delimiter="\t")
+            w = csv.DictWriter(fh, fieldnames=list(refs[0]), delimiter="\t", lineterminator="\n")
             w.writeheader()
             w.writerows(refs)
 

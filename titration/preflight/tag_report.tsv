@@ -1,0 +1,12 @@
+control_id	parent_id	locus	kind	tag	tag_length	tag_start_in_control	n_substitutions	note	detect_illumina	detect_nanopore_sup	detect_nanopore_hac	detect_nanopore_fast
+ref_ancylostoma_ceylanicum_pc	ref_ancylostoma_ceylanicum	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	343	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_ancylostoma_duodenale_pc	ref_ancylostoma_duodenale	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	343	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_ascaris_lumbricoides_pc	ref_ascaris_lumbricoides	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	323	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_enterobius_vermicularis_pc	ref_enterobius_vermicularis	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	477	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_necator_americanus_pc	ref_necator_americanus	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	449	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_schistosoma_mansoni_pc	ref_schistosoma_mansoni	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	465	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_strongyloides_fuelleborni_pc	ref_strongyloides_fuelleborni	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	359	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_strongyloides_stercoralis_pc	ref_strongyloides_stercoralis	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	373	0	insertion point was ambiguous because the tag shares bases with the flanking sequence; re-anchored onto the expected tag	1.00000	0.99997	0.99961	0.98913
+ref_toxocara_canis_pc	ref_toxocara_canis	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	387	0		1.00000	0.99997	0.99961	0.98913
+ref_trichuris_incognita_pc	ref_trichuris_incognita	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	432	0		1.00000	0.99997	0.99961	0.98913
+ref_trichuris_trichiura_pc	ref_trichuris_trichiura	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	381	0		1.00000	0.99997	0.99961	0.98913

@@ -285,6 +285,21 @@ def bounded_edit(a: str, b: str, max_d: int, free_b_suffix: bool = False) -> int
 # --------------------------------------------------------------------------
 
 
+def writer(fh, fieldnames=None, delimiter: str = "\t"):
+    """A csv writer that ends lines the way Unix does.
+
+    csv defaults to CRLF regardless of platform. Every table here is read
+    by awk, cut, pandas and shell loops, and a trailing carriage return
+    turns the last column of every row into a value with an invisible
+    character on the end - which surfaces as a file that cannot be opened
+    and a path that looks exactly right in the error message.
+    """
+    if fieldnames is None:
+        return csv.writer(fh, delimiter=delimiter, lineterminator="\n")
+    return csv.DictWriter(fh, fieldnames=fieldnames, delimiter=delimiter,
+                          lineterminator="\n")
+
+
 def read_table(path: str) -> list[dict[str, str]]:
     delim = "," if path.lower().endswith(".csv") else "\t"
     with open(path, newline="", encoding="utf-8") as fh:

@@ -328,6 +328,30 @@ def read_table(path: str, diag: Diagnostics, label: str) -> list[dict[str, str]]
         diag.error(f"{label}: file is empty: {path}")
         return []
 
+    # The delimiter comes from the extension, never from sniffing - a
+    # sniffer guesses wrongly on a file whose first column happens to
+    # contain no separator, and guessing wrongly about which column is
+    # which is worse than refusing. But a .txt holding CSV is an ordinary
+    # mistake, and read as TSV it yields one wide column and a complaint
+    # that every required field is missing. Say what actually happened.
+    other = "\t" if delim == "," else ","
+    header = lines[0].rstrip("\n")
+    if header.count(delim) == 0 and header.count(other) >= 2:
+        names = {",": "comma", "\t": "tab"}
+        diag.error(
+            f"{label}: read as {names[delim]}-separated because of the "
+            f"'{os.path.splitext(path)[1] or 'no'}' extension, but the "
+            f"header has no {names[delim]}s and "
+            f"{header.count(other)} {names[other]}s - so it is almost "
+            f"certainly {names[other]}-separated. Rename it to "
+            f"'{'.csv' if other == ',' else '.tsv'}', or convert the "
+            "separators. The delimiter is taken from the extension "
+            "deliberately: sniffing it guesses wrongly on files whose "
+            "first column contains no separator, and a wrong guess "
+            "mislabels columns silently"
+        )
+        return []
+
     rows = list(csv.DictReader(lines, delimiter=delim))
     if not rows:
         diag.error(f"{label}: no data rows below the header: {path}")
@@ -977,7 +1001,7 @@ def write_tag_report(
     path = os.path.join(outdir, "tag_report.tsv")
     if rows:
         with open(path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()), delimiter="\t")
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()), delimiter="\t", lineterminator="\n")
             w.writeheader()
             w.writerows(rows)
     else:
@@ -2107,7 +2131,7 @@ def resolve_illumina_files(
 def write_file_resolution(samples: list[Sample], outdir: str) -> None:
     path = os.path.join(outdir, "file_resolution.tsv")
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(
             ["run_id", "sample_id", "sanitised_id", "platform", "well",
              "plate_row", "plate_col", "sample_type", "n_files", "files"]
@@ -2124,7 +2148,12 @@ def write_file_resolution(samples: list[Sample], outdir: str) -> None:
                     s.plate_col or "",
                     s.sample_type,
                     len(s.files),
-                    ";".join(os.path.basename(f) for f in s.files),
+                    # Full paths, not basenames. This table exists so that
+                    # every downstream step uses a file pre-flight has
+                    # already checked, rather than re-deriving one - and a
+                    # basename cannot be opened. It stayed unnoticed until
+                    # something actually tried to read from it.
+                    ";".join(os.path.abspath(f) for f in s.files),
                 ]
             )
 

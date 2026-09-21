@@ -1,0 +1,439 @@
+{
+  "schema_version": 1,
+  "mode": "full",
+  "mocks": {},
+  "assay": {
+    "name": "ampseq_helminth",
+    "version": "1.0.0",
+    "source": "assets/assay/ampseq_helminth.json",
+    "control_tag": "TGGTCAATTTCAAGAGAT",
+    "tag_max_edits": 3
+  },
+  "reference": {
+    "n_entries": 23,
+    "by_type": {
+      "control": 11,
+      "target": 11,
+      "vector": 1
+    },
+    "loci": [
+      "ITS2"
+    ],
+    "n_with_corr_factor": 0,
+    "n_using_default_corr_factor": 11,
+    "extent": [
+      {
+        "seq_id": "ref_ancylostoma_ceylanicum_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F1",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 23,
+        "insert_end": 361
+      },
+      {
+        "seq_id": "ref_ancylostoma_duodenale_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F1",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 23,
+        "insert_end": 361
+      },
+      {
+        "seq_id": "ref_ascaris_lumbricoides_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F4",
+        "rev": "Helm_ITS2_R2",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 18,
+        "insert_end": 341
+      },
+      {
+        "seq_id": "ref_enterobius_vermicularis_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F4",
+        "rev": "Helm_ITS2_R2",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 18,
+        "insert_end": 495
+      },
+      {
+        "seq_id": "ref_necator_americanus_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F1",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 23,
+        "insert_end": 467
+      },
+      {
+        "seq_id": "ref_schistosoma_mansoni_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F3",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 19,
+        "insert_end": 483
+      },
+      {
+        "seq_id": "ref_strongyloides_fuelleborni_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F2",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 20,
+        "insert_end": 377
+      },
+      {
+        "seq_id": "ref_strongyloides_stercoralis_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F2",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 20,
+        "insert_end": 391
+      },
+      {
+        "seq_id": "ref_toxocara_canis_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F4",
+        "rev": "Helm_ITS2_R2",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 18,
+        "insert_end": 405
+      },
+      {
+        "seq_id": "ref_trichuris_incognita_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F5",
+        "rev": "Helm_ITS2_R3",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 21,
+        "insert_end": 450
+      },
+      {
+        "seq_id": "ref_trichuris_trichiura_pc",
+        "type": "control",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F5",
+        "rev": "Helm_ITS2_R3",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 21,
+        "insert_end": 399
+      },
+      {
+        "seq_id": "ref_ancylostoma_ceylanicum",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F1",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 23,
+        "insert_end": 343
+      },
+      {
+        "seq_id": "ref_ancylostoma_duodenale",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F1",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 23,
+        "insert_end": 343
+      },
+      {
+        "seq_id": "ref_ascaris_lumbricoides",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F4",
+        "rev": "Helm_ITS2_R2",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 18,
+        "insert_end": 323
+      },
+      {
+        "seq_id": "ref_enterobius_vermicularis",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F4",
+        "rev": "Helm_ITS2_R2",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 18,
+        "insert_end": 477
+      },
+      {
+        "seq_id": "ref_necator_americanus",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F1",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 23,
+        "insert_end": 449
+      },
+      {
+        "seq_id": "ref_schistosoma_mansoni",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F3",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 19,
+        "insert_end": 465
+      },
+      {
+        "seq_id": "ref_strongyloides_fuelleborni",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F2",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 20,
+        "insert_end": 359
+      },
+      {
+        "seq_id": "ref_strongyloides_stercoralis",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F2",
+        "rev": "Helm_ITS2_R1",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 20,
+        "insert_end": 373
+      },
+      {
+        "seq_id": "ref_toxocara_canis",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F4",
+        "rev": "Helm_ITS2_R2",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 18,
+        "insert_end": 387
+      },
+      {
+        "seq_id": "ref_trichuris_incognita",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F5",
+        "rev": "Helm_ITS2_R3",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 21,
+        "insert_end": 432
+      },
+      {
+        "seq_id": "ref_trichuris_trichiura",
+        "type": "target",
+        "locus": "ITS2",
+        "fwd": "Helm_ITS2_F5",
+        "rev": "Helm_ITS2_R3",
+        "extra_5p": 0,
+        "extra_3p": 0,
+        "insert_start": 21,
+        "insert_end": 381
+      }
+    ],
+    "composition_denominator": [
+      "ref_ancylostoma_ceylanicum",
+      "ref_ancylostoma_duodenale",
+      "ref_ascaris_lumbricoides",
+      "ref_enterobius_vermicularis",
+      "ref_necator_americanus",
+      "ref_schistosoma_mansoni",
+      "ref_strongyloides_fuelleborni",
+      "ref_strongyloides_stercoralis",
+      "ref_toxocara_canis",
+      "ref_trichuris_incognita",
+      "ref_trichuris_trichiura"
+    ],
+    "variant_references": []
+  },
+  "tags": [
+    {
+      "control_id": "ref_ancylostoma_ceylanicum_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 343
+    },
+    {
+      "control_id": "ref_ancylostoma_duodenale_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 343
+    },
+    {
+      "control_id": "ref_ascaris_lumbricoides_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 323
+    },
+    {
+      "control_id": "ref_enterobius_vermicularis_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 477
+    },
+    {
+      "control_id": "ref_necator_americanus_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 449
+    },
+    {
+      "control_id": "ref_schistosoma_mansoni_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 465
+    },
+    {
+      "control_id": "ref_strongyloides_fuelleborni_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 359
+    },
+    {
+      "control_id": "ref_strongyloides_stercoralis_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 373
+    },
+    {
+      "control_id": "ref_toxocara_canis_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 387
+    },
+    {
+      "control_id": "ref_trichuris_incognita_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 432
+    },
+    {
+      "control_id": "ref_trichuris_trichiura_pc",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 381
+    }
+  ],
+  "index_sets": {
+    "i7": {
+      "n": 24,
+      "min_hamming": 4,
+      "min_levenshtein": 2,
+      "safe_substitutions": 1,
+      "safe_edits": 0
+    },
+    "i5": {
+      "n": 16,
+      "min_hamming": 4,
+      "min_levenshtein": 3,
+      "safe_substitutions": 1,
+      "safe_edits": 1
+    },
+    "cross_min_distance": 1,
+    "cross_closest": "S502 CTCTCTAT vs N707 CTCTCTAC",
+    "rotational_collisions": [
+      "i7: N702 rotated is 1 mismatch from N719",
+      "i7: N704 rotated is 1 mismatch from N714",
+      "i7: N714 rotated is 1 mismatch from N704",
+      "i7: N719 rotated is 1 mismatch from N702"
+    ]
+  },
+  "barcode_strategy": {
+    "TITR01": {
+      "barcode_repeats": 2,
+      "max_substitutions_per_copy": 1,
+      "allow_indels": false,
+      "require_copy_agreement": true,
+      "frame_slip_protection": "copy agreement",
+      "applies": false
+    }
+  },
+  "runs": {
+    "TITR01": {
+      "platform": "illumina",
+      "barcode_repeats": 2,
+      "dna_input_ng": "10",
+      "lots": {
+        "lot_pol": "POL-LOT",
+        "lot_primer": "IDX-LOT",
+        "lot_extract": "EXT-LOT",
+        "lot_plasmid": "PL-LOT"
+      }
+    }
+  },
+  "plates": {
+    "TITR01": {
+      "n_samples": 94,
+      "n_placed": 94,
+      "i5_used": 8,
+      "i7_used": 12,
+      "combinations": 96,
+      "assigned": 94,
+      "sentinels": 2,
+      "observable_fraction": 0.0208,
+      "quadrant": "none (spans quadrants)"
+    }
+  },
+  "samples": {
+    "n": 94,
+    "by_type": {
+      "mock": 91,
+      "neg_ntc": 3
+    }
+  },
+  "errors": [],
+  "warnings": [
+    "locus 'ITS2' contains 5 distinct 5' and 2 distinct 3' termini, so one locus label is covering more than one primer pair. Not an error - but `locus` is what length filtering and reporting group by, and a quant carrying one primer pair only directly controls amplification for that pair. 5' groups: [ref_ancylostoma_ceylanicum, ref_ancylostoma_ceylanicum_pc, ref_ancylostoma_duodenale, ref_ancylostoma_duodenale_pc, ref_necator_americanus, ref_necator_americanus_pc]; [ref_ascaris_lumbricoides, ref_ascaris_lumbricoides_pc, ref_enterobius_vermicularis, ref_enterobius_vermicularis_pc, ref_toxocara_canis, ref_toxocara_canis_pc]; [ref_strongyloides_fuelleborni, ref_strongyloides_fuelleborni_pc, ref_strongyloides_stercoralis, ref_strongyloides_stercoralis_pc]; [ref_trichuris_incognita, ref_trichuris_incognita_pc, ref_trichuris_trichiura, ref_trichuris_trichiura_pc]; [ref_schistosoma_mansoni, ref_schistosoma_mansoni_pc]",
+    "reference: no quant entries - copy-number estimation is unavailable and every negative will be an unverified negative",
+    "the control tag has a 3-edit match inside 'pc_plasmid_backbone' (vector). Chance matches occur in a backbone of that length once indels are allowed. The risk is that a few non-specific backbone reads are misclassified, not that target reads are",
+    "all 11 controls share one tag sequence - tag detection establishes that a read is control-derived, and the mapped locus establishes which control. This is expected, and noted so the two-step assignment is not mistaken for a bug",
+    "index set i7: minimum edit distance is 2 but minimum Hamming distance is 4. The set tolerates 1 substitution(s) but only 0 indel(s) - so barcode matching must disable indels and rely on the tandem duplication for indel robustness",
+    "index sets are only 1 substitution(s) apart at their closest (S502 CTCTCTAT vs N707 CTCTCTAC) - barcode search must be anchored on adapter context, never scanned across the read, or the two ends cannot be told apart",
+    "run 'TITR01': no neg_extraction sample. No empirical detection threshold can be derived, so calls will fall back to the configured default and be flagged as such"
+  ]
+}

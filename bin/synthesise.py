@@ -767,13 +767,13 @@ def main(argv=None) -> int:
             summary_calls[call] += 1
 
     with open(os.path.join(args.outdir, "calls.tsv"), "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0]), delimiter="\t")
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]), delimiter="\t", lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
 
     with open(os.path.join(args.outdir, "calibration.tsv"), "w",
               newline="") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["sample_id", "state", "slope", "intercept", "reads_hi",
                     "conc_hi", "reads_lo", "conc_lo", "note"])
         for sid in sorted(cals):
@@ -805,7 +805,7 @@ def main(argv=None) -> int:
         })
     with open(os.path.join(args.outdir, "read_fates.tsv"), "w",
               newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(fate_rows[0]), delimiter="\t")
+        w = csv.DictWriter(fh, fieldnames=list(fate_rows[0]), delimiter="\t", lineterminator="\n")
         w.writeheader()
         w.writerows(fate_rows)
 

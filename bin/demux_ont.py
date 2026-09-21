@@ -365,7 +365,7 @@ def write_index_matrix(calls, samples, path: str) -> dict:
             grid[(c.i5, c.i7)] = grid.get((c.i5, c.i7), 0) + 1
 
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["index_i5", "index_i7", "reads", "assigned"])
         for a in i5s:
             for b in i7s:
@@ -509,7 +509,7 @@ def main(argv=None) -> int:
     # -- per-read assignment table ----------------------------------------
     with open(os.path.join(args.outdir, "assignments.tsv"), "w", newline="",
               encoding="utf-8") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["read_id", "tier", "sample_id", "index_i5", "index_i7",
                     "orientation"])
         for c in calls:

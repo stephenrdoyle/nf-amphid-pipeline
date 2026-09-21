@@ -11,8 +11,11 @@ Run: python3 tests/test_preflight.py
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import csv
 import importlib.util
+import io
 import os
 import shutil
 import sys
@@ -1122,7 +1125,91 @@ def test_index_set_numbers() -> None:
           str(len(rep["rotational_collisions"])))
 
 
+def test_resolved_paths_are_usable() -> None:
+    """The resolution table exists to be consumed, not admired.
+
+    It once held basenames. Every check passed, the table looked right,
+    and the first step that tried to open a file from it failed - because
+    a basename cannot be opened from anywhere but one directory.
+    """
+    print("\nresolved paths can actually be opened")
+    data = os.path.join(ROOT, "tests", "data")
+    if not os.path.exists(os.path.join(data, "samplesheet.csv")):
+        check("fixture present", False, "tests/data missing")
+        return
+    tmp = tempfile.mkdtemp()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            pf.main(["--reference", os.path.join(data, "reference.tsv"),
+                     "--samplesheet", os.path.join(data, "samplesheet.csv"),
+                     "--runs", os.path.join(data, "runs.tsv"),
+                     "--primers", os.path.join(data, "primers.tsv"),
+                     "--index-map", os.path.join(ROOT, "assets",
+                                                 "index_map.tsv"),
+                     "--assay", os.path.join(ROOT, "assets", "assay",
+                                     "ampseq_helminth.json"),
+                     "--outdir", tmp])
+        rows = list(csv.DictReader(
+            open(os.path.join(tmp, "file_resolution.tsv")), delimiter="\t"))
+        check("the table has rows", bool(rows))
+        paths = [f for r in rows for f in (r["files"] or "").split(";") if f]
+        check("files were resolved at all", bool(paths))
+        check("every path is absolute",
+              all(os.path.isabs(p) for p in paths),
+              str([p for p in paths if not os.path.isabs(p)][:2]))
+        missing = [p for p in paths if not os.path.exists(p)]
+        check("and every one of them exists on disk", not missing,
+              str(missing[:2]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_delimiter_mismatch() -> None:
+    """A .txt holding CSV is an ordinary mistake with a terrible symptom.
+
+    Read as TSV it yields one wide column, and the complaint that comes
+    back names every required field as missing - which sends the reader
+    to check their headers, where nothing is wrong. Reported from the
+    field, and fixed by saying what actually happened.
+    """
+    print("\nwrong delimiter for the extension")
+    tmp = tempfile.mkdtemp()
+    try:
+        rows = ["run_id,platform,sample_id,index_i7,index_i5,sample_type",
+                "R1,illumina,S1,TAAGGCGA,CTCTCTAT,unknown"]
+        csv_as_txt = os.path.join(tmp, "s.txt")
+        open(csv_as_txt, "w").write("\n".join(rows) + "\n")
+        d = pf.Diagnostics()
+        out = pf.read_table(csv_as_txt, d, "samplesheet")
+        check("comma data in a .txt is refused", out == [] and d.errors)
+        check("and the message names the real problem",
+              any("comma-separated" in e and ".csv" in e for e in d.errors),
+              str(d.errors))
+        check("rather than listing every column as missing",
+              not any("missing required" in e for e in d.errors))
+
+        tsv_as_csv = os.path.join(tmp, "s.csv")
+        open(tsv_as_csv, "w").write("\n".join(r.replace(",", "\t")
+                                              for r in rows) + "\n")
+        d2 = pf.Diagnostics()
+        pf.read_table(tsv_as_csv, d2, "samplesheet")
+        check("and the mirror case is caught too",
+              any("tab-separated" in e for e in d2.errors), str(d2.errors))
+
+        # a genuinely single-column file must still be read, not rejected
+        one = os.path.join(tmp, "one.tsv")
+        open(one, "w").write("seq_id\nA\nB\n")
+        d3 = pf.Diagnostics()
+        got = pf.read_table(one, d3, "x")
+        check("a legitimate one-column table is left alone",
+              len(got) == 2 and not d3.errors, str(d3.errors))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
+    test_resolved_paths_are_usable()
+    test_delimiter_mismatch()
     test_tag_derivation()
     test_distance_helpers()
     test_plate_geometry()

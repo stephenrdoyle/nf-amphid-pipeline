@@ -672,7 +672,7 @@ def write_composition(composition: dict, run_id: str, path: str) -> None:
     estimates is not being tested.
     """
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["run_id", "sample_id", "seq_id", "input_copies"])
         for sid, counts in sorted(composition.items()):
             for seq_id, n in sorted(counts.items()):
@@ -681,7 +681,7 @@ def write_composition(composition: dict, run_id: str, path: str) -> None:
 
 def write_truth(records: list[ReadRecord], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(
             [
                 "read_id", "sample_id", "seq_id", "fate",

@@ -1,0 +1,85 @@
+Control tag report
+==================
+
+Read-level matching tolerance: <=3 edits.
+Detection columns give the probability that at most that many of the
+tag's bases are miscalled, per platform error profile. Edit-distance
+matching can only do better, since an indel is absorbed rather than
+shifting every subsequent base.
+
+ref_ancylostoma_ceylanicum_pc  (parent ref_ancylostoma_ceylanicum, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 343)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_ancylostoma_duodenale_pc  (parent ref_ancylostoma_duodenale, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 343)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_ascaris_lumbricoides_pc  (parent ref_ascaris_lumbricoides, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 323)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_enterobius_vermicularis_pc  (parent ref_enterobius_vermicularis, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 477)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_necator_americanus_pc  (parent ref_necator_americanus, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 449)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_schistosoma_mansoni_pc  (parent ref_schistosoma_mansoni, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 465)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_strongyloides_fuelleborni_pc  (parent ref_strongyloides_fuelleborni, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 359)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_strongyloides_stercoralis_pc  (parent ref_strongyloides_stercoralis, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 373)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_toxocara_canis_pc  (parent ref_toxocara_canis, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 387)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_trichuris_incognita_pc  (parent ref_trichuris_incognita, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 432)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+ref_trichuris_trichiura_pc  (parent ref_trichuris_trichiura, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 381)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
