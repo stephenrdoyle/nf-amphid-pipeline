@@ -1,0 +1,2 @@
+run_id	platform	path	barcode_repeats	dna_input_ng	lot_pol	lot_primer	lot_extract	lot_plasmid
+RUN01	illumina	tests/data/sim/RUN01		10	P-2291	IDX-0417	QK-8830	PL-0032

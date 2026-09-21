@@ -1,0 +1,155 @@
+{
+  "_comment": [
+    "Assay definition for nf-helminth-amplicon.",
+    "",
+    "This file holds what makes an assay a particular assay: the control tag,",
+    "the library construct, the index primer set, and the tolerances tuned",
+    "around them. Swapping it is how the pipeline is pointed at a different",
+    "panel or a different construct, without touching code.",
+    "",
+    "What is deliberately NOT here: the sample_type and seq_type vocabularies,",
+    "and the structure of assignment. The logic depends on those - neg_extraction",
+    "sets thresholds, mock carries an expected composition, control requires a",
+    "parent - so making them configurable would mean every downstream branch has",
+    "to handle categories it knows nothing about. Configurability is not free.",
+    "",
+    "The reference panel is data, not configuration, and stays a separate input.",
+    "",
+    "Both preflight.py and Nextflow read this file, so the values are defined",
+    "once rather than duplicated between a config and a script.",
+    "",
+    "name and version are recorded in preflight_summary.json, so a result can",
+    "always be traced back to the assay definition that produced it."
+  ],
+
+  "name": "ampseq_helminth",
+  "version": "1.0.0",
+  "description": "Helminth ITS2/cox1 amplicon panel, two-step Nextera PCR, tandem-duplicated dual indices, plasmid decoys and spiked quantification standards",
+
+  "control_tag": {
+    "_comment": [
+      "Inserted into each control plasmid and absent from every target, so",
+      "target-versus-control is a deterministic presence test rather than an",
+      "alignment-score comparison.",
+      "",
+      "max_edits is generous on purpose. An 18bp tag matched exactly loses",
+      "about 30% of control reads at nanopore error rates, and every control",
+      "read called as target is a false positive in a real sample - the worst",
+      "error this assay can make. There is only one tag, so nothing competes",
+      "with it and generosity costs nothing. This is the opposite of the",
+      "barcode case, where the set's own minimum edit distance caps tolerance.",
+      "",
+      "Edit distance rather than Hamming: the tag contains TTT, and homopolymer",
+      "indels are nanopore's signature error.",
+      "",
+      "anchored means the search tests one window at the expected position",
+      "rather than scanning the read. At 3 edits a window matches by chance",
+      "about once in 2.9M, so scanning a 500bp read would give thousands of",
+      "spurious control calls per run instead of single digits."
+    ],
+    "sequence": "TGGTCAATTTCAAGAGAT",
+    "shared_across_controls": true,
+    "max_edits": 3,
+    "use_edit_distance": true,
+    "anchored": true,
+    "anchor_window_bp": 25,
+    "asymmetric": {
+      "_comment": [
+        "Err toward calling a read control. A control read called as target",
+        "is a false positive; a target read called as control costs only a",
+        "little sensitivity."
+      ],
+      "prefer": "control"
+    }
+  },
+
+  "library": {
+    "_comment": [
+      "Two-step PCR. PCR1 adds the Nextera overhangs to locus-specific primers;",
+      "PCR2 adds P5/P7 tails and the tandem-duplicated indices.",
+      "",
+      "After orientation normalisation to the i5-forward strand, both indices",
+      "read in the same orientation as the index list: the i5 primer carries",
+      "the index forward, and the i7 primer carries its reverse complement,",
+      "which the top strand reverses back.",
+      "",
+      "The 19bp mosaic end AGATGTGTATAAGAGACAG is shared by both overhangs, so",
+      "it cannot identify which end of a molecule is being read. The anchors",
+      "to use are the discriminating portions abutting each index window."
+    ],
+    "pcr1_overhang_fwd": "TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG",
+    "pcr1_overhang_rev": "GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG",
+    "mosaic_end": "AGATGTGTATAAGAGACAG",
+    "p5_tail": "AATGATACGGCGACCACCGAGATCTACAC",
+    "p7_tail": "CAAGCAGAAGACGGCATACGAGAT",
+    "i5_inner_anchor": "TCGTCGGCAGCGTC",
+    "i7_inner_anchor": "CCGAGCCCACGAGAC",
+    "reference_extent": "full_amplicon"
+  },
+
+  "indexing": {
+    "_comment": [
+      "barcode_repeats 2 is the AMPSEQ tandem design; 1 is a conventional",
+      "single index at each end. Both are dual-index. The difference is that",
+      "the duplication is indel insurance: an indel makes one copy",
+      "uninformative and the other carries the read, and a frame slip yields",
+      "two copies that disagree, which is what detects it. With one copy",
+      "there is no second observation.",
+      "",
+      "allow_indels is false regardless, because the i7 set's minimum edit",
+      "distance is only 2 - it tolerates one substitution but zero indels.",
+      "",
+      "The index map encodes plate position: i5 gives the row (A-P), i7 the",
+      "column (1-24). So well is derived, never recorded."
+    ],
+    "index_map": "assets/index_map.tsv",
+    "barcode_repeats": 2,
+    "allow_indels": false,
+    "require_copy_agreement": true,
+    "accept_single_end": false,
+    "position_encoded_in_index": true
+  },
+
+  "quantification": {
+    "_comment": [
+      "Quants are spiked post-extraction at a fixed amount per fixed amount of",
+      "faecal DNA, so the unit is copies per unit DNA, not copies per gram of",
+      "stool. Two standards two orders of magnitude apart give a bracket, not",
+      "a curve: estimates inside are interpolated, outside are flagged as",
+      "extrapolated rather than reported with false precision.",
+      "",
+      "A post-extraction spike normalises everything downstream of extraction",
+      "and nothing upstream, and the failure mode is directional - poor",
+      "extraction presents as low burden rather than as assay failure."
+    ],
+    "spike_stage": "post_extraction",
+    "normalised_to": "faecal_dna_mass",
+    "unit": "copies_per_ng_dna",
+    "expected_hi_lo_ratio": 100,
+    "interpolation": "log_linear",
+    "flag_outside_bracket": true
+  },
+
+  "tolerances": {
+    "_comment": [
+      "Tuning rather than identity. Tightening these makes pre-flight fussier;",
+      "loosening lets more through."
+    ],
+    "corr_factor_min": 0.1,
+    "corr_factor_max": 10.0,
+    "min_tag_length_warn": 12
+  },
+
+  "error_profiles": {
+    "_comment": [
+      "Nominal per-base error rates, used to forecast tag detection in the",
+      "pre-flight report so a decoy that is reliable on Illumina but marginal",
+      "under a fast basecalling model is known in advance rather than",
+      "discovered in the data."
+    ],
+    "illumina": 0.001,
+    "nanopore_sup": 0.01,
+    "nanopore_hac": 0.02,
+    "nanopore_fast": 0.05
+  }
+}

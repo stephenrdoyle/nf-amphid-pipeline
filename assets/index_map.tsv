@@ -1,0 +1,52 @@
+# Index primer map for nf-helminth-amplicon
+# The AMPSEQ_IDXx2 primer set encodes plate position: i5 gives the row (A-P),
+# i7 gives the column (1-24). Together they define a 384-well map, so plate
+# and well are derived from the index pair rather than recorded separately.
+#
+# Sequences are as reported in the index list (the orientation seen on the
+# i5-forward strand after orientation normalisation). The i5 primer carries
+# the index forward; the i7 primer carries its reverse complement, which the
+# top strand reverses back - so both read as written here.
+#
+# role  name    sequence        position
+role	name	sequence	position
+i7	N701	TAAGGCGA	1
+i7	N702	CGTACTAG	2
+i7	N703	AGGCAGAA	3
+i7	N704	TCCTGAGC	4
+i7	N705	GGACTCCT	5
+i7	N706	TAGGCATG	6
+i7	N707	CTCTCTAC	7
+i7	N710	CGAGGCTG	8
+i7	N711	AAGAGGCA	9
+i7	N712	GTAGAGGA	10
+i7	N714	GCTCATGA	11
+i7	N715	ATCTCAGG	12
+i7	N716	ACTCGCTA	13
+i7	N718	GGAGCTAC	14
+i7	N719	GCGTAGTA	15
+i7	N720	CGGAGCCT	16
+i7	N721	TACGCTGC	17
+i7	N722	ATGCGCAG	18
+i7	N723	TAGCGCTC	19
+i7	N724	ACTGAGCG	20
+i7	N726	CCTAAGAC	21
+i7	N727	CGATCAGT	22
+i7	N728	TGCAGCTA	23
+i7	N729	TCGACGTC	24
+i5	S502	CTCTCTAT	A
+i5	S503	TATCCTCT	B
+i5	S505	GTAAGGAG	C
+i5	S506	ACTGCATA	D
+i5	S507	AAGGAGTA	E
+i5	S508	CTAAGCCT	F
+i5	S510	CGTCTAAT	G
+i5	S511	TCTCTCCG	H
+i5	S513	TCGACTAG	I
+i5	S515	TTCTAGCT	J
+i5	S516	CCTAGAGT	K
+i5	S517	GCGTAAGA	L
+i5	S518	CTATTAAG	M
+i5	S520	AAGGCTAT	N
+i5	S521	GAGCCTTA	O
+i5	S522	TTATGCGA	P

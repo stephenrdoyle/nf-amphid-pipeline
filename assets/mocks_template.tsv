@@ -1,0 +1,99 @@
+# Mock community definitions for nf-helminth-amplicon
+#
+# What went into each mock well, declared BEFORE sequencing. This is the
+# only file in the pipeline that states an expected answer, and it is what
+# makes amplification efficiency measurable rather than assumed.
+#
+# Validate it against the panel and samplesheet while designing the plate:
+#
+#   python3 bin/preflight.py --reference panel.tsv --samplesheet samples.csv \
+#       --runs runs.tsv --mocks mocks.tsv --assay assets/assay/...json \
+#       --outdir check
+#
+# COLUMNS
+#   sample_id     must appear in the samplesheet with sample_type = mock
+#   seq_id        a reference in the panel
+#   amount        how much of it went in. Units are declared per row by
+#                 amount_units; every row of one sample must agree
+#   amount_units  copies | fraction | ng
+#                 copies   absolute molecules added (best - ties the mock
+#                          to the same scale as the quant standards)
+#                 fraction proportion of the target mixture, summing to 1
+#                          across the sample's target rows
+#                 ng       mass; converted to copies only if the panel
+#                          carries a length, otherwise treated as relative
+#   mix           a label shared by every well of the same intended
+#                 mixture, e.g. "TriPair_90_10". Replicates of one mix
+#                 share the label; this is what the calibrator groups on
+#   replicate     1, 2, 3 ... distinguishes wells within a mix
+#   pcr_batch     which PCR occasion this well was amplified in. Wells from
+#                 one plate share a batch. Without this the calibrator
+#                 cannot separate systematic bias from one bad plate, and
+#                 the confidence interval on corr_factor is meaningless
+#   note          free text
+#
+# DESIGN NOTES - these determine whether the data can answer the question
+#
+#   Use a RATIO SERIES, not a single 50/50 mix. Amplification bias is not
+#   guaranteed to be a per-species constant: templates compete for primers
+#   and polymerase, so the observed ratio can compress toward the middle as
+#   one species dominates. A single mix gives one point, no slope, and a
+#   correction that is right only at the ratio you happened to mock - and
+#   real samples are mostly one dominant species plus a minority, which is
+#   exactly where a mid-ratio constant fails.
+#
+#   The calibrator tests this directly: log(observed ratio) against
+#   log(input ratio). Slope 1 means a per-species constant is valid and the
+#   intercept is it. Slope below 1 means compression, and a constant will
+#   overstate every minority species. You need at least three ratios per
+#   pair to see a slope, and five is better.
+#
+#   INCLUDE THE QUANT STANDARDS in every mock. corr_factor is defined
+#   relative to them. A mock without them yields efficiencies that float
+#   against each other but are not anchored to the scale field samples are
+#   measured on, and they cannot be transferred.
+#
+#   MATCH THE PCR to the real assay - same cycle number, polymerase, input
+#   mass, master mix lot. Competition bias grows as reagents deplete, so a
+#   mock at 30 cycles does not predict bias at 40.
+#
+#   REPLICATE ACROSS PCR OCCASIONS, not just across wells. Three wells on
+#   one plate measure pipetting. Three separate PCRs measure the thing you
+#   are trying to correct for.
+#
+#   The extreme ratios pay for themselves twice: a 99/1 mix also measures
+#   the minority limit of quantification - the smallest real minority that
+#   can be told from index hopping and chimera background.
+#
+#   WHAT THIS DOES NOT MEASURE. Plasmid or gDNA mocks mixed before PCR
+#   measure amplification bias alone. Extraction and lysis bias are
+#   untouched, so a corr_factor derived here corrects one step of three
+#   when applied to eggs in stool. Record that with the number.
+#
+sample_id	seq_id	amount	amount_units	mix	replicate	pcr_batch	note
+# --- a two-species ratio series: five ratios, three PCR occasions --------
+MOCK_TRI_99_01_r1	Tri_trichiura	99000	copies	TriPair_99_01	1	B1
+MOCK_TRI_99_01_r1	Tri_incognita	1000	copies	TriPair_99_01	1	B1
+MOCK_TRI_99_01_r1	QUANT_hi	10000	copies	TriPair_99_01	1	B1	anchor
+MOCK_TRI_99_01_r1	QUANT_lo	100	copies	TriPair_99_01	1	B1	anchor
+MOCK_TRI_90_10_r1	Tri_trichiura	90000	copies	TriPair_90_10	1	B1
+MOCK_TRI_90_10_r1	Tri_incognita	10000	copies	TriPair_90_10	1	B1
+MOCK_TRI_50_50_r1	Tri_trichiura	50000	copies	TriPair_50_50	1	B1
+MOCK_TRI_50_50_r1	Tri_incognita	50000	copies	TriPair_50_50	1	B1
+MOCK_TRI_10_90_r1	Tri_trichiura	10000	copies	TriPair_10_90	1	B1
+MOCK_TRI_10_90_r1	Tri_incognita	90000	copies	TriPair_10_90	1	B1
+MOCK_TRI_01_99_r1	Tri_trichiura	1000	copies	TriPair_01_99	1	B1
+MOCK_TRI_01_99_r1	Tri_incognita	99000	copies	TriPair_01_99	1	B1
+# --- a log-staggered pool: every species, spanning four logs ------------
+# Rotate which species sit high and low across several pools, so that no
+# species is only ever seen dominant or only ever seen rare.
+MOCK_POOL_A_r1	Nam_ITS2_h1	100000	copies	PoolA	1	B2
+MOCK_POOL_A_r1	Asc_ITS2_h1	10000	copies	PoolA	1	B2
+MOCK_POOL_A_r1	Tri_trichiura	1000	copies	PoolA	1	B2
+MOCK_POOL_A_r1	Tri_incognita	100	copies	PoolA	1	B2
+MOCK_POOL_A_r1	QUANT_hi	10000	copies	PoolA	1	B2	anchor
+MOCK_POOL_A_r1	QUANT_lo	100	copies	PoolA	1	B2	anchor
+MOCK_POOL_B_r1	Nam_ITS2_h1	100	copies	PoolB	1	B2	rotated
+MOCK_POOL_B_r1	Asc_ITS2_h1	1000	copies	PoolB	1	B2	rotated
+MOCK_POOL_B_r1	Tri_trichiura	10000	copies	PoolB	1	B2	rotated
+MOCK_POOL_B_r1	Tri_incognita	100000	copies	PoolB	1	B2	rotated

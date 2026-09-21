@@ -1,0 +1,30 @@
+{
+  "seed": 1,
+  "rates": {
+    "hop": 0.005,
+    "chimera": 0.01,
+    "carryover": 0.002,
+    "dimer": 0.02,
+    "offtarget": 0.005,
+    "truncation": 0.03
+  },
+  "runs": [
+    {
+      "run_id": "RUN01",
+      "platform": "illumina",
+      "barcode_repeats": 2,
+      "error_model": "illumina",
+      "total_reads": 2126,
+      "by_fate": {
+        "clean": 1997,
+        "truncated": 65,
+        "dimer": 42,
+        "offtarget": 10,
+        "hopped": 8,
+        "carryover": 4
+      },
+      "sentinel_combinations": 0,
+      "hopped_into_sentinels": 0
+    }
+  ]
+}

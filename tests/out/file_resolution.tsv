@@ -1,0 +1,25 @@
+run_id	sample_id	sanitised_id	platform	well	sample_type	n_files	files
+RUN01	BLANK-01	BLANK-01	nanopore	A01	neg_extraction	0	
+RUN01	NTC-01	NTC-01	nanopore	A03	neg_ntc	0	
+RUN01	MOCK-A	MOCK-A	nanopore	A05	mock	0	
+RUN01	POS-01	POS-01	nanopore	A07	pos_control	0	
+RUN01	iCCH-001-r1	iCCH-001-r1	nanopore	A09	unknown	0	
+RUN01	iCCH-002-r1	iCCH-002-r1	nanopore	A13	unknown	0	
+RUN01	iCCH-003-r1	iCCH-003-r1	nanopore	A15	unknown	0	
+RUN01	iCCH-004-r1	iCCH-004-r1	nanopore	A17	unknown	0	
+RUN01	iCCH-005-r1	iCCH-005-r1	nanopore	A19	unknown	0	
+RUN01	iCCH-006-r1	iCCH-006-r1	nanopore	A21	unknown	0	
+RUN01	iCCH-007-r1	iCCH-007-r1	nanopore	C01	unknown	0	
+RUN01	iCCH-008-r1	iCCH-008-r1	nanopore	C03	unknown	0	
+RUN01	iCCH-009-r1	iCCH-009-r1	nanopore	C05	unknown	0	
+RUN01	iCCH-010-r1	iCCH-010-r1	nanopore	C07	unknown	0	
+RUN01	iCCH-011-r1	iCCH-011-r1	nanopore	C11	unknown	0	
+RUN01	iCCH-012-r1	iCCH-012-r1	nanopore	C13	unknown	0	
+RUN01	iCCH-013-r1	iCCH-013-r1	nanopore	C15	unknown	0	
+RUN01	iCCH-014-r1	iCCH-014-r1	nanopore	C17	unknown	0	
+RUN01	iCCH-015-r1	iCCH-015-r1	nanopore	C19	unknown	0	
+RUN01	iCCH-016-r1	iCCH-016-r1	nanopore	C23	unknown	0	
+RUN01	iCCH-017-r1	iCCH-017-r1	nanopore	E01	unknown	0	
+RUN01	iCCH-018-r1	iCCH-018-r1	nanopore	E03	unknown	0	
+RUN01	iCCH-019-r1	iCCH-019-r1	nanopore	E05	unknown	0	
+RUN01	iCCH-020-r1	iCCH-020-r1	nanopore	E07	unknown	0	

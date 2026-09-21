@@ -1,0 +1,42 @@
+# Primer set for nf-helminth-amplicon - OPTIONAL input (--primers)
+#
+# A separate file from the assay config on purpose: primers travel with the
+# PANEL, not with the construct. Change the targets and the primers may
+# change too, while the Nextera overhangs, the control tag and the index
+# design stay put.
+#
+# WHAT THIS IS FOR
+#   One thing only: validating reference EXTENT. Primers are not needed to
+#   assign a locus (competitive mapping gives that) nor to set length windows
+#   (reference length gives those). But they are the only way to check that
+#   every reference entry spans exactly primer-to-primer.
+#
+#   That matters because an entry carrying extra sequence outside its primer
+#   sites offers more alignable bases than its competitors, biasing
+#   assignment toward it for reasons unrelated to what is actually present -
+#   and it hides inside genuine biological length variation, where no
+#   length-based check can find it.
+#
+#   Pre-flight reports, per entry, which primer pair was found and how many
+#   bases lie outside them. Uniform is what matters: a panel where every
+#   entry carries the same flank is coherent; one where some do and some do
+#   not is not.
+#
+# In phase 2 the same file supplies the mask coordinates for variant calling,
+# since primer-derived bases are synthetic rather than sample-derived.
+#
+# COLUMNS
+#   name        free text
+#   direction   fwd | rev
+#   sequence    as ordered, 5'->3'. Reverse primers are given as ordered;
+#               the pipeline reverse-complements them to find the 3' site.
+#
+name	direction	sequence
+Helm_ITS2_F1	fwd	GCGTTATTTACCACGAATTGCAG
+Helm_ITS2_F2	fwd	AATCGTGTCGGTGGATCATT
+Helm_ITS2_F3	fwd	GCTCGTGTGTCGATGAAGA
+Helm_ITS2_F4	fwd	TTGGCACGTCTGGCTGAG
+Helm_ITS2_F5	fwd	ACGCCTGTCTGAGGGTCGTTA
+Helm_ITS2_R1	rev	TATGCTTAAGTTCAGCGGGT
+Helm_ITS2_R2	rev	TATGCTTAAATTCAGCGGGT
+Helm_ITS2_R3	rev	GTGTGTCAGCAACGTTTGCCG

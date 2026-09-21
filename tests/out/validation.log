@@ -1,0 +1,4 @@
+WARNINGS (3):
+  [W] all 5 controls share one tag sequence - tag detection establishes that a read is control-derived, and the mapped locus establishes which control. This is expected, and noted so the two-step assignment is not mistaken for a bug
+  [W] index set i7: minimum edit distance is 2 but minimum Hamming distance is 4. The set tolerates 1 substitution(s) but only 0 indel(s) - so barcode matching must disable indels and rely on the tandem duplication for indel robustness
+  [W] index sets are only 1 substitution(s) apart at their closest (S502 CTCTCTAT vs N707 CTCTCTAC) - barcode search must be anchored on adapter context, never scanned across the read, or the two ends cannot be told apart

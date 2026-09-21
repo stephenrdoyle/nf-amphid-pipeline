@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "assay": {
+    "name": "builtin_default",
+    "version": "0",
+    "source": "builtin defaults",
+    "control_tag": "TGGTCAATTTCAAGAGAT",
+    "tag_max_edits": 3
+  },
+  "reference": {
+    "n_entries": 13,
+    "by_type": {
+      "target": 5,
+      "control": 5,
+      "quant": 2,
+      "vector": 1
+    },
+    "loci": [
+      "ITS2",
+      "cox1"
+    ],
+    "n_with_corr_factor": 6
+  },
+  "tags": [
+    {
+      "control_id": "Nam_ITS2_h1_ctrl",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 170
+    },
+    {
+      "control_id": "Nam_ITS2_h2_ctrl",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 170
+    },
+    {
+      "control_id": "Tri_ITS2_h1_ctrl",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 177
+    },
+    {
+      "control_id": "Asc_ITS2_h1_ctrl",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 165
+    },
+    {
+      "control_id": "Nam_cox1_h1_ctrl",
+      "kind": "insertion",
+      "tag": "TGGTCAATTTCAAGAGAT",
+      "length": 18,
+      "start": 320
+    }
+  ],
+  "index_sets": {
+    "i7": {
+      "n": 24,
+      "min_hamming": 4,
+      "min_levenshtein": 2,
+      "safe_substitutions": 1,
+      "safe_edits": 0
+    },
+    "i5": {
+      "n": 16,
+      "min_hamming": 4,
+      "min_levenshtein": 3,
+      "safe_substitutions": 1,
+      "safe_edits": 1
+    },
+    "cross_min_distance": 1,
+    "cross_closest": "S502 CTCTCTAT vs N707 CTCTCTAC",
+    "rotational_collisions": [
+      "i7: N702 rotated is 1 mismatch from N719",
+      "i7: N704 rotated is 1 mismatch from N714",
+      "i7: N714 rotated is 1 mismatch from N704",
+      "i7: N719 rotated is 1 mismatch from N702"
+    ]
+  },
+  "barcode_strategy": {
+    "RUN01": {
+      "barcode_repeats": 2,
+      "max_substitutions_per_copy": 1,
+      "allow_indels": false,
+      "require_copy_agreement": true,
+      "frame_slip_protection": "copy agreement",
+      "applies": false
+    }
+  },
+  "runs": {
+    "RUN01": {
+      "platform": "illumina",
+      "barcode_repeats": 2,
+      "dna_input_ng": "10",
+      "lots": {
+        "lot_pol": "P-2291",
+        "lot_primer": "IDX-0417",
+        "lot_extract": "QK-8830",
+        "lot_plasmid": "PL-0032"
+      }
+    }
+  },
+  "plates": {
+    "RUN01": {
+      "n_samples": 88,
+      "n_placed": 88,
+      "i5_used": 8,
+      "i7_used": 12,
+      "combinations": 96,
+      "assigned": 88,
+      "sentinels": 8,
+      "observable_fraction": 0.0833,
+      "quadrant": "Q1 (odd rows, odd columns)"
+    }
+  },
+  "samples": {
+    "n": 88,
+    "by_type": {
+      "neg_extraction": 1,
+      "neg_ntc": 1,
+      "mock": 1,
+      "pos_control": 1,
+      "unknown": 84
+    }
+  },
+  "errors": [],
+  "warnings": [
+    "all 5 controls share one tag sequence - tag detection establishes that a read is control-derived, and the mapped locus establishes which control. This is expected, and noted so the two-step assignment is not mistaken for a bug",
+    "index set i7: minimum edit distance is 2 but minimum Hamming distance is 4. The set tolerates 1 substitution(s) but only 0 indel(s) - so barcode matching must disable indels and rely on the tandem duplication for indel robustness",
+    "index sets are only 1 substitution(s) apart at their closest (S502 CTCTCTAT vs N707 CTCTCTAC) - barcode search must be anchored on adapter context, never scanned across the read, or the two ends cannot be told apart"
+  ]
+}

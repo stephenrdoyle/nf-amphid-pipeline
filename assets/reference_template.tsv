@@ -1,0 +1,86 @@
+# Reference panel template for nf-helminth-amplicon
+#
+# Tab-separated, nine columns, header required. Lines starting with # are
+# ignored, so these notes can stay in the file. Empty fields are genuinely
+# empty - do not write NA or "." .
+#
+# Validate the panel on its own while you build it, before a samplesheet exists:
+#
+#   python3 bin/preflight.py --reference my_panel.tsv \
+#       --assay assets/assay/ampseq_helminth.json --outdir check
+#
+# COLUMNS
+#   seq_id        unique, filesystem-safe (letters, digits, . _ -)
+#   locus         required for target/control/quant; groups the panel
+#   type          target | control | quant | vector
+#   purpose       speciation | variants | speciation,variants | (blank)
+#                 What the reference is FOR, as opposed to what it is.
+#                 Blank means speciation, so panels written before this
+#                 column existed behave unchanged.
+#
+#                 This matters even with no variant calling: rel_abundance
+#                 divides by total target reads, so a second locus added
+#                 without marking it would count every species twice, with a
+#                 denominator mixing loci at different copy numbers.
+#
+#                 Not exclusive - a single-copy locus can serve both, since
+#                 its copy number does not vary between species the way a
+#                 multi-copy marker's does. Controls inherit from their
+#                 parent; quants and vectors take neither.
+#   taxon         optional; blank falls back to seq_id. Give every haplotype
+#                 of one species the SAME taxon so counts aggregate
+#   parent_id     required for control; must name a target at the same locus
+#   default_conc  required for quant; numeric, > 0
+#   conc_units    required for quant, e.g. copies_per_rxn. An implicit unit
+#                 is how a copy number becomes uninterpretable later
+#   corr_factor   optional amplification-efficiency multiplier, relative to
+#                 the quant standards. BLANK defaults to 1.0.
+#
+#                 The default is the honest arithmetic either way - dividing
+#                 by 1 is what "no correction" already did - but the results
+#                 record corr_factor_source as "panel" or "default", because
+#                 measured-and-found-to-be-unity and assumed-to-be-unity are
+#                 the same number backed by different evidence.
+#
+#                 With everything at the default, copy numbers are relative
+#                 to the standards' efficiency rather than corrected to it.
+#                 That compares samples with each other correctly; it does
+#                 not compare species with each other, since a reference
+#                 that amplifies twice as well reads twice as abundant.
+#   sequence      uppercase IUPAC, no gaps, FULL AMPLICON including the
+#                 primer-binding sites
+#
+# SEQUENCES
+#   Use the same extent for every entry. Mixing insert-only and full-amplicon
+#   sequences biases competitive assignment toward the longer ones, for
+#   reasons that have nothing to do with which is actually present.
+#
+# CONTROLS
+#   Build each control as its parent sequence with the tag inserted:
+#       control = parent[:position] + TGGTCAATTTCAAGAGAT + parent[position:]
+#   Pre-flight recovers the tag and its position by aligning control to
+#   parent, and will refuse a control whose insertion is not the expected tag.
+#
+# WHAT WILL BE REJECTED
+#   - two entries with identical sequences (competitive assignment cannot
+#     separate them, so this is an error rather than a warning)
+#   - a control with no parent_id, or one naming a different locus
+#   - a quant missing default_conc or conc_units
+#   - the tag occurring inside a target sequence
+#   - non-IUPAC characters, or gaps
+#
+seq_id	locus	type	purpose	taxon	parent_id	default_conc	conc_units	corr_factor	sequence
+# --- targets: one row per haplotype, same taxon to aggregate -------------
+Nam_ITS2_h1	ITS2	target	speciation	Necator_americanus					REPLACE_WITH_SEQUENCE
+Nam_ITS2_h2	ITS2	target	speciation	Necator_americanus					REPLACE_WITH_SEQUENCE
+Asc_ITS2_h1	ITS2	target	speciation	Ascaris_lumbricoides					REPLACE_WITH_SEQUENCE
+Tri_ITS2_h1	ITS2	target	speciation	Trichuris_trichiura					REPLACE_WITH_SEQUENCE
+# --- controls: parent + inserted tag -------------------------------------
+Nam_ITS2_h1_ctrl	ITS2	control		Necator_americanus	Nam_ITS2_h1				REPLACE_WITH_SEQUENCE
+Asc_ITS2_h1_ctrl	ITS2	control		Ascaris_lumbricoides	Asc_ITS2_h1				REPLACE_WITH_SEQUENCE
+Tri_ITS2_h1_ctrl	ITS2	control		Trichuris_trichiura	Tri_ITS2_h1				REPLACE_WITH_SEQUENCE
+# --- quantification standards, two orders of magnitude apart -------------
+QUANT_hi	ITS2	quant				10000	copies_per_rxn	1.0	REPLACE_WITH_SEQUENCE
+QUANT_lo	ITS2	quant				100	copies_per_rxn	1.0	REPLACE_WITH_SEQUENCE
+# --- optional: plasmid backbone as a non-specific amplification sensor ---
+pUC19_bb		vector							REPLACE_WITH_SEQUENCE

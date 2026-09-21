@@ -1,0 +1,31 @@
+{
+  "seed": 20260918,
+  "rates": {
+    "hop": 0.005,
+    "chimera": 0.01,
+    "carryover": 0.002,
+    "dimer": 0.02,
+    "offtarget": 0.005,
+    "truncation": 0.03
+  },
+  "runs": [
+    {
+      "run_id": "RUN01",
+      "platform": "nanopore",
+      "barcode_repeats": 2,
+      "error_model": "nanopore_hac",
+      "total_reads": 11355,
+      "by_fate": {
+        "clean": 10560,
+        "carryover": 20,
+        "truncated": 317,
+        "dimer": 215,
+        "chimera": 125,
+        "offtarget": 61,
+        "hopped": 57
+      },
+      "sentinel_combinations": 12,
+      "hopped_into_sentinels": 33
+    }
+  ]
+}

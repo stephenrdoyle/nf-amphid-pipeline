@@ -1,0 +1,6 @@
+control_id	parent_id	locus	kind	tag	tag_length	tag_start_in_control	n_substitutions	note	detect_illumina	detect_nanopore_sup	detect_nanopore_hac	detect_nanopore_fast
+Nam_ITS2_h1_ctrl	Nam_ITS2_h1	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	170	0		1.00000	0.99997	0.99961	0.98913
+Nam_ITS2_h2_ctrl	Nam_ITS2_h2	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	170	0		1.00000	0.99997	0.99961	0.98913
+Tri_ITS2_h1_ctrl	Tri_ITS2_h1	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	177	0		1.00000	0.99997	0.99961	0.98913
+Asc_ITS2_h1_ctrl	Asc_ITS2_h1	ITS2	insertion	TGGTCAATTTCAAGAGAT	18	165	0		1.00000	0.99997	0.99961	0.98913
+Nam_cox1_h1_ctrl	Nam_cox1_h1	cox1	insertion	TGGTCAATTTCAAGAGAT	18	320	0		1.00000	0.99997	0.99961	0.98913

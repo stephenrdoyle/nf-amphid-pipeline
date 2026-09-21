@@ -1,0 +1,43 @@
+Control tag report
+==================
+
+Read-level matching tolerance: <=3 edits.
+Detection columns give the probability that at most that many of the
+tag's bases are miscalled, per platform error profile. Edit-distance
+matching can only do better, since an indel is absorbed rather than
+shifting every subsequent base.
+
+Nam_ITS2_h1_ctrl  (parent Nam_ITS2_h1, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 170)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+Nam_ITS2_h2_ctrl  (parent Nam_ITS2_h2, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 170)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+Tri_ITS2_h1_ctrl  (parent Tri_ITS2_h1, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 177)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+Asc_ITS2_h1_ctrl  (parent Asc_ITS2_h1, locus ITS2)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 165)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
+
+Nam_cox1_h1_ctrl  (parent Nam_cox1_h1, locus cox1)
+  inserted tag: TGGTCAATTTCAAGAGAT  (18 bp at position 320)
+    illumina         err  0.1%   100.00%
+    nanopore_sup     err  1.0%   100.00%
+    nanopore_hac     err  2.0%    99.96%
+    nanopore_fast    err  5.0%    98.91%
