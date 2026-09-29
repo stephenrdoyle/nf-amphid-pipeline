@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import sys
@@ -55,9 +56,39 @@ from ampseqlib import (  # noqa: E402
     find_anchor_cost,
     load_assay,
     open_reads,
+    read_run_metadata,
     resolve_read_files,
     revcomp,
 )
+
+
+def code_fingerprint(**settings) -> str:
+    """What produced a part, so a resumed run cannot blend two versions.
+
+    Resumption works by skipping any input file whose counts already
+    exist. That is only safe while the thing being resumed is the same
+    thing: change the cut rule, rerun, and every file the old version had
+    finished is kept, giving a run whose recovery depends on which parts
+    happened to complete before the code changed. It looks like a
+    successful resume and the summary numbers are a blend of two
+    algorithms.
+
+    So each part records a fingerprint of the code and of the settings
+    that affect its output, and a part is reused only if both still
+    match. Anything else is recomputed.
+    """
+    h = hashlib.sha256()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("split_concatemers.py", "ampseqlib.py"):
+        try:
+            with open(os.path.join(here, name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            h.update(name.encode())
+    for k in sorted(settings):
+        h.update(f"{k}={settings[k]}".encode())
+    return h.hexdigest()[:16]
+
 
 # An i5 anchor opens a forward unit; an i7 anchor closes one. Reverse
 # complemented, the roles swap ends: rc(i7) opens a unit lying backwards,
@@ -99,33 +130,59 @@ def scan_hits(seq: str, a5: str, a7: str, edits: int):
     return kept
 
 
-def cut_positions(seq: str, hits, head_len: dict) -> list[int]:
-    """Where each unit after the first begins.
+def cut_positions(seq: str, hits, head_len: dict, tail_len: dict) -> list[int]:
+    """Every boundary between one molecule and the next.
 
-    A cut goes immediately before the outer tail of every unit that
-    opens after the read has already started. That keeps the preceding
-    unit's own tail and index intact on its side of the cut, which is
-    what lets both pieces be demultiplexed normally afterwards.
+    Within a single amplicon the anchors run OPEN then CLOSE - an i5 end
+    then an i7 end - so that pairing is the one adjacency that is not a
+    junction. Every other adjacency is:
+
+        CLOSE -> OPEN   two whole molecules joined; cut between them
+        OPEN  -> OPEN   the first molecule lost its i7 end; cut before
+                        the second one starts
+        CLOSE -> CLOSE  the SECOND molecule lost its i5 end; cut after
+                        the first one finishes
+
+    That last case was missed at first, and it is not a rare one. A read
+    of [complete A][fragment of B carrying only its i7 end] has no second
+    opening anchor at all, so nothing marked it as needing a cut - yet its
+    outer ends are A's i5 and B's i7, a hybrid pair. The junction check
+    correctly refuses the whole read, and molecule A, which is intact and
+    assignable, is thrown away with it. Cutting after A's tail recovers
+    it; the remainder has one end and is discarded downstream as tier B,
+    which is the honest outcome for a fragment.
+
+    A cut is placed at a unit's own boundary - just before an opening
+    unit's outer tail, or just after a closing unit's - so each piece
+    keeps its complete end structure and can be demultiplexed normally.
     """
     cuts: list[int] = []
-    for i, (pos, _end, kind) in enumerate(hits):
-        if i == 0 or kind not in OPENS:
-            continue
-        p = pos - head_len[kind]
-        lo = (cuts[-1] if cuts else 0) + 1
-        # Never cut before the previous unit's anchor: that would move
-        # sequence from one unit onto the other.
-        lo = max(lo, hits[i - 1][1])
+
+    def add(p: int, floor: int) -> None:
+        lo = max((cuts[-1] if cuts else 0) + 1, floor)
         p = max(lo, min(p, len(seq) - 1))
         if p > (cuts[-1] if cuts else 0):
             cuts.append(p)
+
+    for i in range(1, len(hits)):
+        prev_pos, prev_end, prev_kind = hits[i - 1]
+        pos, end, kind = hits[i]
+        if kind in OPENS:
+            # Cut before this unit's outer tail, never earlier than the
+            # end of the previous anchor - that would move sequence from
+            # one molecule onto the other.
+            add(pos - head_len[kind], prev_end)
+        elif prev_kind in CLOSES:
+            # Two closes in a row: the previous unit is complete, so cut
+            # once past its own tail and leave the remainder behind.
+            add(prev_end + tail_len[prev_kind], prev_end)
     return cuts
 
 
 def split_read(seq: str, qual: str, a5: str, a7: str, edits: int,
-               head_len: dict) -> list[tuple[str, str]]:
+               head_len: dict, tail_len: dict) -> list[tuple[str, str]]:
     hits = scan_hits(seq, a5, a7, edits)
-    cuts = cut_positions(seq, hits, head_len)
+    cuts = cut_positions(seq, hits, head_len, tail_len)
     if not cuts:
         return [(seq, qual)]
     pieces = []
@@ -166,7 +223,8 @@ def split_one_file(job: dict) -> dict:
     """
     src, dest = job["src"], job["dest"]
     a5, a7, edits = job["a5"], job["a7"], job["edits"]
-    head_len, min_length = job["head_len"], job["min_length"]
+    head_len, tail_len = job["head_len"], job["tail_len"]
+    min_length = job["min_length"]
 
     n_reads = n_pieces = n_dropped = 0
     bases_in = bases_out = 0
@@ -177,7 +235,7 @@ def split_one_file(job: dict) -> dict:
         for read_id, seq, qual in open_reads(src):
             n_reads += 1
             bases_in += len(seq)
-            pieces = split_read(seq, qual, a5, a7, edits, head_len)
+            pieces = split_read(seq, qual, a5, a7, edits, head_len, tail_len)
             kept = [p for p in pieces if len(p[0]) >= min_length]
             n_dropped += len(pieces) - len(kept)
             per_read[min(len(pieces), 5)] += 1
@@ -199,10 +257,88 @@ def split_one_file(job: dict) -> dict:
         "pieces_per_read_distribution": dict(per_read),
         "bases_in": bases_in,
         "bases_out": bases_out,
+        # Recorded per part, not once for the run: when Nextflow fans
+        # this stage out, the step that writes the run summary never
+        # sees an original read header. Splitting rewrites read ids, so
+        # if it is not captured here it cannot be recovered at all.
+        "basecalling": read_run_metadata([src]),
+        "code": job["code"],
     }
     with open(job["stats"], "w", encoding="utf-8") as fh:
         json.dump(stats, fh)
     return stats
+
+
+def build_summary(results: list, file_report: dict, min_length: int,
+                  anchor_max_edits: int, threads: int) -> dict:
+    """Aggregate per-part statistics into the run-level summary.
+
+    Extracted so that both routes through this stage produce the
+    identical object: the single task that splits every file itself,
+    and Nextflow fanning one task out per file and merging afterwards.
+    Two implementations of this arithmetic would be two chances to get
+    it wrong, and the ways to get it wrong are quiet ones -
+    bases_retained_fraction is a ratio of sums, not a mean of ratios,
+    and the pieces-per-read distribution is a histogram to be summed
+    bin by bin. Either mistake yields a plausible number.
+    """
+    n_reads = sum(r["reads_in"] for r in results)
+    n_pieces = sum(r["pieces_out"] for r in results)
+    n_dropped = sum(r["pieces_dropped_below_min_length"] for r in results)
+    bases_in = sum(r["bases_in"] for r in results)
+    bases_out = sum(r["bases_out"] for r in results)
+    per_read: Counter = Counter()
+    for r in results:
+        for k, v in r["pieces_per_read_distribution"].items():
+            per_read[int(k)] += v
+
+    # Basecalling provenance. Each part records what produced its own
+    # reads; splitting rewrites read ids, so this is the last stage that
+    # can see it at all. Parts should agree - they are batches of one
+    # MinKNOW run - and if they do not, that is a mixed-basecall run and
+    # worth saying so rather than quietly reporting whichever part was
+    # read first, because the model sets the error profile and so the
+    # barcode recovery.
+    seen = {}
+    for r in results:
+        bc = r.get("basecalling") or {}
+        model = bc.get("basecall_model")
+        if model:
+            seen.setdefault(model, bc)
+    if len(seen) == 1:
+        basecalling = next(iter(seen.values()))
+    elif not seen:
+        basecalling = {}
+    else:
+        basecalling = {
+            "basecall_model": "MIXED",
+            "models_seen": sorted(seen),
+            "warning": (f"{len(seen)} basecalling models across the input "
+                        "files. Error profiles differ between models, so "
+                        "barcode recovery and composition are not "
+                        "comparable across these files."),
+        }
+
+    return {
+        "reads_in": n_reads,
+        "pieces_out": n_pieces,
+        "pieces_per_read": n_pieces / n_reads if n_reads else 0,
+        "reads_split": sum(r["reads_split"] for r in results),
+        "pieces_dropped_below_min_length": n_dropped,
+        "min_length": min_length,
+        "pieces_per_read_distribution": dict(sorted(per_read.items())),
+        "bases_in": bases_in,
+        "bases_out": bases_out,
+        # Cutting removes nothing but the pieces below the length floor.
+        # If bases go missing beyond that, the cut arithmetic is wrong and
+        # the output is not a rearrangement of the input any more.
+        "bases_retained_fraction": bases_out / bases_in if bases_in else 0,
+        "input_files": file_report,
+        "basecalling": basecalling,
+        "parts": len(results),
+        "settings": {"anchor_max_edits": anchor_max_edits,
+                     "threads": threads},
+    }
 
 
 def main(argv=None) -> int:
@@ -226,6 +362,20 @@ def main(argv=None) -> int:
                     help="worker processes; 0 picks min(8, cores). Work is "
                          "divided by input file, and a MinKNOW run already "
                          "arrives as dozens of batch files")
+    ap.add_argument("--part-index", type=int, default=None,
+                    help="the index this input file has in the whole run. "
+                         "A shard sees one file and would otherwise number "
+                         "it 0000, so every shard of a fanned-out run would "
+                         "name its output alike - and two MinKNOW batches "
+                         "in different barcode folders can share a "
+                         "basename. Passing the index from --list-only "
+                         "makes a shard's output name the one the "
+                         "whole-run route would have given it")
+    ap.add_argument("--list-only", action="store_true",
+                    help="write read_files.txt and file_report.json for the "
+                         "resolved inputs, then stop. Lets a workflow build "
+                         "one task per input file from this tool's own "
+                         "discovery rules rather than a glob of its own")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -237,12 +387,38 @@ def main(argv=None) -> int:
         "5+": span + len(cfg["p5_tail"]),
         "7-": span + len(cfg["p7_tail"]),
     }
+    # The mirror image: how far past a closing anchor that unit's own
+    # index and outer tail extend.
+    tail_len = {
+        "7+": span + len(cfg["p7_tail"]),
+        "5-": span + len(cfg["p5_tail"]),
+    }
 
     read_files, file_report = resolve_read_files(
         args.reads, prefer_pass=not args.include_failed)
     if not read_files:
         print(f"no FASTQ found under {', '.join(args.reads)}", file=sys.stderr)
         return 1
+
+    # Which files constitute a nanopore run is a decision with rules -
+    # fastq_pass in, fastq_fail out, pod5 directories ignored - and they
+    # live in resolve_read_files(). A workflow that wants one task per
+    # input file asks here rather than globbing for itself, so there is
+    # one answer to "what is the input" and not two that agree until
+    # somebody reorganises a run directory.
+    if args.list_only:
+        # index<TAB>path, so the shard that handles a file can name its
+        # output exactly as the whole-run route would have.
+        with open(os.path.join(args.outdir, "read_files.txt"), "w",
+                  encoding="utf-8") as fh:
+            for i, path in enumerate(read_files):
+                fh.write(f"{i}\t{os.path.abspath(path)}\n")
+        with open(os.path.join(args.outdir, "file_report.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(file_report, fh, indent=2)
+        if not args.quiet:
+            print(f"{len(read_files)} input file(s) listed")
+        return 0
 
     # One output file per input file, in a directory the next stage reads
     # whole. Merging them into a single FASTQ would mean rewriting tens of
@@ -252,23 +428,65 @@ def main(argv=None) -> int:
     os.makedirs(reads_dir, exist_ok=True)
     os.makedirs(stats_dir, exist_ok=True)
 
-    jobs, done = [], []
+    fingerprint = code_fingerprint(
+        anchor_max_edits=args.anchor_max_edits, min_length=args.min_length,
+        barcode_repeats=args.barcode_repeats, index_length=args.index_length,
+        assay=args.assay or "")
+
+    if args.part_index is not None and len(read_files) != 1:
+        raise SystemExit(
+            f"--part-index names the position of ONE file, but "
+            f"{len(read_files)} were resolved. A shard processes a single "
+            "input file.")
+
+    jobs, done, stale = [], [], 0
     for i, src in enumerate(read_files):
-        stem = f"{i:04d}_" + os.path.basename(src).split(".")[0]
+        n = args.part_index if args.part_index is not None else i
+        stem = f"{n:04d}_" + os.path.basename(src).split(".")[0]
         stats_path = os.path.join(stats_dir, stem + ".json")
         dest = os.path.join(reads_dir, stem + ".fastq.gz")
         if os.path.exists(stats_path) and os.path.exists(dest):
             with open(stats_path, encoding="utf-8") as fh:
-                done.append(json.load(fh))
-            continue
+                prev = json.load(fh)
+            if prev.get("code") == fingerprint:
+                done.append(prev)
+                continue
+            # Produced by different code or different settings. Redo it
+            # rather than mix two algorithms in one run.
+            stale += 1
         jobs.append({"src": src, "dest": dest, "stats": stats_path,
                      "a5": a5, "a7": a7, "edits": args.anchor_max_edits,
-                     "head_len": head_len, "min_length": args.min_length})
+                     "head_len": head_len, "tail_len": tail_len,
+                     "min_length": args.min_length, "code": fingerprint})
 
     threads = args.threads or min(8, os.cpu_count() or 1)
     if not args.quiet:
         print(f"{len(read_files)} input file(s), {len(done)} already done, "
               f"{len(jobs)} to do on {threads} thread(s)")
+        if stale:
+            print(f"  {stale} previously-finished file(s) were made by "
+                  "different code or settings\n  and will be redone - a "
+                  "resumed run must not blend two versions")
+        # Name them. A count alone cannot distinguish "the run folder has
+        # one batch" from "--reads is pointing at the wrong place", and
+        # those look identical in every other way.
+        for p in read_files[:3]:
+            print(f"    {p}")
+        if len(read_files) > 3:
+            print(f"    ... and {len(read_files) - 3} more")
+        for note in file_report.get("notes", []):
+            print(f"  note: {note}")
+        # Work is divided by input file, so the file count is a ceiling on
+        # how much of the requested parallelism can actually be used. A
+        # MinKNOW run arrives as dozens of batches and this never fires;
+        # a run someone has already concatenated arrives as one file, and
+        # then the thread count is a fiction worth saying out loud rather
+        # than leaving to be inferred from the wall-clock time.
+        if jobs and threads > len(jobs):
+            print(f"  note: only {len(jobs)} file(s) to process, so at most "
+                  f"{len(jobs)} of the {threads} threads can be used. Work "
+                  "is\n        divided by input file; splitting the input "
+                  "into more files would\n        use the rest.")
 
     results = list(done)
     started = time.time()
@@ -287,41 +505,18 @@ def main(argv=None) -> int:
         if not args.quiet:
             print()
 
-    n_reads = sum(r["reads_in"] for r in results)
-    n_pieces = sum(r["pieces_out"] for r in results)
-    n_dropped = sum(r["pieces_dropped_below_min_length"] for r in results)
-    bases_in = sum(r["bases_in"] for r in results)
-    bases_out = sum(r["bases_out"] for r in results)
-    per_read = Counter()
-    for r in results:
-        for k, v in r["pieces_per_read_distribution"].items():
-            per_read[int(k)] += v
+    summary = build_summary(results, file_report, args.min_length,
+                            args.anchor_max_edits, threads)
 
-    summary = {
-        "reads_in": n_reads,
-        "pieces_out": n_pieces,
-        "pieces_per_read": n_pieces / n_reads if n_reads else 0,
-        "reads_split": sum(r["reads_split"] for r in results),
-        "pieces_dropped_below_min_length": n_dropped,
-        "min_length": args.min_length,
-        "pieces_per_read_distribution": dict(sorted(per_read.items())),
-        "bases_in": bases_in,
-        "bases_out": bases_out,
-        # Cutting removes nothing but the pieces below the length floor.
-        # If bases go missing beyond that, the cut arithmetic is wrong and
-        # the output is not a rearrangement of the input any more.
-        "bases_retained_fraction": bases_out / bases_in if bases_in else 0,
-        "input_files": file_report,
-        "parts": len(results),
-        "settings": {"anchor_max_edits": args.anchor_max_edits,
-                     "threads": threads},
-    }
     with open(os.path.join(args.outdir, "split_summary.json"), "w",
               encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
 
     if not args.quiet:
         split = summary["reads_split"]
+        n_reads = summary["reads_in"]
+        n_pieces = summary["pieces_out"]
+        n_dropped = summary["pieces_dropped_below_min_length"]
         print(f"\n{n_reads:,} reads -> {n_pieces:,} pieces "
               f"({summary['pieces_per_read']:.2f} per read)")
         print(f"  reads cut            {split:>9,}  "

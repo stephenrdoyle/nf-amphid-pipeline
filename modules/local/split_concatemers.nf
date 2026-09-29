@@ -1,34 +1,39 @@
 process SPLIT_CONCATEMERS {
-    tag "${meta.run_id}"
-    label 'process_medium'
+    tag "${meta.run_id}:${index}"
+    label 'process_shard'
 
     container "${ workflow.containerEngine == 'singularity' ?
         'docker://python:3.11-slim' : 'python:3.11-slim' }"
 
     input:
-    tuple val(meta), path(reads)
+    tuple val(meta), val(index), path(reads)
     path assay
 
     output:
-    // One FASTQ of amplicon units, replacing the pooled reads. Runs
-    // before demultiplexing rather than after, because the whole point
-    // is that the index pair on an uncut read may belong to two
-    // different molecules - there is nothing to fix once it has been
-    // demultiplexed on that pair.
+    // One output FASTQ per input FASTQ, which is why there is no merge
+    // afterwards: demultiplexing walks a directory, so the shards ARE
+    // the output. Collecting them is staging, not a rewrite of tens of
+    // gigabytes.
     tuple val(meta), path("split/reads/*.fastq.gz"), emit: reads
-    path "split/split_summary.json"              , emit: summary
-    path "versions.yml"                          , emit: versions
+    path "split/parts/*.json"                      , emit: part
+    path "versions.yml"                            , emit: versions
 
     script:
     def repeats = meta.barcode_repeats ? "--barcode-repeats ${meta.barcode_repeats}" : ''
+    // One input file per task, so no --threads: the tool divides work
+    // BY INPUT FILE, and a shard holding one file has nothing for a
+    // second worker to do. Asking for more cores would reserve them
+    // and leave them idle - on a 74 file run, over a thousand cores
+    // held for nothing, in slots LSF finds far harder to place than
+    // the single cores this actually needs.
     """
     split_concatemers.py \\
         --reads ${reads} \\
         --assay ${assay} \\
+        --part-index ${index} \\
         ${repeats} \\
         --anchor-max-edits ${params.anchor_max_edits} \\
         --min-length ${params.min_unit_length} \\
-        --threads ${task.cpus} \\
         --outdir split
 
     cat <<-END_VERSIONS > versions.yml
@@ -39,9 +44,9 @@ process SPLIT_CONCATEMERS {
 
     stub:
     """
-    mkdir -p split/reads
-    echo | gzip > split/reads/stub.fastq.gz
-    echo '{"reads_in":0,"pieces_out":0}' > split/split_summary.json
+    mkdir -p split/reads split/parts
+    echo | gzip > split/reads/${index}_stub.fastq.gz
+    echo '{"source":"stub_${index}","reads_in":0,"pieces_out":0,"reads_split":0,"pieces_dropped_below_min_length":0,"pieces_per_read_distribution":{},"bases_in":0,"bases_out":0}' > split/parts/${index}_stub.json
     touch versions.yml
     """
 }
