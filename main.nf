@@ -78,24 +78,51 @@ workflow {
         exit 1
     }
 
-    ch_reference   = Channel.fromPath(params.reference,   checkIfExists: true)
-    ch_samplesheet = Channel.fromPath(params.samplesheet, checkIfExists: true)
-    ch_index_map   = Channel.fromPath(params.index_map,   checkIfExists: true)
-    ch_assay       = Channel.fromPath(params.assay,       checkIfExists: true)
-    ch_runs        = params.runs
+    // .first() on every one of these, and it is load-bearing, not tidiness.
+    //
+    // Channel.fromPath on a single file gives a QUEUE channel holding one
+    // item. Nextflow pairs a process's inputs positionally and stops at the
+    // shortest, so a queue of 8 samples paired with a queue of 1 reference
+    // yields ONE task, not 8 - and Nextflow says nothing, because that is
+    // the documented behaviour. Seven wells simply never appear, and
+    // synthesis reports confidently on the one that did.
+    //
+    // .first() converts each to a VALUE channel, which is inexhaustible:
+    // it is re-read for every sample and imposes no length on the pairing.
+    // Doing it here rather than at each call site means a new consumer
+    // added later cannot reintroduce the bug.
+    ch_reference   = Channel.fromPath(params.reference,   checkIfExists: true).first()
+    ch_samplesheet = Channel.fromPath(params.samplesheet, checkIfExists: true).first()
+    ch_index_map   = Channel.fromPath(params.index_map,   checkIfExists: true).first()
+    ch_assay       = Channel.fromPath(params.assay,       checkIfExists: true).first()
+    // Each optional input gets its OWN placeholder. Nextflow stages every
+    // input of a process into one directory, so two absent inputs sharing
+    // the name NO_FILE collide - "multiple input files for each of the
+    // following file names" - and the run dies before the first tool
+    // starts. Distinct names cost nothing and make the collision
+    // impossible rather than unlikely.
+    ch_runs        = ( params.runs
         ? Channel.fromPath(params.runs, checkIfExists: true)
-        : Channel.fromPath("${projectDir}/assets/NO_FILE", checkIfExists: true)
+        : Channel.fromPath("${projectDir}/assets/NO_RUNS", checkIfExists: true) ).first()
 
-    ch_primers = params.primers
+    ch_primers = ( params.primers
         ? Channel.fromPath(params.primers, checkIfExists: true)
-        : Channel.fromPath("${projectDir}/assets/NO_FILE", checkIfExists: true)
-    ch_mocks = params.mocks
+        : Channel.fromPath("${projectDir}/assets/NO_PRIMERS", checkIfExists: true) ).first()
+    // Subject metadata is optional and kept OUT of the samplesheet: a
+    // samplesheet row is a library and is frozen at prep, a metadata row
+    // is a subject and keeps changing, and one subject is several
+    // libraries. Pre-flight validates the join rather than assuming it.
+    ch_metadata = ( params.metadata
+        ? Channel.fromPath(params.metadata, checkIfExists: true)
+        : Channel.fromPath("${projectDir}/assets/NO_METADATA", checkIfExists: true) ).first()
+
+    ch_mocks = ( params.mocks
         ? Channel.fromPath(params.mocks, checkIfExists: true)
-        : Channel.fromPath("${projectDir}/assets/NO_FILE", checkIfExists: true)
-    ch_no_file = Channel.fromPath("${projectDir}/assets/NO_FILE", checkIfExists: true)
+        : Channel.fromPath("${projectDir}/assets/NO_MOCKS", checkIfExists: true) ).first()
+    ch_no_file = Channel.fromPath("${projectDir}/assets/NO_COMPARISON", checkIfExists: true).first()
 
     PREFLIGHT(ch_reference, ch_samplesheet, ch_runs, ch_index_map, ch_assay,
-              ch_primers, ch_mocks)
+              ch_primers, ch_mocks, ch_metadata)
 
     // The validation log is worth putting in front of the user rather than
     // leaving in the results directory to be found later.
@@ -126,8 +153,22 @@ workflow {
         }
 
     ch_illumina = ch_resolved.filter { meta, files -> meta.platform == 'illumina' }
-    ch_nanopore_runs = Channel
-        .fromPath(params.runs ?: "${projectDir}/assets/NO_FILE")
+    // The nanopore runs come from PRE-FLIGHT's resolved manifest, not
+    // from the raw runs.tsv.
+    //
+    // This is the rule stated ten lines above - a path pre-flight
+    // blessed is the only path the rest of the pipeline sees - and the
+    // nanopore branch used to break it by re-reading the manifest
+    // itself. Doing so meant resolving relative paths a second time,
+    // in Groovy, and that second implementation was wrong twice: first
+    // resolving against the launch directory, then with an isAbsolute()
+    // guard that could never fire because Nextflow's file() had already
+    // made the path absolute. Both shipped, because Groovy cannot be
+    // executed in the environment this is developed in.
+    //
+    // So the resolution is gone from here rather than fixed again. It
+    // happens once, in preflight.py, in Python that has tests.
+    ch_nanopore_runs = PREFLIGHT.out.runs_resolved
         .splitCsv(header: true, sep: '\t')
         .filter { row -> row.platform == 'nanopore' }
         .map { row ->
@@ -141,14 +182,44 @@ workflow {
     NANOPORE_PATH(ch_nanopore_runs, ch_samplesheet, ch_assay)
 
     // -- they converge on one assignment ---------------------------------
-    ch_seqs = ILLUMINA_PATH.out.seqs.mix(NANOPORE_PATH.out.seqs)
+    // A run in which no sample reaches assignment must fail, not
+    // succeed quietly. Both branches are conditional - Illumina on the
+    // platform column of file_resolution.tsv, nanopore on the platform
+    // column of the run manifest - so if those two disagree, or a stub
+    // emits rows for neither, every process downstream is simply
+    // skipped and Nextflow prints "Complete". That happened: a
+    // -stub-run reported success having executed PREFLIGHT and nothing
+    // else, and it read as a passing test of the whole DAG.
+    ch_seqs = ILLUMINA_PATH.out.seqs
+        .mix(NANOPORE_PATH.out.seqs)
+        .ifEmpty { error(
+            "no sample reached assignment.\n" +
+            "  Both platform branches are empty, so nothing after " +
+            "pre-flight would run.\n" +
+            "  The Illumina branch takes rows of " +
+            "preflight/file_resolution.tsv whose platform is " +
+            "'illumina';\n" +
+            "  the nanopore branch takes rows of the run manifest whose " +
+            "platform is 'nanopore'.\n" +
+            "  Check that the samplesheet and the run manifest agree on " +
+            "the platform column.") }
 
     ASSIGN(
         ch_seqs,
+        // No .first() here, and it is checked rather than assumed.
+        // PREFLIGHT is invoked with nothing but value channels, and a
+        // process fed only value channels emits value channels - so
+        // the panel is already inexhaustible and .first() on it draws
+        // a "the operator first is useless" warning. That holds only
+        // while every PREFLIGHT input stays a value channel: make one
+        // of them a queue and this silently caps ASSIGN at one sample
+        // again. tests/test_nextflow.py::test_fanout_is_not_capped
+        // works that rule out for itself and fails if it stops being
+        // true.
         PREFLIGHT.out.insert_fasta,
-        ch_reference.first(),
-        ch_primers.first(),
-        ch_assay.first(),
+        ch_reference,
+        ch_primers,
+        ch_assay,
     )
 
     // -- per run ----------------------------------------------------------
@@ -162,9 +233,10 @@ workflow {
         ASSIGN.out.counts.collect(),
         ASSIGN.out.summary.collect(),
         ILLUMINA_PATH.out.summaries.collect().ifEmpty([]),
-        NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_FILE")),
-        ch_samplesheet.first(),
-        ch_reference.first(),
+        NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX")),
+        NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT")),
+        ch_samplesheet,
+        ch_reference,
         PREFLIGHT.out.dir,
     )
 
@@ -172,9 +244,9 @@ workflow {
     if (params.mocks) {
         CALIBRATE_MOCKS(
             ch_run_id,
-            ch_mocks.first(),
+            ch_mocks,
             ASSIGN.out.counts.collect(),
-            ch_reference.first(),
+            ch_reference,
         )
     }
 
@@ -186,8 +258,8 @@ workflow {
                  SYNTHESISE.out.qc)
             .collect(),
         params.comparison
-            ? Channel.fromPath(params.comparison, checkIfExists: true)
-            : ch_no_file.first(),
+            ? Channel.fromPath(params.comparison, checkIfExists: true).first()
+            : ch_no_file,
     )
 }
 
