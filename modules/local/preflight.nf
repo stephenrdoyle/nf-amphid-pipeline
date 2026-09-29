@@ -54,6 +54,8 @@ process PREFLIGHT {
     def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null
         ? "--illumina-read-length ${params.illumina_read_length}" : ''
+    def idx_edit  = params.min_index_edit != null
+        ? "--min-index-edit ${params.min_index_edit}" : ''
     """
     preflight.py \\
         --reference ${reference} \\
@@ -62,6 +64,7 @@ process PREFLIGHT {
         --index-map ${index_map} \\
         --assay ${assay} \\
         ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
+        ${idx_edit} \\
         ${tag_edits} ${exp_tag} ${reps} \\
         --outdir preflight
 
@@ -101,6 +104,8 @@ process PREFLIGHT {
     def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null
         ? "--illumina-read-length ${params.illumina_read_length}" : ''
+    def idx_edit  = params.min_index_edit != null
+        ? "--min-index-edit ${params.min_index_edit}" : ''
     """
     preflight.py \\
         --reference ${reference} \\
@@ -109,6 +114,7 @@ process PREFLIGHT {
         --index-map ${index_map} \\
         --assay ${assay} \\
         ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
+        ${idx_edit} \\
         ${tag_edits} ${exp_tag} ${reps} \\
         --outdir preflight
 

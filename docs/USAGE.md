@@ -204,6 +204,7 @@ both Nextflow and `preflight.py`, so the values are defined once.
 | `--mocks` | — | mock composition TSV |
 | `--comparison` | — | a previous run's `calls.tsv`, to pair against this one |
 | `--index_map` | `${projectDir}/assets/index_map.tsv` | index primer map |
+| `--min_index_edit` | `null` | fail if a nanopore run's indices are closer than this in **edit** distance. Unset, the shortfall is only reported |
 | `--assay` | `${projectDir}/assets/assay/ampseq_helminth.json` | assay definition |
 
 ### 3.2 Assay overrides
@@ -431,6 +432,20 @@ records that the plate was partial.
 **`expected N shard(s), found M`** — a split shard did not arrive.
 Refusing here is deliberate: a missing part produces a read funnel that
 balances perfectly against a smaller run than the one sequenced.
+
+**A warning about index edit distance.** On nanopore, pre-flight
+reports when the indices a run uses are closer than 3 edits apart,
+because below that no indel can be corrected and indels are the
+dominant error. It is a warning, not a failure: an existing plate
+cannot be changed, and refusing to analyse reads already sequenced
+helps nobody. `--min_index_edit 3` makes it a hard requirement, which
+is what you want when designing a *new* plate.
+
+`bin/design_indices.py` finds the largest subset of a primer pool
+meeting a distance floor. Often the fix is dropping one primer rather
+than ordering new ones — in the reference pool a single pair
+(`N721 TACGCTGC` vs `N723 TAGCGCTC`, 2 edits) is the only offender, and
+dropping either leaves 16 x 23 = 368 usable wells at edit distance 3.
 
 **Most reads are tier B (one end only)** — read
 `demux/demux_summary.json`, fields `i5_end_reasons` and `i7_end_reasons`.

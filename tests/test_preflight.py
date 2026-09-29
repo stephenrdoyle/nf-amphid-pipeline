@@ -1416,6 +1416,101 @@ def test_subject_metadata() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_index_edit_distance_gate() -> None:
+    """A nanopore plate whose indices cannot survive one indel is refused.
+
+    Indels are the dominant error on nanopore, and a set at minimum
+    EDIT distance 2 can correct none of them. On the reference MinION
+    run that cost 10.7M ends whose index was read and matched nothing,
+    96% of them equidistant from two declared indices once indels were
+    allowed - unrecoverable by any rule afterwards. So it is caught
+    before the plate is made rather than diagnosed after.
+
+    Three things this has to get right, each of which it got wrong at
+    some point while being written:
+
+      - judge the PLATE, not the primer pool. A pool may hold a close
+        pair that never appears on the same run, and the first version
+        failed a perfectly good samplesheet for it.
+      - only on nanopore. The same set is fine on Illumina, where
+        substitutions dominate and Hamming distance is what binds.
+      - name the offending pair, because the fix is usually to drop
+        one primer and the user needs to know which.
+    """
+    print("\nindex edit distance gate")
+    tmp = tempfile.mkdtemp()
+    try:
+        # N721 vs N723 are 2 edits apart - the one bad pair in the pool.
+        bad5, bad7 = "CTCTCTAT", "TACGCTGC"
+        other7 = "TAGCGCTC"
+
+        def sheet(path, platform, i7s):
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                w.writerow(["run_id", "platform", "sample_id",
+                            "index_i7", "index_i5", "sample_type"])
+                for i, i7 in enumerate(i7s):
+                    w.writerow(["R1", platform, f"S{i}", i7, bad5, "unknown"])
+
+        ref = os.path.join(tmp, "reference.tsv")
+        shutil.copy(os.path.join(ROOT, "tests/data/ont/reference.tsv"), ref)
+        runs = os.path.join(tmp, "runs.tsv")
+
+        def run(platform, i7s):
+            ss = os.path.join(tmp, f"ss_{platform}.csv")
+            sheet(ss, platform, i7s)
+            with open(runs, "w", encoding="utf-8") as fh:
+                fh.write("run_id\tplatform\tpath\n")
+                fh.write(f"R1\t{platform}\t{tmp}\n")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                code = pf.main(["--reference", ref, "--samplesheet", ss,
+                                "--runs", runs, "--index-map", INDEX_MAP,
+                                "--outdir", os.path.join(tmp, f"o_{platform}")])
+            return code, out.getvalue()
+
+        # The bad pair, on nanopore: reported, but the run PROCEEDS.
+        # A plate is a physical object - the reads are already on disk
+        # and the indices cannot be changed retrospectively, so
+        # refusing to analyse them helps nobody. Blocking real work was
+        # the first version of this check and it was wrong.
+        code, txt = run("nanopore", [bad7, other7])
+        check("a nanopore plate at edit distance 2 is NOT refused",
+              code == 0, str(code))
+        check("but it is reported", "edits apart at their closest" in txt,
+              txt[-300:])
+        check("and the offending pair is named",
+              bad7 in txt and other7 in txt, txt[-300:])
+        check("and it says which measure binds",
+              "EDIT" in txt or "edits apart" in txt)
+
+        # The SAME indices on Illumina: not an error there.
+        code, txt = run("illumina", [bad7, other7])
+        check("the same set on Illumina is not refused by this gate",
+              "edits apart at their closest" not in txt, txt[-200:])
+
+        # ...and --min-index-edit makes it a hard gate, for someone
+        # designing a NEW plate who wants the guarantee up front.
+        ss = os.path.join(tmp, "ss_strict.csv")
+        sheet(ss, "nanopore", [bad7, other7])
+        with open(runs, "w", encoding="utf-8") as fh:
+            fh.write("run_id\tplatform\tpath\n")
+            fh.write(f"R1\tnanopore\t{tmp}\n")
+        with contextlib.redirect_stdout(io.StringIO()) as o:
+            strict = pf.main(["--reference", ref, "--samplesheet", ss,
+                              "--runs", runs, "--index-map", INDEX_MAP,
+                              "--min-index-edit", "3",
+                              "--outdir", os.path.join(tmp, "o_strict")])
+        check("--min-index-edit turns it into a hard failure", strict == 1,
+              str(strict))
+
+        # A plate avoiding the pair: accepted.
+        code, txt = run("nanopore", [bad7, "TAAGGCGA", "CGTACTAG"])
+        check("dropping one of the pair clears it",
+              "edits apart at their closest" not in txt, txt[-300:])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_delimiter_mismatch()
@@ -1435,6 +1530,7 @@ def main() -> int:
     test_warnings_not_errors()
     test_sentinel_detection()
     test_manifest_paths_are_portable()
+    test_index_edit_distance_gate()
     test_subject_metadata()
 
     print(f"\n{'='*62}")

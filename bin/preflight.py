@@ -1722,9 +1722,12 @@ def parse_index_map(path: str, diag: Diagnostics) -> IndexMap:
     return im
 
 
-def index_set_report(im: IndexMap, diag: Diagnostics) -> dict:
+def index_set_report(im: IndexMap, diag: Diagnostics,
+                     platforms: set[str] | None = None) -> dict:
     """Distances within and between the index sets, which cap how much
     mismatch tolerance the demultiplexer may safely allow."""
+
+    nanopore = "nanopore" in (platforms or set())
 
     def within(seqs: list[str], label: str) -> dict:
         if len(seqs) < 2:
@@ -1735,13 +1738,55 @@ def index_set_report(im: IndexMap, diag: Diagnostics) -> dict:
         # tolerance that still guarantees unique assignment
         safe_mm = (mh - 1) // 2
         safe_edit = (ml - 1) // 2
-        if safe_edit < safe_mm:
+        # On nanopore this is not a caveat, it is a design fault, and
+        # it caps the run before a single read is sequenced.
+        #
+        # Indels are nanopore's dominant error - deletions outnumbered
+        # insertions 1.4:1 at the i5 end and 3.6:1 at the i7 end on the
+        # reference MinION run. A set that permits ZERO safe indel
+        # tolerance therefore cannot correct the most common thing that
+        # goes wrong, and the failures are not recoverable afterwards:
+        # of 10.7M ends whose index was read but matched nothing, 96%
+        # were equidistant from two declared indices once indels were
+        # allowed, so even a margin rule had to decline them.
+        #
+        # The duplication does not rescue this, which is the part that
+        # was assumed and turned out to be wrong. It insures against
+        # INDEPENDENT failure, and the copies do not fail
+        # independently: they are the same sequence in the same
+        # context, so a systematic basecalling error corrupts both.
+        # Measured, of ends where the window was read: 65.4% both
+        # copies matched, 24.1% neither, and only 10.5% exactly one -
+        # where independence predicts 50%. The second copy was worth
+        # about 14% of yield, not the redundancy it looks like.
+        if nanopore and safe_edit < 1:
+            diag.warn(
+                f"{label} (whole pool): minimum EDIT distance is {ml}, so "
+                f"{safe_edit} indel(s) could be corrected safely - on a "
+                "platform whose dominant error is indels. Whether this "
+                "matters depends on which of them this run actually uses, "
+                "checked separately below.\n"
+                "    Hamming distance is not the relevant measure here: "
+                f"the set is {mh} apart by substitution but {ml} by edit, "
+                "and a single deletion moves a read to a sequence that is "
+                "as close to another index as to its own.\n"
+                "    The tandem duplication does not compensate. It "
+                "insures against independent failure, and the copies are "
+                "the same sequence in the same context, so they fail "
+                "together - measured at 14% of yield rather than the "
+                "redundancy it appears to be.\n"
+                "    Choose an index set for minimum EDIT distance (>= 5 "
+                "permits 2 indels), or run with --platform illumina if "
+                "this really is an Illumina library."
+            )
+        elif safe_edit < safe_mm:
             diag.warn(
                 f"{label}: minimum edit distance is {ml} but minimum Hamming "
                 f"distance is {mh}. The set tolerates {safe_mm} substitution(s) "
-                f"but only {safe_edit} indel(s) - so barcode matching must "
-                "disable indels and rely on the tandem duplication for "
-                "indel robustness"
+                f"but only {safe_edit} indel(s), so barcode matching must "
+                "disable indels. The tandem duplication is a partial "
+                "mitigation only - its copies fail together more often "
+                "than independently"
             )
         return {
             "n": len(seqs),
@@ -1790,6 +1835,80 @@ def index_set_report(im: IndexMap, diag: Diagnostics) -> dict:
                         rot.append(f"{label}: {table[a][0]} rotated is 1 mismatch from {table[b][0]}")
     rep["rotational_collisions"] = sorted(set(rot))
     return rep
+
+
+def used_index_geometry(samples: list, runs: dict, diag: Diagnostics,
+                        require: int | None = None) -> dict:
+    """The distances among the indices THIS RUN actually uses.
+
+    Judging the whole primer pool is the wrong test and produced a
+    false alarm the first time: a pool may hold a pair two edits apart
+    that never appear on the same plate, and then nothing is wrong. It
+    is the set on the plate that decides whether a read can be placed.
+
+    Reported, not refused. An existing plate is a physical object and
+    a check that blocks the analysis of reads already on disk is worse
+    than no check: the indices cannot be changed retrospectively, so
+    all a hard failure achieves is preventing the work. The cost is
+    quantified instead, and --min-index-edit makes it a hard gate for
+    anyone designing a NEW plate who wants the guarantee.
+
+    Indels are the dominant error on nanopore - deletions
+    outnumbered insertions 1.4:1 at the i5 end and 3.6:1 at the i7 end
+    on the reference MinION run - and the failures are unrecoverable
+    afterwards: of 10.7M ends whose index was read but matched nothing,
+    96% were equidistant from two declared indices once indels were
+    allowed, so even a margin rule had to decline them.
+
+    The tandem duplication does not compensate, which was assumed and
+    is false. It insures against INDEPENDENT failure, and the copies
+    are the same sequence in the same context, so they fail together:
+    of ends where the window was read, 65.4% had both copies match and
+    24.1% neither, with only 10.5% exactly one where independence
+    predicts 50%.
+    """
+    out: dict = {}
+    for rid, run in runs.items():
+        rows = [s for s in samples if s.run_id == rid]
+        if not rows:
+            continue
+        for end, seqs in (("i5", {s.index_i5 for s in rows if s.index_i5}),
+                          ("i7", {s.index_i7 for s in rows if s.index_i7})):
+            seqs = sorted(seqs)
+            if len(seqs) < 2:
+                continue
+            pairs = [(a, b) for i, a in enumerate(seqs) for b in seqs[i + 1:]]
+            ml = min(levenshtein(a, b) for a, b in pairs)
+            closest = min(pairs, key=lambda ab: levenshtein(*ab))
+            safe = max(0, (ml - 1) // 2)
+            out[f"{rid}:{end}"] = {"n": len(seqs), "min_edit": ml,
+                                   "safe_indels": safe}
+            if run.platform != "nanopore" or safe >= (require or 1):
+                continue
+            speak = diag.error if require is not None else diag.warn
+            if True:
+                speak(
+                    f"run '{rid}' {end}: the {len(seqs)} indices used are "
+                    f"only {ml} edits apart at their closest "
+                    f"({closest[0]} vs {closest[1]}), so no indel can be "
+                    "corrected - on a platform whose commonest error is "
+                    "deletions.\n"
+                    "    Hamming distance is not the measure that binds "
+                    "here: one deletion shifts every base after it, so a "
+                    "pair well separated by substitution can be two edits "
+                    "apart.\n"
+                    "    The tandem duplication does not compensate - its "
+                    "copies are the same sequence in the same context and "
+                    "fail together.\n"
+                    "    Use bin/design_indices.py to pick a subset at "
+                    "minimum edit distance 3 or more; it is often a "
+                    "matter of dropping one or two primers rather than "
+                    "ordering new ones. This run continues - the reads "
+                    "are already sequenced and the indices cannot be "
+                    "changed now. Pass --min-index-edit 3 to make it a "
+                    "hard requirement when designing a new plate."
+                )
+    return out
 
 
 def barcode_strategy_report(
@@ -2410,6 +2529,13 @@ def main(argv: list[str] | None = None) -> int:
         "empty string to skip the cross-check",
     )
     ap.add_argument(
+        "--min-index-edit", type=int, default=None,
+        help="require the indices used by each nanopore run to be at least "
+             "this far apart in EDIT distance, and fail if they are not. "
+             "Unset, the shortfall is reported as a warning - an existing "
+             "plate cannot be changed, so refusing to analyse reads already "
+             "on disk helps nobody. 3 permits one indel to be corrected.")
+    ap.add_argument(
         "--path-base",
         help="directory that relative paths in the run manifest resolve "
              "against. Defaults to the manifest's own directory, which is "
@@ -2505,9 +2631,12 @@ def main(argv: list[str] | None = None) -> int:
             diag.error("--index-map is required unless validating the reference alone")
         else:
             im = parse_index_map(args.index_map, diag)
-            idx_rep = index_set_report(im, diag)
+            idx_rep = index_set_report(
+                im, diag, {r.platform for r in runs.values()})
             barcode_strategy = barcode_strategy_report(idx_rep, runs, diag)
         samples = parse_samplesheet(args.samplesheet, runs, im, diag)
+        used_idx = used_index_geometry(
+                samples, runs, diag, args.min_index_edit)
         plates = plate_report(samples, im, diag)
         resolve_illumina_files(samples, runs, diag)
         write_file_resolution(samples, args.outdir)

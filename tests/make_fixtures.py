@@ -232,6 +232,32 @@ def load_index_map(path: str) -> tuple[list[tuple[str, int]], list[tuple[str, st
     return i7, i5
 
 
+def _levenshtein(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _edit_safe(pool: list, min_edit: int = 3) -> list:
+    """Drop indices that sit within min_edit of one already kept.
+
+    Order-preserving, so the plate layout that the rest of the fixture
+    builds on is unchanged apart from the omissions.
+    """
+    kept: list = []
+    for item in pool:
+        if all(_levenshtein(item[0], k[0]) >= min_edit for k in kept):
+            kept.append(item)
+    return kept
+
+
 def build_samplesheet(
     i7: list[tuple[str, int]],
     i5: list[tuple[str, str]],
@@ -240,7 +266,13 @@ def build_samplesheet(
     run_id: str,
     platform: str,
 ) -> list[dict]:
-    """Fill a 96-well quadrant: odd rows (A,C,E,...) and odd columns."""
+    """Fill a 96-well quadrant: odd rows (A,C,E,...) and odd columns.
+
+    The full pool is used, including the one pair two edits apart
+    (N721 vs N723). That is the real plate design, and a fixture that
+    quietly used a cleaner set than the bench does would hide the
+    warning pre-flight is supposed to raise.
+    """
     rows_q = [r for r in i5 if (ord(r[1]) - ord("A") + 1) % 2 == 1]
     cols_q = [c for c in i7 if c[1] % 2 == 1]
 

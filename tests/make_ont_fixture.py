@@ -39,6 +39,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 
+import importlib.util as _il      # noqa: E402
 import make_fixtures as mf          # noqa: E402
 import demux_ont as dx              # noqa: E402
 import simulate as sim              # noqa: E402
@@ -79,6 +80,7 @@ def main() -> int:
     rng = random.Random(args.seed)
     ref = mf.build_reference(rng)
     i7, i5 = mf.load_index_map(INDEX_MAP)
+
     samples = mf.build_samplesheet(i7, i5, args.n_samples, args.leave_unused,
                                    "ONT01", "nanopore")
 
