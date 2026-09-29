@@ -13,6 +13,7 @@ process PREFLIGHT {
     path assay
     path primers
     path mocks
+    path metadata
 
     output:
     path "preflight"                          , emit: dir
@@ -23,6 +24,7 @@ process PREFLIGHT {
     path "preflight/reference.insert.fasta"   , emit: insert_fasta, optional: true
     path "preflight/tag_report.tsv"           , emit: tag_report
     path "preflight/tag_report.txt"           , emit: tag_report_txt
+    path "preflight/runs_resolved.tsv" , emit: runs_resolved
     path "preflight/file_resolution.tsv"      , emit: file_resolution
     path "preflight/preflight_summary.json"   , emit: summary
     path "preflight/validation.log"           , emit: log
@@ -32,7 +34,12 @@ process PREFLIGHT {
     // The run manifest is optional at the interface level: --input_dir builds
     // a single-row one. Nextflow needs a placeholder file either way, so an
     // absent manifest arrives as the empty file assets/NO_FILE.
-    def manifest_arg = runs.name != 'NO_FILE'
+    // Nextflow stages the manifest, so by the time pre-flight reads it
+    // the file is in a scratch directory and any relative reads path in
+    // it would resolve there. The original directory is known here and
+    // nowhere else, so it is passed explicitly.
+    def base_arg = params.runs ? "--path-base ${file(params.runs).parent}" : ''
+    def manifest_arg = !runs.name.startsWith('NO_')
         ? "--runs ${runs}"
         : "--input-dir ${params.input_dir} --run-id ${params.run_id} " +
           "--platform ${params.platform}"
@@ -42,8 +49,9 @@ process PREFLIGHT {
     def tag_edits = params.tag_max_edits != null ? "--tag-max-edits ${params.tag_max_edits}" : ''
     def exp_tag   = params.expected_tag  != null ? "--expected-tag '${params.expected_tag}'" : ''
     def reps      = params.barcode_repeats != null ? "--barcode-repeats ${params.barcode_repeats}" : ''
-    def prim      = primers.name != 'NO_FILE' ? "--primers ${primers}" : ''
-    def mock_arg  = mocks.name   != 'NO_FILE' ? "--mocks ${mocks}" : ''
+    def prim      = !primers.name.startsWith('NO_') ? "--primers ${primers}" : ''
+    def mock_arg  = !mocks.name.startsWith('NO_') ? "--mocks ${mocks}" : ''
+    def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null
         ? "--illumina-read-length ${params.illumina_read_length}" : ''
     """
@@ -53,7 +61,7 @@ process PREFLIGHT {
         ${manifest_arg} \\
         --index-map ${index_map} \\
         --assay ${assay} \\
-        ${prim} ${mock_arg} ${read_len} \\
+        ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
         ${tag_edits} ${exp_tag} ${reps} \\
         --outdir preflight
 
@@ -64,12 +72,49 @@ process PREFLIGHT {
     """
 
     stub:
+    // The stub RUNS PRE-FLIGHT FOR REAL, and that is deliberate.
+    //
+    // A stub does not read its inputs, so a hardcoded file_resolution
+    // emits whatever rows were written into this file - which meant
+    // `-profile test_ont -stub-run` produced an Illumina sample called
+    // STUB_SAMPLE and exercised the Illumina branch, whichever profile
+    // was asked for. A stub that cannot reflect its own inputs cannot
+    // test a workflow whose routing IS its inputs: the platform column
+    // decides which branch runs, so a stub that invents the platform
+    // column decides it too.
+    //
+    // There is also nothing here worth stubbing. `-stub-run` exists to
+    // skip expensive work; pre-flight is standard-library Python that
+    // touches no reads and finishes in about a second. It is the one
+    // process in this pipeline whose real execution is cheaper than a
+    // convincing fake of it.
+    def base_arg = params.runs ? "--path-base ${file(params.runs).parent}" : ''
+    def manifest_arg = !runs.name.startsWith('NO_')
+        ? "--runs ${runs}"
+        : "--input-dir ${params.input_dir} --run-id ${params.run_id} " +
+          "--platform ${params.platform}"
+    def tag_edits = params.tag_max_edits != null ? "--tag-max-edits ${params.tag_max_edits}" : ''
+    def exp_tag   = params.expected_tag  != null ? "--expected-tag '${params.expected_tag}'" : ''
+    def reps      = params.barcode_repeats != null ? "--barcode-repeats ${params.barcode_repeats}" : ''
+    def prim      = !primers.name.startsWith('NO_') ? "--primers ${primers}" : ''
+    def mock_arg  = !mocks.name.startsWith('NO_') ? "--mocks ${mocks}" : ''
+    def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
+    def read_len  = params.illumina_read_length != null
+        ? "--illumina-read-length ${params.illumina_read_length}" : ''
     """
-    mkdir -p preflight
-    touch preflight/reference.fasta preflight/tag_report.tsv preflight/tag_report.txt
-    touch preflight/file_resolution.tsv preflight/validation.log
-    touch preflight/reference.insert.fasta
-    echo '{}' > preflight/preflight_summary.json
-    touch versions.yml
+    preflight.py \\
+        --reference ${reference} \\
+        --samplesheet ${samplesheet} \\
+        ${manifest_arg} \\
+        --index-map ${index_map} \\
+        --assay ${assay} \\
+        ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
+        ${tag_edits} ${exp_tag} ${reps} \\
+        --outdir preflight
+
+    cat <<-END_VERSIONS > versions.yml
+    "${task.process}":
+        python: \$(python3 --version | sed 's/Python //')
+    END_VERSIONS
     """
 }

@@ -1301,6 +1301,121 @@ def check_tag_visibility(
 MOCK_UNITS = {"copies", "fraction", "ng"}
 
 
+# --------------------------------------------------------------------------
+# subject metadata
+# --------------------------------------------------------------------------
+
+
+# Fields that must never appear. The decision on this project was country
+# and population only, with any finer location masked upstream - so a
+# coordinate arriving here means the masking did not happen, and the
+# pipeline should say so loudly rather than carry it into every output.
+FORBIDDEN_METADATA = {
+    "latitude", "longitude", "lat", "lon", "lng", "gps", "coordinates",
+    "coord", "easting", "northing", "postcode", "zip", "address",
+    "household_gps", "cluster_gps",
+}
+
+
+def parse_metadata(path: str, diag: Diagnostics) -> dict[str, dict]:
+    """Subject metadata, keyed on subject_id.
+
+    Kept in its own file rather than folded into the samplesheet, for
+    reasons that are about lifecycle rather than tidiness. A samplesheet
+    row is a LIBRARY and is frozen at prep; a metadata row is a SUBJECT
+    and accumulates corrections for years. One subject is several
+    libraries - replicates, both platforms, re-runs - so merging them
+    would duplicate every field and make a correction an N-row edit.
+
+    Separation is also a privacy control. The samplesheet travels: to the
+    sequencing centre, into the run folder, into every results directory.
+    Metadata should not ride along by default, and the pipeline runs
+    perfectly well without it.
+    """
+    rows = read_table(path, diag, "metadata")
+    if not rows:
+        return {}
+    if not require_columns(rows, {"subject_id"}, diag, "metadata"):
+        return {}
+
+    banned = sorted(FORBIDDEN_METADATA & {c.lower() for c in rows[0]})
+    if banned:
+        diag.error(
+            "metadata: column(s) " + ", ".join(banned) + " must not be here. "
+            "Location is country and population only; anything finer is "
+            "masked before it reaches the pipeline, and a coordinate in "
+            "this file means that did not happen"
+        )
+
+    out: dict[str, dict] = {}
+    for r in rows:
+        sub = (r.get("subject_id") or "").strip()
+        if not sub:
+            diag.error("metadata: a row has an empty subject_id")
+            continue
+        if sub in out:
+            diag.error(
+                f"metadata: subject_id '{sub}' appears more than once. One "
+                "row per subject - if these are different samplings, they "
+                "are different subjects or belong in the samplesheet"
+            )
+            continue
+        out[sub] = {k: v for k, v in r.items() if k != "subject_id"}
+    return out
+
+
+def check_metadata_join(
+    samples: list, meta: dict[str, dict], diag: Diagnostics
+) -> dict:
+    """Does every library have a subject, and every subject a library?
+
+    A join that silently drops rows is the failure worth catching here.
+    Missing metadata is a NOTE, not an error: the pipeline is designed to
+    run without it, and a run mid-study will legitimately have subjects
+    whose records have not arrived. Metadata matching nothing is a
+    warning, because it usually means an identifier convention changed on
+    one side and not the other.
+    """
+    subjects = {s.subject_id for s in samples if s.subject_id}
+    libraries_per_subject: dict[str, int] = defaultdict(int)
+    for s in samples:
+        libraries_per_subject[s.subject_id] += 1
+
+    if not meta:
+        return {"metadata_supplied": False, "subjects": len(subjects)}
+
+    matched = sorted(subjects & set(meta))
+    no_meta = sorted(subjects - set(meta))
+    orphan = sorted(set(meta) - subjects)
+
+    if no_meta:
+        diag.info(
+            f"{len(no_meta)} of {len(subjects)} subject(s) have no metadata "
+            f"row: {', '.join(no_meta[:5])}"
+            + (" ..." if len(no_meta) > 5 else "")
+            + ". The run proceeds; anything grouped by those fields will "
+            "exclude them"
+        )
+    if orphan:
+        diag.warn(
+            f"{len(orphan)} metadata row(s) match no subject in this "
+            f"samplesheet: {', '.join(orphan[:5])}"
+            + (" ..." if len(orphan) > 5 else "")
+            + ". Usually an identifier convention that changed on one side"
+        )
+
+    repeats = {k: v for k, v in libraries_per_subject.items() if v > 1}
+    return {
+        "metadata_supplied": True,
+        "subjects": len(subjects),
+        "matched": len(matched),
+        "subjects_without_metadata": no_meta,
+        "metadata_without_subject": orphan,
+        "fields": sorted(next(iter(meta.values())).keys()) if meta else [],
+        "subjects_with_multiple_libraries": repeats,
+    }
+
+
 def parse_mocks(path: str, diag: Diagnostics) -> dict[str, list[dict]]:
     rows = read_table(path, diag, "mocks")
     if not require_columns(
@@ -1766,6 +1881,35 @@ class Run:
     lots: dict[str, str] = field(default_factory=dict)
 
 
+def resolve_against(manifest: str, value: str, base: str = "") -> str:
+    """Make a manifest's relative path mean what a reader expects.
+
+    A `path` written in runs.tsv is naturally read as "relative to this
+    file". Left as-is it is instead relative to whatever directory the
+    tool happened to be started in - the launch directory under the
+    shell drivers, a `work/ab/cdef...` scratch directory under Nextflow.
+    The same manifest would then work one way and fail the other, for
+    reasons invisible in the file.
+
+    `base` overrides that, and exists because Nextflow STAGES the
+    manifest: by the time this runs, the file sits in a scratch
+    directory and its own location says nothing about where the reads
+    are. The workflow knows the original directory and passes it in.
+
+    Absolute paths are untouched, and are the safest thing to write.
+    """
+    if not value or os.path.isabs(value):
+        return value
+    root = base or os.path.dirname(os.path.abspath(manifest))
+    return os.path.normpath(os.path.join(root, value))
+
+
+# Set from --path-base before any manifest is parsed. A module-level
+# value rather than a threaded argument because it is a property of the
+# invocation, not of any one file.
+PATH_BASE = ""
+
+
 def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
     rows = read_table(path, diag, "run manifest")
     if not require_columns(rows, {"run_id", "platform", "path"}, diag, "run manifest"):
@@ -1800,6 +1944,7 @@ def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
             if reps_i < 1:
                 diag.error(f"run manifest '{rid}': barcode_repeats must be >= 1")
 
+        row["path"] = resolve_against(path, row["path"], PATH_BASE)
         if not os.path.exists(row["path"]):
             diag.error(f"run manifest '{rid}': path does not exist: {row['path']}")
 
@@ -1843,6 +1988,12 @@ class Sample:
     index_i7: str
     index_i5: str
     sample_type: str
+    # Who the library came FROM, as opposed to which library it is. A
+    # subject sequenced twice, or on both platforms, is several rows here
+    # and one row in the metadata. Declared rather than guessed: pairing
+    # replicates by stripping a suffix with a regex works until a sample
+    # id does not follow the convention, and then it fails silently.
+    subject_id: str = ""
     file_prefix: str = ""
     well: str | None = None
     plate_row: str | None = None
@@ -1867,6 +2018,9 @@ def parse_samplesheet(
             index_i7=row["index_i7"].upper(),
             index_i5=row["index_i5"].upper(),
             sample_type=row["sample_type"].lower(),
+            # Defaults to the library id, so a run with one library per
+            # subject needs no new column at all.
+            subject_id=(row.get("subject_id") or row["sample_id"]).strip(),
             file_prefix=row.get("file_prefix", ""),
         )
         if not s.sample_id:
@@ -2128,19 +2282,50 @@ def resolve_illumina_files(
                     )
 
 
+def write_runs_resolved(runs: dict, outdir: str) -> None:
+    """The run manifest as pre-flight understands it, paths resolved.
+
+    Pre-flight already turns every relative `path` into an absolute one
+    and checks it exists; it simply never wrote the result down, so the
+    nanopore branch of the workflow re-read the raw manifest and did
+    the resolution again in Groovy. It got it wrong twice - once
+    resolving against the launch directory, once with a check that
+    could not fire because Nextflow's file() had already made the path
+    absolute.
+
+    Writing it here removes the second implementation rather than
+    fixing it. It also restores the rule main.nf states and the
+    nanopore branch was breaking: a path pre-flight blessed is the only
+    path the rest of the pipeline sees.
+    """
+    path = os.path.join(outdir, "runs_resolved.tsv")
+    cols = ["run_id", "platform", "path", "barcode_repeats", "dna_input_ng"]
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(cols)
+        for rid in sorted(runs):
+            r = runs[rid]
+            w.writerow([r.run_id, r.platform, os.path.abspath(r.path),
+                        r.barcode_repeats, r.dna_input_ng])
+
+
 def write_file_resolution(samples: list[Sample], outdir: str) -> None:
     path = os.path.join(outdir, "file_resolution.tsv")
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(
-            ["run_id", "sample_id", "sanitised_id", "platform", "well",
-             "plate_row", "plate_col", "sample_type", "n_files", "files"]
+            ["run_id", "sample_id", "subject_id", "sanitised_id", "platform",
+             "well", "plate_row", "plate_col", "sample_type", "n_files",
+             "files"]
         )
         for s in samples:
             w.writerow(
                 [
                     s.run_id,
                     s.sample_id,
+                    # Carried here so every later stage can join metadata
+                    # without re-deriving a subject from a sample id.
+                    s.subject_id,
                     sanitise_id(s.sample_id),
                     s.platform,
                     s.well or "",
@@ -2224,8 +2409,25 @@ def main(argv: list[str] | None = None) -> int:
         help="override the assay config's control_tag.sequence; pass an "
         "empty string to skip the cross-check",
     )
+    ap.add_argument(
+        "--path-base",
+        help="directory that relative paths in the run manifest resolve "
+             "against. Defaults to the manifest's own directory, which is "
+             "what a reader expects - but Nextflow stages the manifest into "
+             "a scratch directory, so the workflow passes the real one here",
+    )
+    ap.add_argument(
+        "--metadata",
+        help="optional subject metadata TSV, keyed on subject_id. Kept "
+             "separate from the samplesheet deliberately: a samplesheet "
+             "row is a library and is frozen at prep, a metadata row is a "
+             "subject and keeps changing, and one subject is several "
+             "libraries. The join is validated here rather than assumed",
+    )
     ap.add_argument("--outdir", default="preflight")
     args = ap.parse_args(argv)
+    global PATH_BASE
+    PATH_BASE = os.path.abspath(args.path_base) if args.path_base else ""
 
     os.makedirs(args.outdir, exist_ok=True)
     diag = Diagnostics()
@@ -2309,6 +2511,7 @@ def main(argv: list[str] | None = None) -> int:
         plates = plate_report(samples, im, diag)
         resolve_illumina_files(samples, runs, diag)
         write_file_resolution(samples, args.outdir)
+    write_runs_resolved(runs, args.outdir)
 
     # -- mock communities -------------------------------------------------
     # Checked against the panel and the samplesheet, so a design that
@@ -2320,11 +2523,22 @@ def main(argv: list[str] | None = None) -> int:
         if mocks:
             mock_report = check_mocks(mocks, entries, samples, diag)
 
+    # -- subject metadata -------------------------------------------------
+    # Optional, and joined rather than merged. Validating the join here
+    # means a mismatched identifier convention is found while it is still
+    # a spreadsheet problem, not after an analysis has quietly grouped
+    # half the plate into "unknown".
+    meta_report: dict = {"metadata_supplied": False}
+    if not reference_only:
+        meta = parse_metadata(args.metadata, diag) if args.metadata else {}
+        meta_report = check_metadata_join(samples, meta, diag)
+
     # -- machine-readable summary ----------------------------------------
     summary = {
         "schema_version": 1,
         "mode": "reference_only" if reference_only else "full",
         "mocks": mock_report,
+        "metadata": meta_report,
         "assay": {
             "name": assay.name,
             "version": assay.version,

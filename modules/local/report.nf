@@ -15,7 +15,7 @@ process REPORT {
     path "versions.yml"         , emit: versions
 
     script:
-    def cmp = comparison.name != 'NO_FILE' ? "--comparison ${comparison}" : ''
+    def cmp = !comparison.name.startsWith('NO_') ? "--comparison ${comparison}" : ''
     """
     report.py \\
         --synthesis-dir synthesis \\

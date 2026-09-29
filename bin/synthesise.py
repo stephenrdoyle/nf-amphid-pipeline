@@ -653,6 +653,82 @@ def plate_qc(
 # --------------------------------------------------------------------------
 
 
+def check_cohort_complete(samples: dict, preflight_dir: str, run_id: str,
+                          demux_summary: str, allow_missing: bool) -> list[str]:
+    """Every sample the run declared must reach synthesis.
+
+    The one failure mode that produces a confident, wrong report rather
+    than an error: some samples never get assigned, and synthesis
+    happily summarises the ones that did. It happened - a Nextflow
+    fan-out collapsed eight wells to one, and nothing downstream
+    objected, because nothing downstream knew how many wells there were
+    meant to be.
+
+    Synthesis has always known. file_resolution.tsv is the run's
+    declared cohort and load_counts() is what turned up; the two were
+    simply never compared. They are now, and a shortfall is fatal.
+
+    The one legitimate shortfall is a nanopore well that received no
+    reads at all - an empty well demultiplexes to nothing and so has no
+    FASTQ to assign. That is distinguishable, because the
+    demultiplexing summary counts reads per sample: a sample it never
+    saw is empty, a sample it wrote reads for and that then vanished is
+    a bug. Only the second is fatal.
+    """
+    geom = os.path.join(preflight_dir or "", "file_resolution.tsv")
+    if not os.path.exists(geom):
+        return []
+
+    declared = [r for r in read_table(geom)
+                if not run_id or r.get("run_id", "") == run_id]
+    if not declared:
+        return []
+
+    missing = [r for r in declared if r.get("sample_id", "") not in samples]
+    if not missing:
+        return []
+
+    # Which of the missing ones the demultiplexer actually wrote reads
+    # for. Keys may be the sample id or the filename-safe version of
+    # it, so both are accepted.
+    seen: dict[str, int] = {}
+    if demux_summary and os.path.exists(demux_summary):
+        try:
+            with open(demux_summary, encoding="utf-8") as fh:
+                seen = json.load(fh).get("per_sample", {}) or {}
+        except (OSError, ValueError):
+            seen = {}
+
+    def had_reads(row: dict) -> bool:
+        for key in (row.get("sample_id", ""), row.get("sanitised_id", "")):
+            if key and seen.get(key, 0) > 0:
+                return True
+        return False
+
+    # With no demultiplexing summary there is nothing to excuse a gap:
+    # on Illumina pre-flight already proved every file exists, so a
+    # missing sample can only be a lost task.
+    lost = [r["sample_id"] for r in missing if not seen or had_reads(r)]
+    empty = [r["sample_id"] for r in missing if seen and not had_reads(r)]
+
+    if lost and not allow_missing:
+        raise SystemExit(
+            f"cohort incomplete: {len(declared)} samples declared for run "
+            f"'{run_id or 'all'}', {len(samples)} reached synthesis.\n"
+            f"  lost: {', '.join(sorted(lost)[:12])}"
+            f"{' ...' if len(lost) > 12 else ''}\n"
+            "These samples have reads but no *.counts.tsv, so assignment "
+            "never ran for them.\n"
+            "On Nextflow this is usually a fan-out capped by a single-item "
+            "queue channel - see tests/test_nextflow.py::"
+            "test_fanout_is_not_capped.\n"
+            "Refusing to report on a partial cohort. Pass --allow-missing "
+            "to override, knowing the run QC below will be computed from "
+            "an incomplete plate."
+        )
+    return sorted(empty) + (sorted(lost) if allow_missing else [])
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--assign-dir", required=True)
@@ -677,6 +753,22 @@ def main(argv=None) -> int:
     ap.add_argument("--slope-tolerance", type=float, default=0.25)
     ap.add_argument("--permutations", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260919)
+    ap.add_argument(
+        "--controls-as-targets", action="store_true",
+        help="give the tagged control plasmids detection calls, as if they "
+             "were panel targets. For a run whose subject IS the plasmids - "
+             "a titration or a mock - they are the result, not "
+             "contamination. This changes CALLING only: the proportions "
+             "below are emitted either way, because what share of a well is "
+             "plasmid is worth knowing whichever kind of run it is",
+    )
+    ap.add_argument("--plasmid-warn", type=float, default=0.05,
+                    help="warn when this fraction of a well's amplicon reads "
+                         "come from control plasmid")
+    ap.add_argument("--allow-missing", action="store_true",
+                    help="report even though samples are missing from the "
+                         "cohort. Off by default: a partial plate gives a "
+                         "confident wrong answer rather than an error.")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -685,10 +777,20 @@ def main(argv=None) -> int:
     quants = [r for r in refs if r.get("type") == "quant"]
     targets = [r for r in refs if r.get("type") == "target"]
     controls = [r for r in refs if r.get("type") == "control"]
+    # Calling is what the flag changes, and only that. A plasmid in a
+    # titration is the measurement; the same plasmid in a faecal sample is
+    # contamination. Nothing else about the arithmetic differs, so nothing
+    # else is made conditional on it.
+    called = targets + controls if args.controls_as_targets else targets
 
     samples = load_counts(args.assign_dir)
     if not samples:
         raise SystemExit(f"no *.counts.tsv found in {args.assign_dir}")
+
+    # Before anything is computed: is this the whole plate?
+    empty_wells = check_cohort_complete(
+        samples, args.preflight_dir, args.run_id,
+        args.demux_summary, args.allow_missing)
 
     for r in read_table(args.samplesheet):
         s = samples.get(r.get("sample_id", ""))
@@ -724,14 +826,31 @@ def main(argv=None) -> int:
     seq_ids = [r["seq_id"] for r in targets + controls]
     lods = detection_limits(samples, seq_ids, args.absolute_floor)
 
+    # -- composition, always both denominators ----------------------------
+    # Two questions, two denominators, and a switch must not silently
+    # decide which one a column means:
+    #   within a group - which target, or which plasmid, and in what ratio
+    #   plasmid share  - how much of this well is plasmid at all
+    # The second is the contamination measure and stays meaningful even
+    # when the plasmids are the experiment.
+    target_ids = [t["seq_id"] for t in targets]
+    control_ids = [c["seq_id"] for c in controls]
+    group_total, plasmid_share = {}, {}
+    for sid, s_ in samples.items():
+        tsum = sum(s_.counts.get(i, 0) for i in target_ids)
+        csum = sum(s_.counts.get(i, 0) for i in control_ids)
+        group_total[sid] = {"target": tsum, "control": csum}
+        plasmid_share[sid] = (csum / (tsum + csum)) if (tsum + csum) else None
+
     # -- calls ------------------------------------------------------------
     rows = []
     summary_calls: Counter = Counter()
     for sid in sorted(samples):
         s = samples[sid]
         cal = cals[sid]
-        for t in targets:
+        for t in called:
             tid = t["seq_id"]
+            kind = t.get("type") or "target"
             n = s.counts.get(tid, 0)
             limit, basis = limit_for(tid, s, lods)
 
@@ -768,11 +887,22 @@ def main(argv=None) -> int:
                 "sample_type": s.sample_type,
                 "well": well_of(s.plate_row, s.plate_col),
                 "seq_id": tid,
+                "reference_type": kind,
                 "locus": t.get("locus", ""),
                 "purpose": t.get("purpose") or SPECIATION,
                 "taxon": t.get("taxon") or tid,
                 "reads": n,
                 "depth": s.depth,
+                # Proportion within this reference's own group, so a
+                # plasmid proportion is never diluted by target reads and
+                # the reverse.
+                "fraction_of_group": (
+                    "" if not group_total[sid].get(kind)
+                    else f"{n / group_total[sid][kind]:.4f}"),
+                # And the contamination number, identical on every row of
+                # a sample: what share of its amplicons are plasmid.
+                "plasmid_share": ("" if plasmid_share[sid] is None
+                                  else f"{plasmid_share[sid]:.4f}"),
                 "detection_limit": limit,
                 "call": call,
                 "internal_control": cal.state,
@@ -841,6 +971,31 @@ def main(argv=None) -> int:
     funnel = read_funnel(samples, prep, demux, fate_totals, split)
 
     # -- QC ---------------------------------------------------------------
+    flagged = sorted(
+        ({"sample_id": sid,
+          "well": well_of(samples[sid].plate_row, samples[sid].plate_col),
+          "sample_type": samples[sid].sample_type,
+          "plasmid_share": round(v, 4)}
+         for sid, v in plasmid_share.items()
+         if v is not None and v > args.plasmid_warn),
+        key=lambda d: -d["plasmid_share"])
+    all_t = sum(g["target"] for g in group_total.values())
+    all_c = sum(g["control"] for g in group_total.values())
+    plasmid_qc = {
+        "controls_called_as_targets": args.controls_as_targets,
+        "warn_above": args.plasmid_warn,
+        "run_plasmid_share": (round(all_c / (all_t + all_c), 4)
+                              if (all_t + all_c) else None),
+        "n_wells_above_threshold": len(flagged),
+        "wells_above_threshold": flagged[:20],
+        "note": (
+            "Share of a well's panel amplicons coming from tagged control "
+            "plasmid. Reported whether or not the plasmids are being "
+            "called as targets, because the two are different questions: "
+            "one is what the plasmids show, the other is how much plasmid "
+            "is there at all."
+        ),
+    }
     taxa_for_qc = [t["seq_id"] for t in targets][:6]
     geometry = plate_qc(samples, taxa_for_qc, rng, args.permutations)
     depths = sorted(s.depth for s in samples.values())
@@ -849,6 +1004,12 @@ def main(argv=None) -> int:
     qc = {
         "run_id": args.run_id,
         "n_samples": len(samples),
+        # Declared minus reached. Empty nanopore wells are legitimate and
+        # named here rather than left as a silent difference between the
+        # samplesheet and the report; anything else has already been
+        # fatal by this point unless --allow-missing was given.
+        "samples_absent": empty_wells,
+        "cohort_complete": not empty_wells,
         "call_summary": dict(summary_calls),
         "call_meaning": CALL_MEANING,
         "run_was_spiked": spiked_run,
@@ -905,6 +1066,22 @@ def main(argv=None) -> int:
                 if any(f["depth"] for f in fate_rows) else None
             ),
         },
+        # What produced the reads, carried up from whichever stage still
+        # had the original headers. Recorded because a basecalling model
+        # changes the error profile, and therefore barcode recovery and
+        # what reaches each sample: two runs basecalled differently can
+        # differ in composition for reasons that are not biological, and
+        # nothing else in these outputs would show it.
+        "basecalling": (
+            (split or {}).get("basecalling")
+            or (demux or {}).get("basecalling")
+            or {}
+        ),
+        # Plasmid contamination, reported whatever the flag says. A well
+        # whose amplicons are largely plasmid is suspect even on a run
+        # where the plasmids ARE the subject: it means something carried
+        # across, not that the titration worked.
+        "plasmid_contamination": plasmid_qc,
         "plate_geometry": geometry,
         "plate_geometry_note": (
             "Wells hold unrelated samples, so position should explain "
