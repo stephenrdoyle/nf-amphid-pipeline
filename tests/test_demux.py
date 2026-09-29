@@ -859,7 +859,11 @@ def test_parallel_matches_serial() -> None:
 
         sa = json.load(open(os.path.join(outs["one"], "demux_summary.json")))
         sb = json.load(open(os.path.join(outs["many"], "demux_summary.json")))
-        keys = [k for k in sa if k not in ("input_files", "settings")]
+        # parts_recomputed counts what THIS invocation did, not what the
+        # data contains, so it legitimately differs between a one-file run
+        # and a sharded one. Everything that describes the reads must match.
+        keys = [k for k in sa
+                if k not in ("input_files", "settings", "parts_recomputed")]
         bad = [k for k in keys if sa[k] != sb.get(k)]
         check("every tally agrees, including the index matrix",
               not bad, f"differ: {bad}")
@@ -889,8 +893,326 @@ def test_parallel_matches_serial() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_end_reasons_discriminate() -> None:
+    """The per-end reasons must tell chemistry from matching.
+
+    A run that comes back half single-ended has two completely different
+    possible causes with the same symptom in the tiers: either the
+    molecule never carried that index (PCR2 did not add it, and no
+    tolerance will recover it), or the index is present and the matcher
+    is rejecting it (a parameter away from fixed). The tier says only
+    that an end failed.
+
+    So this checks the map can actually separate those two, on reads
+    built to fail each way. A breakdown that labelled both the same
+    would sum correctly, look plausible, and be useless - which is the
+    failure mode worth testing for here.
+    """
+    print("\nper-end failure reasons")
+    cfg = dx.load_assay(ASSAY)
+    i7map, i5map = mf.load_index_map(INDEX_MAP)
+    i5_seq = i5map[0][0]
+    i7_seq = i7map[0][0]
+    amp = "ACGT" * 60
+    reps = 2
+    whole = sim.build_molecule(amp, i7_seq, i5_seq, reps, cfg)
+
+    i5_set = dx.BarcodeSet({i5_seq: "S1"}, len(i5_seq), 1)
+    i7_set = dx.BarcodeSet({i7_seq: "N1"}, len(i7_seq), 1)
+    pairs = {(i5_seq, i7_seq): "SAMP"}
+
+    def call(seq):
+        return dx.assign_read("r", seq, cfg, i5_set, i7_set, pairs,
+                              reps, 200, False)
+
+    # 1. intact: both ends read
+    c = call(whole)
+    check("an intact molecule reports ok at both ends",
+          c.i5_reason.startswith("ok") and c.i7_reason.startswith("ok"),
+          f"{c.i5_reason}/{c.i7_reason}")
+
+    # 2. the i7 end removed entirely - the molecule never carried it
+    c = call(whole[:-60])
+    check("a molecule missing its i7 end says anchor_not_found",
+          c.i7_reason == "anchor_not_found", c.i7_reason)
+    check("and still reports the i5 end as read",
+          c.i5_reason.startswith("ok"), c.i5_reason)
+
+    # 3. the index present but not one we declared - a matching failure,
+    #    NOT a missing end. This is the distinction that matters.
+    other = sim.build_molecule(amp, "TTTTTTTT", i5_seq, reps, cfg)
+    c = call(other)
+    check("an undeclared i7 index says no_copy_matched, not anchor_not_found",
+          c.i7_reason == "no_copy_matched", c.i7_reason)
+
+    # 4. the two reasons must be different strings, or the map cannot
+    #    distinguish the two causes at all.
+    check("the two causes carry different labels",
+          "anchor_not_found" != "no_copy_matched")
+
+    # 5. every reason emitted must be documented.
+    seen = {c.i5_reason, c.i7_reason}
+    check("every reason used is in END_REASON_MEANING",
+          seen <= set(dx.END_REASON_MEANING), str(seen))
+
+
+def test_stats_only() -> None:
+    """--stats-only must count identically and write nothing.
+
+    And, the part that actually matters: a stats-only part records
+    itself as finished having produced no FASTQ, so a later real run
+    MUST NOT resume onto it. If it did, the merge would find nothing,
+    the output would be empty, and the run would report success - the
+    same shape as the stale-parts bug that once blended two algorithm
+    versions in one results directory. The mode is therefore in the
+    part fingerprint, and this checks that it is.
+
+    It is not a speed feature. Measured on 51k reads the write is about
+    2% of this stage; the saving is ~8 GB of disk and not clobbering
+    reads you already have.
+    """
+    print("\nstats-only counting")
+    import contextlib
+    import glob as _glob
+    import io
+    tmp = tempfile.mkdtemp()
+    try:
+        build_and_demux(tmp, n_samples=8, reads=40)
+        src = os.path.join(tmp, "sim", "RUN01")
+
+        codes = {}
+
+        def run(outdir, extra=()):
+            with contextlib.redirect_stdout(io.StringIO()):
+                codes[outdir] = dx.main(["--reads", src, "--samplesheet",
+                         f"{tmp}/samplesheet.csv", "--run-id", "RUN01",
+                         "--assay", ASSAY, "--outdir", outdir] + list(extra))
+            with open(f"{outdir}/demux_summary.json", encoding="utf-8") as fh:
+                return json.load(fh)
+
+        full = run(f"{tmp}/full")
+        so = run(f"{tmp}/so", ["--stats-only"])
+
+        check("stats-only wrote no per-sample FASTQ",
+              not _glob.glob(f"{tmp}/so/reads/*.fastq.gz"),
+              str(_glob.glob(f"{tmp}/so/reads/*.fastq.gz")[:3]))
+        check("and the normal run did write them",
+              bool(_glob.glob(f"{tmp}/full/reads/*.fastq.gz")))
+
+        for key in ("by_tier", "i5_end_reasons", "i7_end_reasons",
+                    "per_sample", "total_reads", "assigned_reads"):
+            check(f"{key} is identical with and without writing",
+                  full[key] == so[key], f"{full[key]} vs {so[key]}")
+
+        # The exit code, because a mode that works but returns 1 is
+        # reported as a failed job by every scheduler - and the first
+        # version of this flag did exactly that, since the
+        # written-equals-assigned check fired on a run that wrote
+        # nothing on purpose.
+        check("stats-only exits zero", codes[f"{tmp}/so"] == 0,
+              str(codes[f"{tmp}/so"]))
+        check("and so does a normal run", codes[f"{tmp}/full"] == 0,
+              str(codes[f"{tmp}/full"]))
+
+        check("stats-only says so in the summary", so["stats_only"] is True)
+        check("and does not claim the write check passed",
+              so["reads_written_balanced"] is None,
+              repr(so["reads_written_balanced"]))
+        check("while a normal run does assert it",
+              full["reads_written_balanced"] is True)
+
+        # The safety property: a real run into a directory a stats-only
+        # run already touched must redo the work, not trust it.
+        mixed = f"{tmp}/mixed"
+        so2 = run(mixed, ["--stats-only"])
+        check("stats-only computed every part", so2["parts_recomputed"] > 0,
+              str(so2["parts_recomputed"]))
+        real = run(mixed)
+        check("a real run does NOT resume onto stats-only parts",
+              real["parts_recomputed"] == so2["parts_recomputed"],
+              f"recomputed {real['parts_recomputed']} of "
+              f"{so2['parts_recomputed']}")
+        check("and the reads are actually there afterwards",
+              bool(_glob.glob(f"{mixed}/reads/*.fastq.gz")))
+        check("with the write check now asserted",
+              real["reads_written_balanced"] is True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_barcode_diagnostic_discriminates() -> None:
+    """The diagnostic must tell a misplaced index from a miscalled one.
+
+    Its entire value is separating two causes of no_copy_matched that
+    look identical in the tiers and have opposite remedies: a window in
+    the wrong place (fixable by searching wider) versus bases that are
+    wrong (fixable, if at all, by tolerance). So it is checked against
+    failures injected on purpose, where the answer is known.
+
+    The first version got this wrong. Its indel probe padded the window
+    by +/-4, which is wide enough to stumble on a correctly-placed copy
+    the offset search had missed - so all 400 deliberately SHIFTED
+    reads came back as "indel distance 0" and would have been credited
+    to indel tolerance. The pad is now +/-1.
+    """
+    print("\nbarcode diagnostic discriminates the two causes")
+    import re
+    import subprocess
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg = dx.load_assay(ASSAY)
+        i7map, i5map = mf.load_index_map(INDEX_MAP)
+        i5s = [x[0] for x in i5map[:4]]
+        i7s = [x[0] for x in i7map[:4]]
+        amp = "ACGTTGCA" * 40
+        rc = dx.revcomp
+
+        def tail(i7):
+            return (rc(cfg["pcr1_overhang_rev"]) + i7 * 2
+                    + rc(cfg["p7_tail"]))
+
+        with open(f"{tmp}/samplesheet.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["run_id", "platform", "sample_id",
+                        "index_i7", "index_i5", "sample_type"])
+            for i in range(4):
+                w.writerow(["D1", "nanopore", f"S{i}", i7s[i], i5s[i],
+                            "unknown"])
+
+        # Both copies carrying the same deletion, and a 4bp positional
+        # shift. 4 is chosen because a shift that is a multiple of the
+        # index length lands on the OTHER copy and is silently
+        # rescued - which is what the tandem duplication is for, and
+        # why an injected shift of 5 did not fail at all.
+        gone = i5s[2][:4] + i5s[2][5:]
+        recs = []
+        for _ in range(100):
+            recs.append(("bothindel", cfg["p5_tail"] + gone + gone
+                         + cfg["pcr1_overhang_fwd"] + amp + tail(i7s[2])))
+        for _ in range(100):
+            recs.append(("shift4", cfg["p5_tail"] + i5s[2] * 2 + "GGGG"
+                         + cfg["pcr1_overhang_fwd"] + amp + tail(i7s[2])))
+        with gzip.open(f"{tmp}/reads.fastq.gz", "wt") as fh:
+            for i, (lab, seq) in enumerate(recs):
+                fh.write(f"@{lab}_{i}\n{seq}\n+\n{'I' * len(seq)}\n")
+
+        out = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "bin", "diagnose_barcodes.py"),
+             "--reads", f"{tmp}/reads.fastq.gz",
+             "--samplesheet", f"{tmp}/samplesheet.csv",
+             "--run-id", "D1", "--assay", ASSAY, "--limit", "200"],
+            capture_output=True, text=True, timeout=300).stdout
+
+        check("the diagnostic ran", "no_copy_matched" in out, out[-200:])
+        check("both injected classes failed to match",
+              "200 of 200 ends failed" in out, out[:200])
+
+        # The shifted half must be found OUTSIDE the slack, and the
+        # indel half must not be.
+        wide = re.search(r"wider offset search\s+(\d+)", out)
+        indel = re.search(r"1-2 indels WITH a margin rule\s+(\d+)", out)
+        check("the shifted reads are reported as mispositioned",
+              wide and int(wide.group(1)) == 100,
+              wide.group(1) if wide else "not reported")
+        check("the indel reads are reported as indel-recoverable",
+              indel and int(indel.group(1)) == 100,
+              indel.group(1) if indel else "not reported")
+        check("and the offset it found is the one injected",
+              "-4" in out and "OUTSIDE current slack" in out,
+              "offset not reported")
+
+        # A single-index set constrains nothing; saying otherwise once
+        # produced "49 substitutions safely correctable".
+        import importlib.util as _il
+        spec = _il.spec_from_file_location(
+            "dbc", os.path.join(ROOT, "bin", "diagnose_barcodes.py"))
+        dbc = _il.module_from_spec(spec)
+        spec.loader.exec_module(dbc)
+        g = dbc.set_geometry("i5", ["ACGTACGT"])
+        check("a one-index set reports no safe tolerance",
+              g["safe_sub"] is None and g["min_hamming"] is None, str(g))
+
+        # The landmark gap must recover the indel count that was put
+        # in. This is the measurement that replaces sweeping the slack:
+        # the index sits between two pieces of fixed sequence, so its
+        # length is readable off the molecule rather than assumed.
+        def gap(seq):
+            return dbc.landmark_gap(seq, cfg["p5_tail"],
+                                    cfg["i5_inner_anchor"], True, 2)
+
+        nominal = (cfg["p5_tail"] + i5s[0] * 2
+                   + cfg["pcr1_overhang_fwd"] + amp + tail(i7s[0]))
+        short = (cfg["p5_tail"] + (i5s[1] * 2)[:-2]
+                 + cfg["pcr1_overhang_fwd"] + amp + tail(i7s[1]))
+        longer = (cfg["p5_tail"] + i5s[2] * 2 + "TTT"
+                  + cfg["pcr1_overhang_fwd"] + amp + tail(i7s[2]))
+        span = 16
+        check("the gap reads the nominal span exactly",
+              gap(nominal) == span, str(gap(nominal)))
+        check("two deleted bases read as a gap two short",
+              gap(short) == span - 2, str(gap(short)))
+        check("three inserted bases read as a gap three long",
+              gap(longer) == span + 3, str(gap(longer)))
+        check("and a missing outer landmark returns None, not a guess",
+              gap(i5s[0] * 2 + cfg["pcr1_overhang_fwd"] + amp) is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_barcode_margin_rule() -> None:
+    """A barcode may be accepted on margin as well as on tolerance.
+
+    Tolerance is a property of the SET - k substitutions are safely
+    correctable only when every pair is more than 2k apart - so on a
+    set whose closest pair is 4 apart it caps at 1 however clean the
+    read is. Margin is a property of the READ: a window 2 from one
+    index and 5 from everything else is unambiguous regardless of how
+    tightly the set is packed, and accepting it introduces no
+    misassignment the geometry would otherwise have prevented.
+
+    Measured on the reference run, this recovers 5.0% of failed i5
+    ends and 18.2% of i7. The ambiguous remainder is still declined.
+    """
+    print("\nbarcode margin rule")
+    seqs = {"AAAACCCC", "AAAAGGGG", "TTTTCCCC", "TTTTGGGG"}
+    bs = dx.BarcodeSet.build(seqs, 1)
+    check("the set's own spacing caps tolerance at 1",
+          bs.max_mismatch == 1, str(bs.max_mismatch))
+
+    check("an exact match is still exact",
+          bs.match("AAAACCCC") == "AAAACCCC")
+    check("one substitution is taken on tolerance",
+          bs.match("AAAACCCA") == "AAAACCCC")
+    check("two substitutions ARE taken when the runner-up is far",
+          bs.match("AAAACCAA") == "AAAACCCC", str(bs.match("AAAACCAA")))
+    check("but a window equidistant from two is still declined",
+          bs.match("AAAAGGCC") is None, str(bs.match("AAAAGGCC")))
+    check("and a window far from everything is declined",
+          bs.match("GGGGGGGG") is None, str(bs.match("GGGGGGGG")))
+    check("a window of the wrong length is declined",
+          bs.match("AAAACCC") is None)
+
+    # The rule must be switchable off, or a run cannot be reproduced
+    # against the behaviour that preceded it.
+    off = dx.BarcodeSet.build(seqs, 1, margin=0)
+    check("margin 0 restores tolerance-only behaviour",
+          off.match("AAAACCAA") is None and off.match("AAAACCCA") == "AAAACCCC")
+
+    # And the distance ceiling must bind: a margin alone should not
+    # accept something arbitrarily far away just because nothing else
+    # is near it.
+    far = dx.BarcodeSet.build({"AAAACCCC", "TTTTGGGG"}, 1,
+                              margin=2, margin_max_dist=2)
+    check("the margin does not accept a distant window",
+          far.match("AAAAGGGG") is None, str(far.match("AAAAGGGG")))
+
+
 def main() -> int:
     test_parallel_matches_serial()
+    test_end_reasons_discriminate()
+    test_barcode_margin_rule()
+    test_stats_only()
+    test_barcode_diagnostic_discriminates()
     test_ligation_chimeras()
     test_find_anchor()
     test_index_matrix()

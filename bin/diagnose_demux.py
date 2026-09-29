@@ -58,6 +58,7 @@ from ampseqlib import (  # noqa: E402
     revcomp,
 )
 from demux_ont import BarcodeSet, EndCall, call_end  # noqa: E402
+from split_concatemers import CLOSES, OPENS  # noqa: E402
 
 # This tool reads instrumentation that lives in demux_ont.py, so the two
 # files have to be the same vintage. They are separate files and get
@@ -189,6 +190,57 @@ def why_no_match(window: str, declared: set[str], bl: int) -> tuple[int, int, in
     return best_h, best_e, ties
 
 
+def junction_gaps(seq: str, a5: str, a7: str, edits: int,
+                  head_len: dict, tail_len: dict):
+    """How much sequence sits between one amplicon and the next.
+
+    Two amplicons can end up in one read by two entirely different
+    routes, and the fix differs completely:
+
+      LIGATED     joined at the bench during library prep. The two
+                  molecules' outer tails abut, so the gap is ~0.
+      READ-THROUGH  two separate molecules traversed the pore in quick
+                  succession and were recorded as one read. Each still
+                  carries its own sequencing adapter, so tens of bases
+                  that belong to neither amplicon sit between them.
+
+    One is fixed with end-prep and adapter ratios, the other by read
+    splitting in the basecaller. They look identical in every summary
+    statistic computed so far, and the gap distinguishes them.
+
+    Yields (gap, sequence) for each junction found.
+    """
+    hits = []
+    for kind, pat in (("5+", a5), ("7+", a7),
+                      ("5-", revcomp(a5)), ("7-", revcomp(a7))):
+        off = 0
+        while off < len(seq):
+            h = find_anchor_cost(seq[off:], pat, edits)
+            if h is None:
+                break
+            hits.append((off + h[0], off + h[1], kind))
+            off += max(h[1], h[0] + 1)
+    hits.sort()
+    kept = []
+    for h in hits:
+        if kept and h[0] < kept[-1][1]:
+            continue
+        kept.append(h)
+
+    out = []
+    for i in range(1, len(kept)):
+        _p, prev_end, prev_kind = kept[i - 1]
+        pos, _e, kind = kept[i]
+        if prev_kind in CLOSES and kind in OPENS:
+            # The only unambiguous junction: one unit finishes and the
+            # next begins. Its extent is from the end of the first unit's
+            # tail to the start of the second unit's head.
+            a = prev_end + tail_len[prev_kind]
+            b = pos - head_len[kind]
+            out.append((b - a, seq[max(0, a):max(0, b)]))
+    return out
+
+
 def percentiles(values: list[int], points=(0, 5, 25, 50, 75, 95, 100)) -> dict:
     if not values:
         return {}
@@ -246,6 +298,10 @@ def main(argv=None) -> int:
 
     a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
     span = i5_set.length * args.barcode_repeats
+    head_len = {"5+": span + len(cfg["p5_tail"]),
+                "7-": span + len(cfg["p7_tail"])}
+    tail_len = {"7+": span + len(cfg["p7_tail"]),
+                "5-": span + len(cfg["p5_tail"])}
 
     # The shortest molecule that could physically carry both ends. A read
     # below this cannot resolve both no matter how the search is tuned, so
@@ -268,6 +324,8 @@ def main(argv=None) -> int:
     leaders: list[str] = []
     unexpected = {"i5": Counter(), "i7": Counter()}
     unexpected_noisy = {"i5": 0, "i7": 0}
+    noisy_windows = {"i5": Counter(), "i7": Counter()}
+    both_ends_no_index = 0
     nomatch_sub = {"i5": Counter(), "i7": Counter()}
     nomatch_edit = {"i5": Counter(), "i7": Counter()}
     indel_recoverable = {"i5": 0, "i7": 0}
@@ -275,6 +333,10 @@ def main(argv=None) -> int:
     n5: Counter = Counter()
     n7: Counter = Counter()
     inverted = 0
+    neither = 0
+    one_only = 0
+    gaps: list[int] = []
+    gap_seqs: Counter = Counter()
     multi_reads = 0
     units = 0
     splittable = 0
@@ -299,6 +361,13 @@ def main(argv=None) -> int:
             n7[min(c7, 4)] += 1
             inverted += inv
             units += max(c5, c7)
+            # No adapter structure of either kind, anywhere on either
+            # strand. Such a read cannot carry an index, so it is not a
+            # demultiplexing failure - there is nothing there to read.
+            if c5 == 0 and c7 == 0:
+                neither += 1
+            elif c5 == 0 or c7 == 0:
+                one_only += 1
             # A read is multi-unit if EITHER end structure repeats. Taking
             # the larger of the two per-end totals instead would undercount
             # the union, and could report fewer multi-unit reads than
@@ -307,6 +376,16 @@ def main(argv=None) -> int:
                 multi_reads += 1
             if c5 == c7 and c5 >= 2:
                 splittable += 1
+            if max(c5, c7) >= 2:
+                for g, gs in junction_gaps(seq, a5, a7, args.anchor_max_edits,
+                                           head_len, tail_len):
+                    gaps.append(g)
+                    if 5 <= g <= 200:
+                        gap_seqs[gs[:30]] += 1
+
+        if (five.anchor_pos >= 0 and three.anchor_pos >= 0
+                and not five.barcode and not three.barcode):
+            both_ends_no_index += 1
 
         for tag, end, anchor, sub in (("i5", five, a5, s),
                                       ("i7", three, a7, s[tail_from:])):
@@ -326,6 +405,13 @@ def main(argv=None) -> int:
                         unexpected[tag][copies[0]] += 1
                     else:
                         unexpected_noisy[tag] += 1
+                        # Keep the actual sequence. If a few constant
+                        # sequences dominate here, the window is sitting
+                        # on something fixed - adapter, or a PCR1
+                        # overhang where an index should be - which is a
+                        # different diagnosis from the window landing on
+                        # insert at an internal junction.
+                        noisy_windows[tag][copies[0]] += 1
                 # The indel question, measured on the better of the two
                 # copies. A couple of bases of context either side, so an
                 # insertion has somewhere to go.
@@ -464,6 +550,17 @@ def main(argv=None) -> int:
             print(f"  ** {rc_hits:,} of them are the REVERSE COMPLEMENT of a "
                   "declared index.\n     The index set for this end is "
                   "declared in the wrong orientation.")
+        if noisy_windows[tag]:
+            top = noisy_windows[tag].most_common(5)
+            share = sum(c for _s, c in top) / max(1, sum(noisy_windows[tag].values()))
+            print(f"  the 5 commonest sequences at that position cover "
+                  f"{100*share:.1f}% of them:")
+            for s_, c in top:
+                print(f"    {s_}  {c:>7,}  {pct(c, n)}")
+            print("    A few sequences dominating means the window is on "
+                  "something CONSTANT\n    - an adapter, or a PCR1 overhang "
+                  "where an index should be. All\n    distinct means it is "
+                  "on insert, at an internal junction.")
         for seq_, c in unexpected[tag].most_common(8):
             near = min((sum(a != b for a, b in zip(seq_, d)), d)
                        for d in declared[tag]) if declared[tag] else (0, "")
@@ -472,6 +569,12 @@ def main(argv=None) -> int:
                     else f"   nearest declared {near[1]} "
                          f"({near[0]} mismatches)")
             print(f"    {seq_}  {c:>7,}  {pct(c, n)}{note}")
+
+    print(f"\n  reads with an anchor at BOTH ends but an index at neither: "
+          f"{both_ends_no_index:,} ({100*both_ends_no_index/n:.1f}%)")
+    print("    That is the shape of a product amplified by PCR1 primers at "
+          "both ends:\n    the overhangs, and so the anchors, are present "
+          "but no index ever\n    got added.")
 
     if leaders:
         print(f"\n{'-'*66}")
@@ -521,6 +624,29 @@ def main(argv=None) -> int:
               "are alike and both sit\n  at 4+, the window is not on an "
               "index and tolerance is not the issue.")
 
+    if gaps:
+        print(f"\n{'-'*66}")
+        print("what sits between one amplicon and the next")
+        print(f"{'-'*66}")
+        q = percentiles(gaps, (5, 25, 50, 75, 95))
+        near0 = sum(1 for g in gaps if -10 <= g <= 10)
+        wide = sum(1 for g in gaps if g > 10)
+        print(f"  {len(gaps):,} junctions measured")
+        print(f"  gap between the two units' outer tails:")
+        print(f"    p5 {q['p5']}  p25 {q['p25']}  median {q['p50']}  "
+              f"p75 {q['p75']}  p95 {q['p95']}")
+        print(f"    within 10bp of zero  {near0:>8,}  {pct(near0, len(gaps))}"
+              "   <- ligated at the bench")
+        print(f"    more than 10bp       {wide:>8,}  {pct(wide, len(gaps))}"
+              "   <- something between them")
+        if gap_seqs:
+            print("  most common sequence in a non-zero gap (first 30bp):")
+            for s_, c in gap_seqs.most_common(4):
+                print(f"    {s_:<32} {c:>6,}")
+            print("  If one sequence dominates, it is the sequencing adapter "
+                  "and these\n  are separate molecules the read splitter "
+                  "missed - a basecalling\n  setting, not a bench problem.")
+
     if census_n:
         print(f"\n{'-'*66}")
         print("adapter structures per read - is one read one molecule?")
@@ -537,6 +663,13 @@ def main(argv=None) -> int:
               f"{splittable:,}")
         print(f"  reads with an inverted repeat:              "
               f"{inverted:,} ({pct(inverted, census_n).strip()})")
+        both_n = census_n - neither - one_only
+        print(f"\n  reads with NO adapter of either kind   {neither:>8,}  "
+              f"{pct(neither, census_n)}  <- cannot carry an index")
+        print(f"  reads with one kind of end only        {one_only:>8,}  "
+              f"{pct(one_only, census_n)}")
+        print(f"  reads with both kinds present          {both_n:>8,}  "
+              f"{pct(both_n, census_n)}")
         print(f"\n  amplicon units seen:  {units:,} in {census_n:,} reads "
               f"({units / census_n:.2f} per read)")
         print("  A read is supposed to be one molecule. Every unit beyond "
@@ -598,6 +731,7 @@ def main(argv=None) -> int:
         },
         "read_lengths": q,
         "adapter_floor_bp": floor,
+        "reads_anchor_both_ends_no_index": both_ends_no_index,
         "reads_below_floor": short,
         "per_end": {
             tag: {
@@ -607,6 +741,7 @@ def main(argv=None) -> int:
                 "anchor_edit_distance": dict(anchor_edits[tag]),
                 "undeclared_indices": dict(unexpected[tag].most_common(20)),
                 "undeclared_noisy": unexpected_noisy[tag],
+                "noisy_window_top": dict(noisy_windows[tag].most_common(10)),
             }
             for tag in ("i5", "i7")
         },
@@ -615,6 +750,8 @@ def main(argv=None) -> int:
             "i5_ends_per_read": dict(n5),
             "i7_ends_per_read": dict(n7),
             "inverted_repeat_reads": inverted,
+            "reads_without_any_adapter": neither,
+            "reads_with_one_end_kind_only": one_only,
             "amplicon_units": units,
             "units_per_read": units / census_n if census_n else 0,
             "multi_end_reads": multi_reads,

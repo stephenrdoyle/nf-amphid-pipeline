@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import hashlib
 import json
 import os
 import sys
@@ -54,6 +55,7 @@ from ampseqlib import (  # noqa: E402
     hamming,
     load_assay,
     open_reads,
+    read_run_metadata,
     read_table,
     revcomp,
 )
@@ -91,9 +93,16 @@ class BarcodeSet:
     by_seq: dict[str, str] = field(default_factory=dict)  # sequence -> name
     length: int = 0
     max_mismatch: int = 1
+    # How much further the runner-up must be for a match beyond
+    # max_mismatch to be accepted, and how far the best may be. 0
+    # disables the margin rule entirely and restores tolerance-only
+    # behaviour.
+    margin: int = 2
+    margin_max_dist: int = 2
 
     @classmethod
-    def build(cls, seqs: set[str], requested: int = 1) -> "BarcodeSet":
+    def build(cls, seqs: set[str], requested: int = 1,
+              margin: int = 2, margin_max_dist: int = 2) -> "BarcodeSet":
         seqs = {s for s in seqs if s}
         if not seqs:
             return cls()
@@ -110,24 +119,56 @@ class BarcodeSet:
                 # k mismatches are only safely correctable if every pair is
                 # more than 2k apart.
                 safe = min(safe, (hamming(a, b) - 1) // 2)
-        return cls(by_seq=by_seq, length=length, max_mismatch=max(0, safe))
+        return cls(by_seq=by_seq, length=length, max_mismatch=max(0, safe),
+                   margin=margin, margin_max_dist=margin_max_dist)
 
     def match(self, window: str) -> str | None:
-        """Exact first, then the single nearest within tolerance. A tie
-        between two barcodes is no match at all - guessing would be worse
-        than declining."""
+        """Exact first, then the nearest - by tolerance, or by margin.
+
+        Two acceptance rules, and the second is what makes this worth
+        more than max_mismatch alone.
+
+        TOLERANCE is a property of the SET: k substitutions are safely
+        correctable only when every pair is more than 2k apart, so
+        max_mismatch is derived from the set's minimum distance rather
+        than chosen. On an index set whose closest pair is 4 apart that
+        caps at 1, whatever the data looks like.
+
+        MARGIN is a property of the READ. A window 2 away from one
+        declared index and 5 from every other is unambiguous - not
+        because the set is widely spaced, but because this particular
+        window is not near anything else. Accepting it introduces no
+        misassignment that the set's geometry would otherwise have
+        prevented, because the alternative was not close either.
+
+        Measured on the reference run: the margin rule recovers 5.0% of
+        failed i5 ends and 18.2% of i7, all with a runner-up at least 2
+        further away. The ambiguous remainder is declined, as before -
+        guessing would be worse than declining, and that has not
+        changed.
+        """
         if window in self.by_seq:
             return window
-        if self.max_mismatch < 1 or len(window) != self.length:
+        if len(window) != self.length:
             return None
-        best, best_d, ties = None, self.max_mismatch + 1, 0
-        for cand in self.by_seq:
-            d = hamming(window, cand)
-            if d < best_d:
-                best, best_d, ties = cand, d, 1
-            elif d == best_d:
-                ties += 1
-        return best if best is not None and ties == 1 else None
+        if self.max_mismatch < 1 and self.margin < 1:
+            return None
+
+        ds = sorted((hamming(window, c), c) for c in self.by_seq)
+        if not ds:
+            return None
+        best_d, best = ds[0]
+        runner_up = ds[1][0] if len(ds) > 1 else 99
+
+        # A tie is never a match, under either rule.
+        if best_d == runner_up:
+            return None
+        if best_d <= self.max_mismatch:
+            return best
+        if (self.margin >= 1 and best_d <= self.margin_max_dist
+                and runner_up - best_d >= self.margin):
+            return best
+        return None
 
 
 @dataclass
@@ -262,6 +303,33 @@ class ReadCall:
     orientation: str
     insert_start: int = -1
     insert_end: int = -1
+    # Why each end did or did not yield a barcode, for the orientation
+    # that was kept. The tier says how much evidence survived; these say
+    # what destroyed it - and that is the difference between "your PCR2
+    # is inefficient" and "the barcode matcher is too strict". A run
+    # that comes back half single-ended cannot be diagnosed from tiers
+    # alone, and re-reading 30M reads with a separate tool to find out
+    # is not a reasonable answer.
+    i5_reason: str = "ok"
+    i7_reason: str = "ok"
+
+
+END_REASON_MEANING = {
+    "ok": "barcode read, and the tandem copies agreed",
+    "ok_single_copy": "barcode read from one copy; the other was absent "
+                      "or unreadable, so the replicate could not confirm it",
+    "anchor_not_found": "no adapter anchor at this end - the molecule most "
+                        "likely never carried this index, so this is PCR2 "
+                        "efficiency rather than a matching problem",
+    "barcode_off_read": "the anchor was found but the barcode runs past the "
+                        "end of the read - the read is truncated here",
+    "no_copy_matched": "the barcode window was read but matched no declared "
+                       "index within tolerance; the index is present, so "
+                       "this is a matching or index-set problem",
+    "copies_disagreed": "the tandem copies read as different indices, which "
+                        "is the frame slip the duplication exists to catch",
+    "no_anchor_configured": "the assay defines no anchor for this end",
+}
 
 
 def has_internal_adapter(
@@ -345,6 +413,8 @@ def assign_read(
                 call.tier = "E"
                 call.sample_id = None
 
+        call.i5_reason = five.reason
+        call.i7_reason = three.reason
         if best is None or resolved > _resolved(best):
             best = call
             best._resolved = resolved  # type: ignore[attr-defined]
@@ -476,9 +546,23 @@ class SampleWriter:
     most one file is open at a time.
     """
 
-    def __init__(self, outdir: str, flush_records: int = 2000):
+    def __init__(self, outdir: str, flush_records: int = 2000,
+                 stats_only: bool = False):
+        # stats_only counts reads per sample without writing any FASTQ.
+        #
+        # It saves DISK and avoids a second copy of the per-sample reads;
+        # it does NOT save much time. Measured on 51k reads: 15.2s with
+        # writing, 16.3s without - the write is about 2% of this stage,
+        # and the per-read barcode scanning is the rest. It was added on
+        # the assumption that writing dominated, which the measurement
+        # disproved, so the claim is recorded here rather than repeated.
+        #
+        # The counters are unaffected, so the summary is identical to a
+        # normal run apart from reads_written.
+        self.stats_only = stats_only
         self.dir = outdir
-        os.makedirs(self.dir, exist_ok=True)
+        if not stats_only:
+            os.makedirs(self.dir, exist_ok=True)
         self.flush_records = flush_records
         self._buf: dict[str, list[str]] = defaultdict(list)
         self._started: set[str] = set()
@@ -489,8 +573,10 @@ class SampleWriter:
         return os.path.join(self.dir, f"{safe_name(sample_id)}.fastq.gz")
 
     def add(self, sample_id: str, read_id: str, seq: str, qual: str) -> None:
-        self._buf[sample_id].append(f"@{read_id}\n{seq}\n+\n{qual}\n")
         self.counts[sample_id] += 1
+        if self.stats_only:
+            return
+        self._buf[sample_id].append(f"@{read_id}\n{seq}\n+\n{qual}\n")
         if len(self._buf[sample_id]) >= self.flush_records:
             self._flush(sample_id)
 
@@ -512,15 +598,49 @@ class SampleWriter:
             self._flush(sample_id)
 
 
-def _build_sets(samplesheet: str, run_id: str, max_mismatch: int):
+def code_fingerprint(read_files, **settings) -> str:
+    """Identify what produced a part: code, settings, and inputs.
+
+    Resuming reuses any file whose part already exists, which is only
+    safe while the thing being resumed is the same thing. On this
+    pipeline that assumption failed in practice: a first run finished 65
+    of 74 files, the cut rule was then fixed, and the rerun reused all 65
+    - producing a run that was 88% one algorithm and 12% another, with a
+    summary that averaged the two and no sign anything was wrong.
+
+    The inputs are fingerprinted as well as the code, because this stage
+    consumes the SPLITTER's output. If splitting changes, every part here
+    must be recomputed even though nothing in this file did.
+    """
+    h = hashlib.sha256()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("demux_ont.py", "ampseqlib.py"):
+        try:
+            with open(os.path.join(here, name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            h.update(name.encode())
+    for k in sorted(settings):
+        h.update(f"{k}={settings[k]}".encode())
+    for f in sorted(read_files):
+        try:
+            st = os.stat(f)
+            h.update(f"{os.path.basename(f)}:{st.st_size}".encode())
+        except OSError:
+            h.update(str(f).encode())
+    return h.hexdigest()[:16]
+
+
+def _build_sets(samplesheet: str, run_id: str, max_mismatch: int,
+                margin: int = 2, margin_max_dist: int = 2):
     """Rebuild the index sets from files. Workers get paths, not objects:
     what the workers agree on is then the input, not a pickled snapshot of
     one process's interpretation of it."""
     samples = [s for s in read_table(samplesheet) if s["run_id"] == run_id]
     i5_set = BarcodeSet.build({s["index_i5"].upper() for s in samples},
-                              max_mismatch)
+                              max_mismatch, margin, margin_max_dist)
     i7_set = BarcodeSet.build({s["index_i7"].upper() for s in samples},
-                              max_mismatch)
+                              max_mismatch, margin, margin_max_dist)
     pair_to_sample = {
         (s["index_i5"].upper(), s["index_i7"].upper()): s["sample_id"]
         for s in samples
@@ -543,7 +663,8 @@ def demux_one_file(job: dict) -> dict:
     """
     cfg = load_assay(job["assay"])
     _samples, i5_set, i7_set, pair_to_sample = _build_sets(
-        job["samplesheet"], job["run_id"], job["max_mismatch"])
+        job["samplesheet"], job["run_id"], job["max_mismatch"],
+        job.get("barcode_margin", 2), job.get("barcode_margin_max_dist", 2))
 
     junction_anchors: tuple[str, ...] = ()
     if job["chimera_check"]:
@@ -555,11 +676,14 @@ def demux_one_file(job: dict) -> dict:
         for stale in os.listdir(part_reads):
             if stale.endswith(".fastq.gz"):
                 os.remove(os.path.join(part_reads, stale))
-    writer = SampleWriter(part_reads, flush_records=job["flush_records"])
+    writer = SampleWriter(part_reads, flush_records=job["flush_records"],
+                          stats_only=job.get("stats_only", False))
 
     tiers: Counter = Counter()
     orients: Counter = Counter()
     grid: Counter = Counter()
+    i5_why: Counter = Counter()
+    i7_why: Counter = Counter()
     total = assigned = 0
 
     tmp_tsv = job["assign_tsv"] + ".partial"
@@ -576,12 +700,20 @@ def demux_one_file(job: dict) -> dict:
             total += 1
             tiers[call.tier] += 1
             orients[call.orientation] += 1
+            i5_why[call.i5_reason] += 1
+            i7_why[call.i7_reason] += 1
             if call.i5 and call.i7:
                 grid[(call.i5, call.i7)] += 1
             w.writerow([call.read_id, call.tier, call.sample_id or "",
                         call.i5 or "", call.i7 or "", call.orientation])
             if call.sample_id:
                 assigned += 1
+                if writer.stats_only:
+                    # Counted through the writer, not beside it: two
+                    # places incrementing the same tally is how they
+                    # come to disagree.
+                    writer.add(call.sample_id, read_id, "", "")
+                    continue
                 s = seq if call.orientation == "+" else revcomp(seq)
                 q = qual if call.orientation == "+" else qual[::-1]
                 if 0 <= call.insert_start < call.insert_end <= len(s):
@@ -597,11 +729,14 @@ def demux_one_file(job: dict) -> dict:
         "assigned_reads": assigned,
         "by_tier": dict(tiers),
         "orientation": dict(orients),
+        "i5_end_reasons": dict(i5_why),
+        "i7_end_reasons": dict(i7_why),
         # Tuple keys are not JSON; the pair is joined with a tab, which
         # cannot occur in a barcode.
         "grid": {f"{a}\t{b}": c for (a, b), c in grid.items()},
         "per_sample": dict(writer.counts),
         "reads_written": writer.written,
+        "code": job["code"],
     }
     with open(job["stats"], "w", encoding="utf-8") as fh:
         json.dump(stats, fh)
@@ -706,6 +841,24 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--threads", type=int, default=0,
                     help="worker processes; 0 picks min(8, cores). Work\n                         is divided by input file and resumes per file")
+    ap.add_argument("--barcode-margin", type=int, default=2,
+                    help="accept a barcode beyond max_mismatch when the "
+                         "runner-up is at least this much further away. "
+                         "The set's spacing caps the tolerance; the "
+                         "margin is a property of the individual read, so "
+                         "it adds no misassignment the geometry would "
+                         "have prevented. 0 disables it")
+    ap.add_argument("--barcode-margin-max-dist", type=int, default=2,
+                    help="the furthest a barcode may be and still be "
+                         "accepted under the margin rule")
+    ap.add_argument("--stats-only", action="store_true",
+                    help="compute the tiers, the per-end reasons and the "
+                         "index matrix WITHOUT writing per-sample FASTQ. "
+                         "For re-analysing a run already demultiplexed: "
+                         "saves ~8 GB and leaves the existing reads "
+                         "untouched. Saves little time - the write is "
+                         "about 2%% of this stage, the scanning is the "
+                         "rest")
     ap.add_argument("--outdir", default="demux")
     args = ap.parse_args(argv)
 
@@ -769,7 +922,28 @@ def main(argv=None) -> int:
     parts_dir = os.path.join(args.outdir, "parts")
     os.makedirs(parts_dir, exist_ok=True)
 
-    jobs, results, part_dirs, tsvs = [], [], [], []
+    fingerprint = code_fingerprint(
+        read_files,
+        barcode_repeats=args.barcode_repeats, max_mismatch=args.max_mismatch,
+        search_window=args.search_window,
+        accept_single_end=args.accept_single_end,
+        chimera_check=args.chimera_check,
+        anchor_max_edits=args.anchor_max_edits,
+        run_id=args.run_id, samplesheet=args.samplesheet,
+        # In the fingerprint, and it has to be. A stats-only part records
+        # itself as finished having written no FASTQ. Without this, a
+        # later real run resumes onto those parts, believes the work is
+        # done, finds nothing to merge, and produces an empty output
+        # while reporting success - the precise failure this project has
+        # already had once, when two algorithm versions shared a cache.
+        stats_only=args.stats_only,
+        # Changes which reads are assigned, so parts computed with a
+        # different margin must not be mixed with these.
+        barcode_margin=args.barcode_margin,
+        barcode_margin_max_dist=args.barcode_margin_max_dist,
+        assay=args.assay or "")
+
+    jobs, results, part_dirs, tsvs, stale = [], [], [], [], 0
     for i, src in enumerate(read_files):
         stem = f"{i:05d}"
         stats_path = os.path.join(parts_dir, stem + ".json")
@@ -779,8 +953,11 @@ def main(argv=None) -> int:
         tsvs.append(tsv_path)
         if os.path.exists(stats_path) and os.path.exists(tsv_path):
             with open(stats_path, encoding="utf-8") as fh:
-                results.append(json.load(fh))
-            continue
+                prev = json.load(fh)
+            if prev.get("code") == fingerprint:
+                results.append(prev)
+                continue
+            stale += 1
         jobs.append({
             "src": src, "stats": stats_path, "assign_tsv": tsv_path,
             "part_reads": part_reads, "assay": args.assay,
@@ -792,11 +969,19 @@ def main(argv=None) -> int:
             "chimera_check": args.chimera_check,
             "anchor_max_edits": args.anchor_max_edits,
             "flush_records": max(1, args.flush_records),
+            "barcode_margin": args.barcode_margin,
+            "barcode_margin_max_dist": args.barcode_margin_max_dist,
+            "stats_only": args.stats_only,
+            "code": fingerprint,
         })
 
     threads = args.threads or min(8, os.cpu_count() or 1)
     print(f"  {len(read_files)} file(s), {len(results)} already done, "
           f"{len(jobs)} to do on {threads} thread(s)")
+    if stale:
+        print(f"  {stale} previously-finished file(s) were made by different "
+              "code, settings or inputs\n  and will be redone - a resumed run "
+              "must not blend two versions")
 
     started = time.time()
     if jobs:
@@ -815,7 +1000,9 @@ def main(argv=None) -> int:
     # Parts are merged in input order, so the output is the same whatever
     # order the workers finished in and whatever thread count was used.
     reads_dir = os.path.join(args.outdir, "reads")
-    merge_sample_reads(part_dirs, reads_dir)
+    # Nothing to merge in stats-only mode: no part wrote a FASTQ.
+    if not args.stats_only:
+        merge_sample_reads(part_dirs, reads_dir)
 
     assign_path = os.path.join(args.outdir, "assignments.tsv")
     with open(assign_path, "w", newline="", encoding="utf-8") as fh:
@@ -835,6 +1022,8 @@ def main(argv=None) -> int:
     orients: Counter = Counter()
     grid: Counter = Counter()
     per_sample: Counter = Counter()
+    i5_why: Counter = Counter()
+    i7_why: Counter = Counter()
     total = assigned = written = 0
     for r in ordered:
         total += r["total_reads"]
@@ -843,6 +1032,11 @@ def main(argv=None) -> int:
         tiers.update(r["by_tier"])
         orients.update(r["orientation"])
         per_sample.update(r["per_sample"])
+        # Absent from parts written by an older version of this tool, so
+        # a resumed run that blends vintages reports what it has rather
+        # than dying on a missing key.
+        i5_why.update(r.get("i5_end_reasons", {}))
+        i7_why.update(r.get("i7_end_reasons", {}))
         for key, c in r["grid"].items():
             a, b = key.split("\t")
             grid[(a, b)] += c
@@ -861,28 +1055,55 @@ def main(argv=None) -> int:
         "assigned_reads": assigned,
         "by_tier": {t: tiers.get(t, 0) for t in TIERS},
         "tier_meaning": TIER_MEANING,
+        # Per END, not per read: a read has two ends and they fail for
+        # different reasons. Counts sum to total_reads in each map.
+        #
+        # This is the breakdown that says whether a disappointing run is
+        # chemistry or software. anchor_not_found dominating means the
+        # molecule never carried that end - PCR2 did not add the index,
+        # and no amount of tolerance will recover it. no_copy_matched or
+        # copies_disagreed dominating means the index IS there and the
+        # matcher is rejecting it, which is a parameter away from being
+        # fixed. Those two have the same symptom in the tiers and
+        # opposite remedies.
+        "i5_end_reasons": dict(i5_why),
+        "i7_end_reasons": dict(i7_why),
+        "end_reason_meaning": END_REASON_MEANING,
         "orientation": dict(orients),
         "index_matrix": write_index_matrix(
             grid, samples, os.path.join(args.outdir, "index_matrix.tsv")),
         "input_files": file_report,
+        # Empty when the reads have already been through the splitter,
+        # which rewrites headers - split_summary.json carries it then.
+        "basecalling": read_run_metadata(read_files),
         "settings": {
             "barcode_repeats": args.barcode_repeats,
             "max_mismatch_requested": args.max_mismatch,
             "max_mismatch_i5": i5_set.max_mismatch,
             "max_mismatch_i7": i7_set.max_mismatch,
+            "barcode_margin": args.barcode_margin,
+            "barcode_margin_max_dist": args.barcode_margin_max_dist,
             "allow_indels": False,
             "require_copy_agreement": args.barcode_repeats >= 2,
             "accept_single_end": args.accept_single_end,
             "chimera_check": args.chimera_check,
             "anchor_max_edits": args.anchor_max_edits,
         },
+        # How many parts this invocation actually computed. The driver
+        # uses it to decide whether per-sample assignment downstream is
+        # still valid, since its inputs have just changed.
+        "parts_recomputed": len(jobs),
         "read_accounting_balanced": accounted == total,
         # A second, independent check: the reads written to per-sample
         # files must equal the reads called to a sample. The tier tally and
         # the FASTQ output are produced by different code paths, so this
         # catches a dropped buffer that the tier check cannot see.
         "reads_written": written,
-        "reads_written_balanced": written == assigned,
+        # Not asserted in stats-only mode, because nothing was written.
+        # Reported as None rather than True: a check that did not run is
+        # not a check that passed.
+        "reads_written_balanced": None if args.stats_only else written == assigned,
+        "stats_only": args.stats_only,
         "per_sample": dict(sorted(per_sample.items())),
     }
     with open(os.path.join(args.outdir, "demux_summary.json"), "w", encoding="utf-8") as fh:
@@ -895,13 +1116,38 @@ def main(argv=None) -> int:
     print(f"  assigned {assigned:,} ({100*assigned/max(1,total):.2f}%) "
           f"to {len(per_sample)} samples")
 
+    # Printed, not merely recorded. The tiers say how many reads failed;
+    # this says what failed, and it is the difference between a bench
+    # problem and a parameter problem. A number that only exists in a
+    # JSON file nobody opens is half a diagnostic.
+    for end, why in (("i5", i5_why), ("i7", i7_why)):
+        if not why:
+            continue
+        print(f"\n  {end} ends")
+        for reason, n in sorted(why.items(), key=lambda kv: -kv[1]):
+            print(f"    {n:>9,}  {100*n/max(1,total):5.2f}%  {reason}"
+                  f"{'' if reason.startswith('ok') else ' - ' + END_REASON_MEANING.get(reason, '')}")
+    lost = i5_why.get("anchor_not_found", 0) + i7_why.get("anchor_not_found", 0)
+    matched_but_rejected = sum(
+        w.get(k, 0) for w in (i5_why, i7_why)
+        for k in ("no_copy_matched", "copies_disagreed"))
+    if lost or matched_but_rejected:
+        print(f"\n  ends with no anchor at all      {lost:>9,}  "
+              "(index never added - PCR2 efficiency)")
+        print(f"  ends read but not matched       {matched_but_rejected:>9,}  "
+              "(index present - matching or index set)")
+
     if accounted != total:
         print(
             f"\nread accounting does not balance: {accounted:,} of {total:,}",
             file=sys.stderr,
         )
         return 1
-    if written != assigned:
+    # Not applicable in stats-only mode: nothing was written, by
+    # request. Left unguarded this printed a hard error and returned 1
+    # on a run that had worked perfectly, which any scheduler reports as
+    # a failed job.
+    if written != assigned and not args.stats_only:
         print(
             f"\n{written:,} reads were written to per-sample files but "
             f"{assigned:,} were called to a sample - the FASTQ output is "
