@@ -168,6 +168,7 @@ def load_prep(prep_dir: str | None) -> dict[str, dict]:
 
 def read_funnel(
     samples: dict, prep: dict, demux: dict | None, fate_totals: Counter,
+    split: dict | None = None,
 ) -> dict:
     """Every read from the sequencer to a species call, and where they go.
 
@@ -200,8 +201,24 @@ def read_funnel(
         meaning = demux.get("tier_meaning") or {}
         assigned = demux.get("assigned_reads", tiers.get("A", 0))
         if total:
-            stages.append({"stage": "reads in the run", "reads": total,
-                           "lost_here": {}})
+            # On the nanopore path a read may have been cut into several
+            # amplicon units before demultiplexing, so the count entering
+            # demux is not the count that came off the sequencer. Start
+            # the funnel at the sequencer, or the split silently changes
+            # the denominator every later percentage is taken against.
+            if split and split.get("reads_in"):
+                stages.append({"stage": "reads in the run",
+                               "reads": split["reads_in"], "lost_here": {}})
+                dropped = split.get("pieces_dropped_below_min_length", 0)
+                stages.append({
+                    "stage": "amplicon units after splitting",
+                    "reads": split.get("pieces_out", total),
+                    "lost_here": ({"pieces too short to carry an insert":
+                                   dropped} if dropped else {}),
+                })
+            else:
+                stages.append({"stage": "reads in the run", "reads": total,
+                               "lost_here": {}})
             stages.append({
                 "stage": "demultiplexed to a sample", "reads": assigned,
                 # Name the tiers rather than lumping them: B is a read
@@ -646,6 +663,9 @@ def main(argv=None) -> int:
                          "at the reads that came off the sequencer")
     ap.add_argument("--demux-summary",
                     help="demux_summary.json, for the nanopore path")
+    ap.add_argument("--split-summary",
+                    help="split_summary.json, so the funnel starts at reads "
+                         "off the sequencer rather than at amplicon units")
     ap.add_argument("--preflight-dir",
                     help="for plate geometry derived at pre-flight")
     ap.add_argument("--outdir", default="synthesis")
@@ -814,7 +834,11 @@ def main(argv=None) -> int:
     if args.demux_summary and os.path.exists(args.demux_summary):
         with open(args.demux_summary, encoding="utf-8") as fh:
             demux = json.load(fh)
-    funnel = read_funnel(samples, prep, demux, fate_totals)
+    split = None
+    if args.split_summary and os.path.exists(args.split_summary):
+        with open(args.split_summary, encoding="utf-8") as fh:
+            split = json.load(fh)
+    funnel = read_funnel(samples, prep, demux, fate_totals, split)
 
     # -- QC ---------------------------------------------------------------
     taxa_for_qc = [t["seq_id"] for t in targets][:6]

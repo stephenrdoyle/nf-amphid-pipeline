@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Nextflow
+work/
+.nextflow/
+.nextflow.log*
+results/
+trace.txt
+timeline.html
+report.html
+dag.*
+
+# Pipeline outputs. These are regenerated from the inputs, and some of
+# them are tens of gigabytes - a split MinION run is larger than the run
+# it came from.
+preflight/
+split/
+demux/
+assign/
+synthesis/
+*_report.html
+
+# Sequencing data never belongs in a repository. Reads are excluded
+# everywhere; the small text inputs under tests/data - the reference
+# panel, primers, samplesheet, run manifest - are NOT, because they are
+# what a person reads to understand what the tests assume. Both they and
+# the reads regenerate from:
+#
+#   python3 tests/make_fixtures.py --outdir tests/data
+#   python3 bin/simulate.py ...
+#
+# so nothing here is lost, only reproduced on demand.
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.cram
+
+# Generated read directories
+tests/data/run01/
+tests/data/sim/
+tests/data_il/
+tests/sim/
+tests/sim_il/
+tests/out/
+tests/out2/
+example/reads/
+
+# Real run directories kept beside the code for convenience
+titration/reads/
+titration/preflight/
+tests/data/ont/.build/
+__pycache__/
+*.pyc
+.DS_Store
+work/
+.nextflow*
+results*/
+titration/
+example/reads/
+example/preflight/
+tests/out*/
+tests/sim*/
+tests/data*/reads/
+tests/data/ont/.build/
+*.fastq
+*.fastq.gz
+__pycache__/
+*.pyc
+.DS_Store
+work/
+.nextflow*
+results*/
+titration/
+example/reads/
+example/preflight/
+tests/out*/
+tests/sim*/
+tests/data*/reads/
+tests/data/ont/.build/
+*.fastq
+*.fastq.gz

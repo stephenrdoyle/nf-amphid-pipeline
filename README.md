@@ -38,6 +38,178 @@ All logic lives in `bin/preflight.py` as standard-library Python with no
 imports beyond it, so it can be run and tested without Nextflow. The Nextflow
 layer is orchestration only.
 
+## Running a real run
+
+Two drivers run everything serially without Nextflow. Both have been
+executed end to end; the Nextflow layer has not. Use these until
+`nextflow run` has been shaken down.
+
+```bash
+# Illumina: one pair of files per sample, already demultiplexed
+bin/run_illumina.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
+
+# nanopore: one pool with the indices still in the reads
+bin/run_nanopore.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
+```
+
+Both are resumable — a sample whose outputs exist is skipped, so a job
+killed by a wall-clock limit can simply be started again. For nanopore,
+demultiplexing is skipped too; delete `results/demux` to force a redo.
+
+### Choosing the driver
+
+The `platform` column has to say the same thing in **both** the run
+manifest and the samplesheet, and it decides which driver applies. The two
+paths are not interchangeable:
+
+| | Illumina | nanopore |
+|---|---|---|
+| `path` in `runs.tsv` | directory of per-sample FASTQ | MinKNOW run folder, or a pooled FASTQ |
+| demultiplexing | done by the sequencing centre | done here, from in-line indices |
+| `files` in `file_resolution.tsv` | two paths per sample | **empty, by design** |
+
+That last row is worth knowing before it surprises you. On the nanopore
+path no read belongs to a sample until the barcodes have been read, so
+pre-flight resolves nothing per sample and the `files` column is blank.
+An empty `files` column with `platform = illumina` is a different thing
+entirely — that is an error, and pre-flight raises it as one.
+
+### Nanopore resource use
+
+Demultiplexing is one serial pass over the pool, with **peak memory flat
+in the read count** at about 30 MB. Throughput is ~3,400 reads/s on one
+core with the junction check off, and depends on the tier-A fraction
+with it on, since only reads that resolved both ends pay for the
+interior scan: ~1,100 reads/s on a clean run where nearly everything is
+tier A, ~2,200 on a run where a quarter is. Measured on 121,560
+simulated reads of mean length 494bp: 38.8s off, 112.9s on, 28 MB either
+way.
+
+| reads | time (clean run) | peak RAM |
+|---|---|---|
+| 1M | ~15 min | ~30 MB |
+| 10M | ~2h 30m | ~30 MB |
+| 20M | ~5h | ~30 MB |
+
+Those are the pessimistic figures — a run with a low tier-A fraction is
+faster, because fewer reads reach the check. It is once per run, not per
+sample.
+
+The flatness is deliberate and was not free. The first version held every
+read in memory until the end — about 1.4 KB per read, so a 20M-read flow
+cell wanted ~28 GB and would have been OOM-killed an hour into the job.
+Per-sample FASTQ are now written in buffered chunks as reads stream past
+(`--flush-records`, default 2000), which means each file is a
+multi-member gzip. That is valid and every reader handles it; the only
+visible cost is about 0.2% in compressed size.
+
+Two invariants are checked before the output is declared usable: every
+read lands in exactly one of the four tiers and the tiers sum to the
+input, and the reads written to per-sample files equal the reads called
+to a sample. Either failing is a non-zero exit, not a warning.
+
+### When demultiplexing goes badly
+
+The tiers say how much evidence survived, not what destroyed it:
+
+| tier | meaning | assigned? |
+|---|---|---|
+| A | both ends read, and the i5×i7 pair is one the samplesheet claims | yes |
+| B | one end only — the other truncated or unreadable | only with `--accept-single-end` |
+| C | the ends disagree, or the pair belongs to no sample | never |
+| D | no confident match | never |
+| E | an adapter sits *between* the two ends — the read is more than one molecule | never |
+
+Tier E exists because of a failure mode that costs correctness rather
+than yield. Two amplicons ligated head to tail present the first one's
+i5 at the 5' end and the **second one's** i7 at the 3'. Both are real,
+declared indices, so the pair is very likely a well on the plate — just
+not the well either molecule came from. Without the check it lands in
+tier A, is assigned, and nothing downstream could notice. The junction is
+the evidence: a clean amplicon's interior is insert and contains no
+adapter, so an anchor between the two outer anchors means the ends
+cannot be trusted as a pair.
+
+The check has a limit worth stating. It detects joins between *complete*
+molecules, because those bury a full adapter structure at the junction. A
+chimera of two **truncated fragments** contributes one usable end from
+each and leaves no adapter between them — undetectable this way, or by
+any method working from adapter position. `--no-chimera-check` disables
+the quarantine and restores the old behaviour; that is a correctness
+trade and belongs to whoever is analysing the run, not to the tool.
+
+### Splitting concatemers
+
+Quarantining those reads protects the results but throws away the data.
+`split_concatemers.py` runs **before** demultiplexing and cuts each read
+at its junctions, so every amplicon is demultiplexed on its own two
+ends. The cut is the only edit — nothing is spliced or reconstructed —
+and on a library without concatemers it is a no-op.
+
+Measured against known provenance: chimeras built from reads whose true
+sample was already established, on a 3×12 index grid.
+
+| | units recovered | sent to a sample neither molecule came from |
+|---|---|---|
+| uncut, no check | 21% | **19.8%** |
+| uncut, check on | 0% | 0% (refused instead) |
+| split, then demultiplexed | 98% | 0% |
+
+That middle row is the safeguard alone: correct, but empty-handed. The
+last row is why splitting is worth the extra stage.
+
+The contamination rate scales with how full the index grid is, because a
+hybrid pair only misleads when it happens to be a combination some well
+actually uses. At 3×12 with 24 of 36 combinations declared it is 19.8%;
+a 96-well plate using 94 of 96 combinations would be worse. Leaving a
+few wells unused is what turns this from invisible into measurable.
+
+Splitting is the slowest stage in the pipeline — roughly 750 reads/s per
+core, since every base of every read is scanned for adapter. On a full
+flow cell that is hours, so it runs in parallel and resumes:
+
+```bash
+bin/split_concatemers.py --reads <minknow dir> --threads 16 --outdir split
+```
+
+Demultiplexing is sharded the same way, and for the same reason:
+
+```bash
+THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.csv runs.tsv primers.tsv
+```
+
+Work is divided by **input file**, which needs no chunking scheme
+because a MinKNOW run already arrives as dozens of batch files. Each
+worker writes its own outputs and its own tallies; a rerun skips every
+input already finished, so a job killed by a wall-clock limit resumes
+where it stopped rather than at the beginning.
+
+Merging is cheap because of how the parts are shaped. gzip members
+concatenate, so per-sample reads are joined by copying compressed bytes
+rather than decompressing and recompressing the run; the per-read tables
+are appended in input order; the tallies are summed. Parts are always
+merged in input order, so **the thread count is not an input to the
+result** — that is asserted byte for byte in the tests, for the per-read
+table, every per-sample FASTQ, and every tally including the index
+matrix, along with a resumed run reproducing an uninterrupted one.
+
+Measured on 4 cores: splitting 3.3x, demultiplexing 3.7x.
+
+A large tier B means the two ends are failing separately; a large tier D
+means whole reads are failing. Neither says why, so:
+
+```bash
+bin/diagnose_demux.py --reads <minknow dir> --samplesheet samplesheet.csv \
+    --run-id RUN01 --assay assets/assay/ampseq_helminth.json
+```
+
+Read-only, seconds on a 20k-read subsample. For each end separately it
+reports the step that lost it — anchor not found, anchor found but the
+barcode window runs off the read, no barcode copy within tolerance,
+copies disagreeing — checks whether the anchor sits where the construct
+predicts, and sweeps the search window and anchor edit budget so the
+value of loosening either is a measurement rather than an argument.
+
 ## Inputs
 
 Four, of which one is optional and one is derivable.

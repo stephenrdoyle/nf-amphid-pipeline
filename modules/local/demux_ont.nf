@@ -34,6 +34,7 @@ process DEMUX_ONT {
         --assay ${assay} \\
         ${repeats} ${failed} \\
         --max-mismatch ${params.max_mismatch} \\
+        --threads ${task.cpus} \\
         --outdir demux
 
     cat <<-END_VERSIONS > versions.yml

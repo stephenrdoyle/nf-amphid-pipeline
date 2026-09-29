@@ -542,9 +542,359 @@ def test_index_matrix() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_streaming_output() -> None:
+    """Output must not depend on how often the write buffer is flushed.
+
+    Demultiplexing used to hold every read in memory until the end, which
+    cost about 1.4 KB per read - fine on a test fixture, ~28 GB on a full
+    flow cell, and an OOM kill an hour into the job. It now appends to
+    each sample's file in chunks and drops them. gzip members concatenate,
+    so the file reads back as one stream, but the flush boundary is a new
+    place for reads to go missing, so it is tested at a size where every
+    sample flushes many times.
+    """
+    print("\nstreaming output")
+    tmp = tempfile.mkdtemp()
+    try:
+        # SampleWriter on its own first: many members, awkward totals.
+        w = dx.SampleWriter(os.path.join(tmp, "unit"), flush_records=3)
+        expect = {}
+        for s, n in (("A", 10), ("B", 1), ("C", 9), ("D", 0)):
+            expect[s] = [(f"{s}-r{i}", "ACGT" * (i + 1), "I" * 4 * (i + 1))
+                         for i in range(n)]
+            for rid, seq, qual in expect[s]:
+                w.add(s, rid, seq, qual)
+        w.close()
+
+        check("a sample with no reads gets no file",
+              not os.path.exists(w.path_for("D")))
+        check("the written count equals what went in",
+              w.written == 20, str(w.written))
+        for s in ("A", "B", "C"):
+            with gzip.open(w.path_for(s), "rt") as fh:
+                lines = fh.read().splitlines()
+            got = [(lines[i][1:], lines[i + 1], lines[i + 3])
+                   for i in range(0, len(lines), 4)]
+            check(f"sample {s} reads back complete and in order",
+                  got == expect[s],
+                  f"{len(got)} records, expected {len(expect[s])}")
+
+        # Then end to end: the same run at two flush sizes must agree
+        # byte for byte, or the buffer is losing or reordering reads.
+        truth, calls, ss = build_and_demux(tmp, reads=400)
+        big = os.path.join(tmp, "demux", "reads")
+        small = os.path.join(tmp, "demux_small", "reads")
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            dx.main([
+                "--reads", os.path.join(tmp, "sim", "RUN01", "RUN01.fastq.gz"),
+                "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                "--run-id", "RUN01", "--assay", ASSAY,
+                "--outdir", os.path.join(tmp, "demux_small"),
+                "--flush-records", "7",
+            ])
+
+        names = sorted(os.listdir(big))
+        check("the same samples are emitted at either flush size",
+              names == sorted(os.listdir(small)))
+        differing = []
+        for name in names:
+            with gzip.open(os.path.join(big, name), "rt") as fh:
+                a = fh.read()
+            with gzip.open(os.path.join(small, name), "rt") as fh:
+                b = fh.read()
+            if a != b:
+                differing.append(name)
+        check("and every file is identical, flush boundaries and all",
+              not differing, f"differ: {differing[:3]}")
+
+        with open(os.path.join(tmp, "demux_small", "demux_summary.json")) as fh:
+            summ = json.load(fh)
+        check("reads written balances against reads assigned",
+              summ["reads_written_balanced"]
+              and summ["reads_written"] == summ["assigned_reads"],
+              f"{summ['reads_written']} vs {summ['assigned_reads']}")
+        check("and the per-sample counts sum to it",
+              sum(summ["per_sample"].values()) == summ["reads_written"],
+              f"{sum(summ['per_sample'].values())} vs {summ['reads_written']}")
+        n_flushed = max(summ["per_sample"].values()) // 7
+        check("the small run really did flush many times, so this proves something",
+              n_flushed > 5, f"only {n_flushed} flushes for the deepest sample")
+
+        # Re-running into a used directory must replace, not append. An
+        # appended file would double every sample's depth while still
+        # looking like a well-formed FASTQ.
+        before = {n: os.path.getsize(os.path.join(small, n)) for n in names}
+        with contextlib.redirect_stdout(io.StringIO()):
+            dx.main([
+                "--reads", os.path.join(tmp, "sim", "RUN01", "RUN01.fastq.gz"),
+                "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                "--run-id", "RUN01", "--assay", ASSAY,
+                "--outdir", os.path.join(tmp, "demux_small"),
+                "--flush-records", "7",
+            ])
+        after = {n: os.path.getsize(os.path.join(small, n)) for n in names}
+        check("re-running replaces the previous output rather than appending",
+              before == after,
+              f"{sum(after.values()) / max(1, sum(before.values())):.2f}x larger")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_ligation_chimeras() -> None:
+    """Two molecules joined into one read must not demultiplex.
+
+    This is the failure that motivated the check, and it is nastier than
+    a low yield. A head-to-tail join presents molecule A's i5 at the 5'
+    end and molecule B's i7 at the 3'. Both are real declared indices, so
+    the pair is very likely a well on the plate - just not the well
+    either molecule came from. It lands in tier A, is assigned, and
+    nothing downstream could ever notice. So the test is not "are these
+    caught" but "are they kept out of the per-sample output".
+    """
+    print("\nligation chimeras")
+    tmp = tempfile.mkdtemp()
+    try:
+        truth, calls, ss = build_and_demux(tmp, n_samples=24, unused=4,
+                                           reads=150)
+        src = os.path.join(tmp, "sim", "RUN01", "RUN01.fastq.gz")
+        with gzip.open(src, "rt") as fh:
+            lines = fh.read().splitlines()
+        # Split the header the way the reader does, or these ids will not
+        # join against the assignment table and the selection below comes
+        # back empty.
+        recs = [(lines[i][1:].split()[0], lines[i + 1], lines[i + 3])
+                for i in range(0, len(lines), 4)]
+
+        # Only join molecules that are individually COMPLETE - reads that
+        # already resolved both of their own ends. That is the class the
+        # check can detect, because joining two complete molecules
+        # necessarily buries a full adapter structure at the junction.
+        #
+        # Joining truncated fragments instead produces a chimera with one
+        # usable end from each and NO adapter between them: indetectable
+        # by this method, or any method that works from adapter position.
+        # Such a read is tested separately below, as a measured residue
+        # rather than as a requirement the method cannot meet.
+        complete = [r for r in recs
+                    if calls.get(r[0], {}).get("tier") == "A"]
+        rc = dx.revcomp
+        joined = os.path.join(tmp, "chim")
+        os.makedirs(joined, exist_ok=True)
+        pairs = []
+        with gzip.open(os.path.join(joined, "c.fastq.gz"), "wt") as fh:
+            for k in range(0, min(len(complete) - 1, 600), 2):
+                a, b = complete[k], complete[k + 1]
+                fh.write(f"@cat{k}\n{a[1] + b[1]}\n+\n{a[2] + b[2]}\n")
+                fh.write(f"@inv{k}\n{a[1] + rc(b[1])}\n+\n{a[2] + b[2][::-1]}\n")
+                pairs.append(f"cat{k}")
+                pairs.append(f"inv{k}")
+
+        out = os.path.join(tmp, "demux_chim")
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            dx.main(["--reads", joined,
+                     "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                     "--run-id", "RUN01", "--assay", ASSAY, "--outdir", out])
+        with open(os.path.join(out, "assignments.tsv"), encoding="utf-8") as fh:
+            got = {r["read_id"]: r for r in csv.DictReader(fh, delimiter="\t")}
+
+        chim = [got[p] for p in pairs if p in got]
+        assigned = [r for r in chim if r["sample_id"]]
+        check("every chimera was read back",
+              len(chim) == len(pairs), f"{len(chim)} of {len(pairs)}")
+        check("no join of two complete molecules is assigned to a sample",
+              not assigned,
+              f"{len(assigned)} of {len(chim)} were assigned, e.g. "
+              f"{assigned[0]['read_id'] if assigned else ''}")
+        in_e = sum(1 for r in chim if r["tier"] == "E")
+        # Head-to-head joins often fail outright on their own ends and
+        # never reach the tier-A check, so E is a floor, not the total.
+        # What matters is that none are assigned; E is how many were
+        # caught specifically by the junction scan.
+        check("a substantial share are caught by the junction scan itself",
+              in_e > 0.25 * len(chim), f"{in_e} of {len(chim)} in tier E")
+
+        with open(os.path.join(out, "demux_summary.json")) as fh:
+            summ = json.load(fh)
+        check("tier E appears in the summary's tier table",
+              summ["by_tier"].get("E", 0) > 0)
+        check("read accounting still balances with the new tier",
+              summ["read_accounting_balanced"])
+        check("and the written reads still balance",
+              summ["reads_written_balanced"])
+
+        # The check must not cost clean reads: same pipeline, unjoined.
+        clean_out = os.path.join(tmp, "demux_clean")
+        with contextlib.redirect_stdout(io.StringIO()):
+            dx.main(["--reads", src,
+                     "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                     "--run-id", "RUN01", "--assay", ASSAY,
+                     "--outdir", clean_out])
+        with open(os.path.join(clean_out, "demux_summary.json")) as fh:
+            cs = json.load(fh)
+        false_pos = cs["by_tier"].get("E", 0) / max(1, cs["total_reads"])
+        check("clean single-molecule reads are not flagged",
+              false_pos < 0.01, f"{100 * false_pos:.2f}% of clean reads hit E")
+
+        # The residue the method cannot reach: two TRUNCATED fragments
+        # joined, contributing one end each and no adapter in between.
+        # This is asserted to be detected-as-undetectable rather than
+        # caught, so that the limitation is recorded in the test suite
+        # instead of living only in a comment.
+        frags = [r for r in recs
+                 if calls.get(r[0], {}).get("tier") == "B"]
+        if len(frags) >= 4:
+            fdir = os.path.join(tmp, "frag")
+            os.makedirs(fdir, exist_ok=True)
+            with gzip.open(os.path.join(fdir, "f.fastq.gz"), "wt") as fh:
+                for k in range(0, min(len(frags) - 1, 200), 2):
+                    a, b = frags[k], frags[k + 1]
+                    fh.write(f"@frag{k}\n{a[1] + b[1]}\n+\n{a[2] + b[2]}\n")
+            fout = os.path.join(tmp, "demux_frag")
+            with contextlib.redirect_stdout(io.StringIO()):
+                dx.main(["--reads", fdir,
+                         "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                         "--run-id", "RUN01", "--assay", ASSAY,
+                         "--outdir", fout])
+            with open(os.path.join(fout, "demux_summary.json")) as fh:
+                fs = json.load(fh)
+            leak = fs["assigned_reads"] / max(1, fs["total_reads"])
+            # Reported, not asserted. There is no threshold here that
+            # would mean anything: the number depends entirely on how the
+            # fragments were made, and a passing assertion on it would be
+            # decoration. What it documents is that the figure is not
+            # zero and the method does not claim otherwise.
+            print(f"  ..   fragment chimeras (no adapter at the junction) "
+                  f"leak through: {100 * leak:.0f}% assigned, "
+                  f"{fs['by_tier'].get('E', 0)} caught - a limit of any "
+                  "adapter-based check")
+
+        # And it can be switched off, because a yield/correctness trade is
+        # the user's call to make, not one to make silently on their behalf.
+        off_out = os.path.join(tmp, "demux_off")
+        with contextlib.redirect_stdout(io.StringIO()):
+            dx.main(["--reads", joined,
+                     "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                     "--run-id", "RUN01", "--assay", ASSAY,
+                     "--outdir", off_out, "--no-chimera-check"])
+        with open(os.path.join(off_out, "demux_summary.json")) as fh:
+            os_ = json.load(fh)
+        check("--no-chimera-check restores the old, wrong behaviour",
+              os_["by_tier"].get("E", 0) == 0
+              and os_["assigned_reads"] > summ["assigned_reads"],
+              f"E={os_['by_tier'].get('E', 0)} "
+              f"assigned {os_['assigned_reads']} vs {summ['assigned_reads']}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_parallel_matches_serial() -> None:
+    """Thread count must not be an input to the result.
+
+    Demultiplexing is sharded by input file so a full flow cell finishes
+    inside a wall-clock limit, and each shard writes its own per-sample
+    FASTQ, its own slice of the per-read table and its own tallies. Three
+    things could go wrong and none of them would announce itself: shards
+    merged in completion order rather than input order, tallies summed
+    from a subset, or per-sample reads lost when the parts are joined. So
+    the test is byte equality against the same data read as one file.
+    """
+    print("\nsharded demultiplexing")
+    tmp = tempfile.mkdtemp()
+    try:
+        truth, calls, ss = build_and_demux(tmp, n_samples=24, unused=4,
+                                           reads=200)
+        src = os.path.join(tmp, "sim", "RUN01", "RUN01.fastq.gz")
+        with gzip.open(src, "rt") as fh:
+            lines = fh.read().splitlines()
+        n = len(lines) // 4
+
+        shard = os.path.join(tmp, "shard")
+        os.makedirs(shard, exist_ok=True)
+        per = (n + 4) // 5
+        for f in range(5):
+            with gzip.open(os.path.join(shard, f"b{f}.fastq.gz"), "wt") as out:
+                for i in range(f * per, min((f + 1) * per, n)):
+                    out.write("\n".join(lines[4 * i:4 * i + 4]) + "\n")
+
+        import contextlib
+        import io
+        outs = {}
+        for tag, reads, threads in (("one", src, 1), ("many", shard, 4)):
+            d = os.path.join(tmp, "dx_" + tag)
+            with contextlib.redirect_stdout(io.StringIO()):
+                dx.main(["--reads", reads,
+                         "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                         "--run-id", "RUN01", "--assay", ASSAY,
+                         "--outdir", d, "--threads", str(threads)])
+            outs[tag] = d
+
+        with open(os.path.join(outs["one"], "assignments.tsv")) as fh:
+            a = fh.read()
+        with open(os.path.join(outs["many"], "assignments.tsv")) as fh:
+            b = fh.read()
+        check("the per-read table is identical, and in input order",
+              a == b, f"{len(a)} vs {len(b)} bytes")
+
+        ra = sorted(os.listdir(os.path.join(outs["one"], "reads")))
+        rb = sorted(os.listdir(os.path.join(outs["many"], "reads")))
+        check("the same samples get files", ra == rb,
+              f"{len(ra)} vs {len(rb)}")
+        differing = []
+        for name in ra:
+            with gzip.open(os.path.join(outs["one"], "reads", name), "rt") as fh:
+                x = fh.read()
+            with gzip.open(os.path.join(outs["many"], "reads", name), "rt") as fh:
+                y = fh.read()
+            if x != y:
+                differing.append(name)
+        # Parts are joined by concatenating compressed bytes, which is a
+        # valid gzip file only because members concatenate. If that ever
+        # stops being true this is where it shows.
+        check("every per-sample FASTQ reads back identical after merging",
+              not differing, f"differ: {differing[:3]}")
+
+        sa = json.load(open(os.path.join(outs["one"], "demux_summary.json")))
+        sb = json.load(open(os.path.join(outs["many"], "demux_summary.json")))
+        keys = [k for k in sa if k not in ("input_files", "settings")]
+        bad = [k for k in keys if sa[k] != sb.get(k)]
+        check("every tally agrees, including the index matrix",
+              not bad, f"differ: {bad}")
+        check("and both still balance their read accounting",
+              sa["read_accounting_balanced"] and sb["read_accounting_balanced"]
+              and sa["reads_written_balanced"] and sb["reads_written_balanced"])
+
+        # Resumption: drop some parts and rerun. The rebuilt output must
+        # equal the untouched one, or a resumed job is not the same job.
+        parts = os.path.join(outs["many"], "parts")
+        removed = 0
+        for name in sorted(os.listdir(parts)):
+            if name.startswith(("00001", "00003")):
+                path = os.path.join(parts, name)
+                shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+                removed += 1
+        with contextlib.redirect_stdout(io.StringIO()):
+            dx.main(["--reads", shard,
+                     "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                     "--run-id", "RUN01", "--assay", ASSAY,
+                     "--outdir", outs["many"], "--threads", "4"])
+        with open(os.path.join(outs["many"], "assignments.tsv")) as fh:
+            c = fh.read()
+        check("a resumed run reproduces the same output exactly",
+              c == a, f"{removed} part files were removed before resuming")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
+    test_parallel_matches_serial()
+    test_ligation_chimeras()
     test_find_anchor()
     test_index_matrix()
+    test_streaming_output()
     test_minknow_input()
     test_barcode_set()
     test_against_truth()
