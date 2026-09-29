@@ -1,0 +1,35 @@
+# Subject metadata for nf-helminth-amplicon.
+#
+# SEPARATE FROM THE SAMPLESHEET, DELIBERATELY. A samplesheet row is a
+# LIBRARY: which index went in which well, frozen at prep, validated
+# against the run. A row here is a SUBJECT: it accumulates corrections
+# for years. One subject is usually several libraries - replicates, both
+# platforms, re-runs - so folding these fields into the samplesheet would
+# duplicate them across rows and turn one correction into an N-row edit.
+#
+# It is also a privacy boundary. The samplesheet travels: to the
+# sequencing centre, into the run folder, into every results directory.
+# This file does not have to, and the pipeline runs perfectly well
+# without it.
+#
+# JOIN KEY: subject_id, matched against the samplesheet's subject_id
+# column. That column is optional and defaults to sample_id, so a study
+# with one library per subject needs no extra column at all. Where
+# replicates exist, set subject_id explicitly rather than relying on a
+# suffix-stripping regex - a convention holds until one identifier
+# breaks it, and then it fails silently.
+#
+# LOCATION: country and population only. Anything finer is masked before
+# it reaches the pipeline. Pre-flight REFUSES a file carrying latitude,
+# longitude, GPS, postcode or address columns, because their presence
+# means the masking did not happen.
+#
+# Every column other than subject_id is free. Add what the study needs;
+# nothing here is required, and unknown fields are carried through
+# rather than dropped.
+#
+subject_id	country	population	host_age_years	host_sex	collection_date	treatment_arm	notes
+iCCH-001	Bangladesh	Chandpur	34	F	2026-03-11	pre_treatment
+iCCH-002	Bangladesh	Chandpur	8	M	2026-03-11	pre_treatment
+iCCH-003	Bangladesh	Chandpur	51	F	2026-03-12	post_treatment	repeat sampling
+iCCH-004	Bangladesh	Matlab	27	M	2026-03-14	pre_treatment

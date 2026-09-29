@@ -1207,6 +1207,215 @@ def test_delimiter_mismatch() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_manifest_paths_are_portable() -> None:
+    """A relative path in the manifest means "relative to the manifest".
+
+    It has to, because the tool's working directory is not stable: the
+    shell drivers run it wherever you launched them, and Nextflow runs
+    it inside a work/ab/cdef scratch directory. Resolving against the
+    process CWD makes the same manifest work one way and fail the other,
+    with nothing in the file to explain why.
+    """
+    print("\nmanifest path resolution")
+    tmp = tempfile.mkdtemp()
+    try:
+        # absolute paths pass through untouched
+        p = os.path.join(tmp, "runs.tsv")
+        check("an absolute path is left alone",
+              pf.resolve_against(p, "/nfs/data/run01") == "/nfs/data/run01")
+        check("an empty path is left alone",
+              pf.resolve_against(p, "") == "")
+
+        # a relative path resolves against the manifest, not the cwd
+        got = pf.resolve_against(p, "reads/run01")
+        check("a relative path resolves against the manifest's directory",
+              got == os.path.join(tmp, "reads/run01"), got)
+        check("and it does not depend on the working directory",
+              pf.resolve_against(p, "reads/run01") == got)
+        check("'..' is normalised rather than left in the path",
+              pf.resolve_against(p, "../shared/reads")
+              == os.path.normpath(os.path.join(os.path.dirname(tmp),
+                                               "shared/reads")))
+
+        # end to end: run pre-flight from somewhere else entirely
+        ref, ss, runs = build_case(tmp)
+        with open(runs, encoding="utf-8") as fh:
+            rows = fh.read().splitlines()
+        head, row = rows[0].split("\t"), rows[1].split("\t")
+        col = head.index("path")
+        row[col] = os.path.relpath(row[col], tmp)   # make it relative
+        with open(runs, "w", encoding="utf-8") as fh:
+            fh.write("\t".join(head) + "\n" + "\t".join(row) + "\n")
+
+        here = os.getcwd()
+        other = tempfile.mkdtemp()
+        try:
+            os.chdir(other)          # deliberately NOT where the data is
+            code = pf.main(["--reference", ref, "--samplesheet", ss,
+                            "--runs", runs, "--index-map", INDEX_MAP,
+                            "--outdir", os.path.join(tmp, "out_rel")])
+        finally:
+            os.chdir(here)
+            shutil.rmtree(other, ignore_errors=True)
+        check("pre-flight passes with a relative manifest path from "
+              "an unrelated working directory", code == 0, f"exit {code}")
+
+        # And when the manifest has been COPIED somewhere else, as
+        # Nextflow does when it stages it, the original directory has to
+        # be supplied - the file's own location no longer says anything
+        # about where the reads are.
+        staged = os.path.join(tempfile.mkdtemp(), "runs.tsv")
+        shutil.copy(runs, staged)
+        code = pf.main(["--reference", ref, "--samplesheet", ss,
+                        "--runs", staged, "--index-map", INDEX_MAP,
+                        "--outdir", os.path.join(tmp, "out_staged")])
+        check("a staged manifest fails without --path-base, as it must",
+              code == 1, f"exit {code} - a relative path resolved to "
+                         "somewhere it should not have")
+        code = pf.main(["--reference", ref, "--samplesheet", ss,
+                        "--runs", staged, "--path-base", tmp,
+                        "--index-map", INDEX_MAP,
+                        "--outdir", os.path.join(tmp, "out_base")])
+        check("and passes when --path-base names the real directory",
+              code == 0, f"exit {code}")
+
+        # runs_resolved.tsv is the contract main.nf depends on. The
+        # nanopore branch used to re-read the raw manifest and redo
+        # this resolution in Groovy, and got it wrong twice - once
+        # against the launch directory, once with a guard that could
+        # not fire. Both shipped, because Groovy cannot be executed
+        # where this is developed. The resolution now happens only
+        # here, so it is only testable here, so it is tested here.
+        out = os.path.join(tmp, "out_base")
+        resolved = os.path.join(out, "runs_resolved.tsv")
+        check("pre-flight writes the resolved run manifest",
+              os.path.exists(resolved), resolved)
+        rows = list(csv.DictReader(open(resolved, encoding="utf-8"),
+                                   delimiter="\t"))
+        check("it has a row per run", len(rows) == 1, str(len(rows)))
+        check("every path in it is absolute",
+              all(os.path.isabs(r["path"]) for r in rows),
+              str([r["path"] for r in rows]))
+        check("and every path in it exists",
+              all(os.path.exists(r["path"]) for r in rows),
+              str([r["path"] for r in rows]))
+        check("and it carries the platform, which routes the workflow",
+              all(r["platform"] in ("illumina", "nanopore") for r in rows),
+              str([r["platform"] for r in rows]))
+
+        # The point of the whole exercise: the resolved path must not
+        # depend on where the tool was run from.
+        here = os.getcwd()
+        try:
+            os.chdir(tempfile.gettempdir())
+            code = pf.main(["--reference", ref, "--samplesheet", ss,
+                            "--runs", staged, "--path-base", tmp,
+                            "--index-map", INDEX_MAP,
+                            "--outdir", os.path.join(tmp, "out_cwd")])
+        finally:
+            os.chdir(here)
+        other = list(csv.DictReader(
+            open(os.path.join(tmp, "out_cwd", "runs_resolved.tsv"),
+                 encoding="utf-8"), delimiter="\t"))
+        check("the resolved path is the same from a different cwd",
+              [r["path"] for r in other] == [r["path"] for r in rows],
+              f"{[r['path'] for r in other]} vs {[r['path'] for r in rows]}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_subject_metadata() -> None:
+    """Metadata joins to the samplesheet; it does not live inside it.
+
+    The join is the thing worth testing, because a join that silently
+    drops rows produces an analysis that groups half a plate into
+    nothing and never says so. Missing metadata must be survivable - a
+    study mid-collection legitimately has subjects whose records have
+    not arrived - while metadata matching nothing must be noticed,
+    because that is an identifier convention that changed on one side.
+    """
+    print("\nsubject metadata")
+    tmp = tempfile.mkdtemp()
+    try:
+        def meta(path, rows, header="subject_id\tcountry\tpopulation"):
+            with open(path, "w") as fh:
+                fh.write(header + "\n")
+                for r in rows:
+                    fh.write("\t".join(r) + "\n")
+
+        class Fake:
+            """Just enough of a Sample for the join."""
+            def __init__(self, sid, sub):
+                self.sample_id, self.subject_id = sid, sub
+
+        samples = [Fake("iCCH-001-r1", "iCCH-001"),
+                   Fake("iCCH-001-r2", "iCCH-001"),
+                   Fake("iCCH-002-r1", "iCCH-002"),
+                   Fake("iCCH-003-r1", "iCCH-003")]
+
+        # complete join
+        p = os.path.join(tmp, "m1.tsv")
+        meta(p, [["iCCH-001", "Bangladesh", "Chandpur"],
+                 ["iCCH-002", "Bangladesh", "Chandpur"],
+                 ["iCCH-003", "Bangladesh", "Matlab"]])
+        d = pf.Diagnostics()
+        rep = pf.check_metadata_join(samples, pf.parse_metadata(p, d), d)
+        check("a complete join is clean", d.ok and not d.warnings, str(d.warnings))
+        check("replicates collapse to one subject",
+              rep["subjects"] == 3 and rep["matched"] == 3, str(rep))
+        check("and a subject with several libraries is recorded",
+              rep["subjects_with_multiple_libraries"] == {"iCCH-001": 2},
+              str(rep["subjects_with_multiple_libraries"]))
+
+        # a subject with no metadata: survivable, and said out loud
+        p2 = os.path.join(tmp, "m2.tsv")
+        meta(p2, [["iCCH-001", "Bangladesh", "Chandpur"]])
+        d = pf.Diagnostics()
+        rep = pf.check_metadata_join(samples, pf.parse_metadata(p2, d), d)
+        check("missing metadata does not fail the run", d.ok, str(d.errors))
+        check("but it is reported, with the subjects named",
+              any("no metadata row" in m for m in d.notes), str(d.notes))
+        check("and the gap is listed in the summary",
+              rep["subjects_without_metadata"] == ["iCCH-002", "iCCH-003"],
+              str(rep["subjects_without_metadata"]))
+
+        # metadata matching nothing: the convention changed somewhere
+        p3 = os.path.join(tmp, "m3.tsv")
+        meta(p3, [["iCCH-001", "Bangladesh", "Chandpur"],
+                  ["ICCH_099", "Bangladesh", "Matlab"]])
+        d = pf.Diagnostics()
+        pf.check_metadata_join(samples, pf.parse_metadata(p3, d), d)
+        check("metadata matching no subject is a warning",
+              any("match no subject" in m for m in d.warnings), str(d.warnings))
+
+        # duplicate subject rows
+        p4 = os.path.join(tmp, "m4.tsv")
+        meta(p4, [["iCCH-001", "Bangladesh", "Chandpur"],
+                  ["iCCH-001", "Bangladesh", "Matlab"]])
+        d = pf.Diagnostics()
+        pf.parse_metadata(p4, d)
+        check("one row per subject is enforced",
+              any("more than once" in m for m in d.errors), str(d.errors))
+
+        # the privacy boundary
+        p5 = os.path.join(tmp, "m5.tsv")
+        meta(p5, [["iCCH-001", "Bangladesh", "23.2", "90.4"]],
+             header="subject_id\tcountry\tlatitude\tlongitude")
+        d = pf.Diagnostics()
+        pf.parse_metadata(p5, d)
+        check("coordinates are refused outright, not merely warned about",
+              any("latitude" in m and "longitude" in m for m in d.errors),
+              str(d.errors))
+
+        # and no metadata at all is a perfectly good state
+        d = pf.Diagnostics()
+        rep = pf.check_metadata_join(samples, {}, d)
+        check("a run with no metadata file is not an error",
+              d.ok and rep["metadata_supplied"] is False)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_delimiter_mismatch()
@@ -1225,6 +1434,8 @@ def main() -> int:
     test_samplesheet_errors()
     test_warnings_not_errors()
     test_sentinel_detection()
+    test_manifest_paths_are_portable()
+    test_subject_metadata()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

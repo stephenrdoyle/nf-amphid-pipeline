@@ -4,10 +4,109 @@ Targeted amplicon panel analysis for Illumina and nanopore, built around
 competitive mapping against a defined reference panel with spiked
 quantification standards and tagged control plasmids.
 
-**Status: increments 1–2 of 6 — pre-flight validation, and the read
-simulator with its truth table.** No real reads are processed yet. The design
-specification covers the full pipeline; this repository implements the first
-two stages of it.
+**Status: all stages implemented and tested; the Nextflow layer has not
+yet been run on real data.**
+
+Every analysis stage — pre-flight, concatemer splitting, demultiplexing,
+read preparation, assignment, synthesis, reporting, mock calibration and
+cross-run comparison — exists, is covered by tests against a simulator
+with a truth table, and has been executed on real nanopore data through
+the shell drivers in `bin/`.
+
+**Both branches now run end to end under Nextflow.** `-profile
+test,local` takes the Illumina fixtures through, 8 samples in and 8
+called; `-profile test_ont,local` does the same for nanopore, with
+splitting fanned out to one task per MinKNOW batch file.
+
+The nanopore run has been checked against the shell driver on the same
+fixture, and the two agree exactly: identical per-sample depths,
+identical per-target read counts, and identical calls for all 8
+samples across 5 targets. That is the sharded Nextflow route and the
+threaded single-task route reaching the same answer through different
+orchestration.
+
+Getting there needed one correction worth recording. The first
+comparison showed every call differing, which looked like the two
+routes disagreeing. They did not: `-profile test_ont` sets
+`min_depth = 10` while the driver hardcoded the default of 100, and
+the fixture's wells are 39-96 reads deep, so one route called
+everything `assay_failed` and the other called it properly. The reads
+and depths had matched all along. The driver now takes `MIN_DEPTH` and
+`PERMUTATIONS` from the environment so the two can be compared like
+for like - a driver that hardcodes what the workflow exposes cannot be
+used to check the workflow.
+
+The claim that used to stand here — that a `-stub-run` proved the DAG
+connects — was wrong, and worth recording because of how it was wrong.
+The stub `file_resolution.tsv` carried one row saying `nanopore`, while
+the test manifest said `illumina`. So the Illumina branch saw no
+matching row, the nanopore branch saw no matching run, every process
+after pre-flight was skipped, and Nextflow printed `Complete`. One
+process had executed, and the green output read as a passing test of
+the whole workflow.
+
+Correcting that row to `illumina` fixed the symptom and left the cause:
+**a stub does not read its inputs**, so a hardcoded `file_resolution`
+*decides* the platform instead of reflecting it, and
+`-profile test_ont -stub-run` still ran the Illumina branch with an
+invented sample called `STUB_SAMPLE`. A workflow whose routing IS its
+input data cannot be stub-tested by a stub that invents that data.
+
+So `PREFLIGHT` and `SPLIT_LIST` now run **for real** under `-stub-run`.
+Both are standard-library Python that touch no reads and finish in
+about a second — between them they read a samplesheet and list a
+directory. They are the two processes whose real execution is cheaper
+than a convincing fake, and faking them is what made the stub run
+meaningless: the first invents the platform column that chooses the
+branch, the second invents the file list whose length IS the fan-out
+under test. Every other process still stubs normally.
+
+A related lesson, from the fix that followed. The nanopore branch of
+main.nf used to re-read the run manifest itself and resolve relative
+paths in Groovy - duplicating what preflight.py already did. That
+duplicate was wrong twice in succession: first it resolved against the
+launch directory, then the corrected version used an `isAbsolute()`
+guard that could never fire, because Nextflow's `file()` has already
+made the path absolute by the time you ask. Both shipped, because
+Groovy cannot be executed in the environment this is developed in.
+
+The third attempt deleted the duplicate instead of fixing it.
+Pre-flight now writes `runs_resolved.tsv` with absolute paths and the
+workflow reads that, which restores the rule main.nf already stated
+and the nanopore branch was quietly breaking: *a path pre-flight
+blessed is the only path the rest of the pipeline sees*. The
+resolution happens once, in Python, where it has tests. If logic
+cannot be executed, the answer is to move it somewhere that can be
+rather than to write it more carefully.
+
+Three of this project's false passes have now had the same shape: a
+comparison of two empty files that reported "identical", a sample count
+re-read from a stale results directory, and a stub run that executed
+one task. In each case the output looked like success and measured
+nothing. The guards added since — non-vacuity assertions in the tests,
+a cohort completeness check in synthesis, and `.ifEmpty { error ... }`
+on the assignment channel so a run where no sample is processed fails
+instead of completing — exist because reading the green line is not
+the same as checking the number.
+
+Nextflow cannot be installed in the environment this was developed in,
+so the workflow is also checked statically — flags against each tool's
+real argparse, `.out` references against emits, params against the
+config, declared outputs against what the tools write, call arity
+against each process's input block, distinct placeholders for optional
+inputs, stub outputs that are parsed being structurally valid, and every
+tool in `bin/` being executable with a shebang.
+
+Six of those checks exist because the corresponding bug got through. The
+first execution of the workflow found, in order: two optional inputs
+colliding on the name `NO_FILE`; a CPU request larger than the host; a
+memory request that `withLabel` precedence silently restored after a
+profile had lowered it; an empty stub file that `splitCsv` could not
+parse; a relative manifest path resolving into Nextflow's staging
+directory; and nine tools without the executable bit, which only matters
+because Nextflow invokes them as commands rather than as arguments to
+`python3`. None was findable without running it, and none was about the
+science.
 
 ## Why pre-flight comes first
 
@@ -30,8 +129,13 @@ python3 bin/preflight.py \
     --index-map assets/index_map.tsv \
     --outdir preflight
 
-# or through Nextflow
-nextflow run . -profile test,local
+# nanopore fixtures - several MinKNOW batch files, real concatemers
+python3 tests/make_ont_fixture.py
+
+# or through Nextflow. The two profiles exercise the two branches of
+# main.nf; a failure should say which.
+nextflow run . -profile test,local          # Illumina branch
+nextflow run . -profile test_ont,local      # nanopore branch
 ```
 
 All logic lives in `bin/preflight.py` as standard-library Python with no
@@ -40,21 +144,34 @@ layer is orchestration only.
 
 ## Running a real run
 
-Two drivers run everything serially without Nextflow. Both have been
-executed end to end; the Nextflow layer has not. Use these until
-`nextflow run` has been shaken down.
+Two ways, and they are not equals.
+
+**Nextflow is the intended interface.** One invocation handles a run of
+either platform, or both at once: `main.nf` reads the `platform` column
+of the samplesheet, routes Illumina libraries and nanopore runs down
+their own subworkflows, and merges them back into one assignment step.
+That is the design, and the switch is built.
 
 ```bash
-# Illumina: one pair of files per sample, already demultiplexed
-bin/run_illumina.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
-
-# nanopore: one pool with the indices still in the reads
-bin/run_nanopore.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
+nextflow run . -profile test,local          # fixtures, end to end
+nextflow run . -profile farm \
+    --reference reference.tsv --samplesheet samplesheet.csv \
+    --runs runs.tsv --primers primers.tsv --outdir results
 ```
 
-Both are resumable — a sample whose outputs exist is skipped, so a job
-killed by a wall-clock limit can simply be started again. For nanopore,
-demultiplexing is skipped too; delete `results/demux` to force a redo.
+**The shell drivers are a stopgap** from before the Nextflow layer
+existed, kept because every stage in them has been executed on real
+data and the workflow has not. They are single-platform, take positional
+arguments, and reimplement in shell what `-resume` does properly.
+
+```bash
+bin/run_illumina.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
+THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.csv runs.tsv primers.tsv
+```
+
+Use the drivers until the workflow has been shaken down on real data,
+then stop: the longer both exist the further they drift, and they have
+drifted once already.
 
 ### Choosing the driver
 
@@ -1013,16 +1130,151 @@ workflow bug at all:
   containing `"work"`, which silently excluded `subworkflows/` from every
   check
 
-### What the checker cannot tell you
+### Splitting fans out across the farm
 
-Channel cardinality, whether a `collect()` blocks, whether the DAG
-deadlocks, whether `stageAs` lands files where a process expects them.
-Those need Nextflow. On the first real run, verify in this order:
+Concatemer splitting is the stage that walks every base of every read,
+and on the first real MinION run it hit a twelve hour wall clock limit
+without finishing. It is now one Nextflow task per input FASTQ rather
+than one task with sixteen threads.
+
+The reason it is per file and single core is that **the work divides by
+input file**. `split_one_file()` is the unit; `--threads` only ever
+sized a pool over those file-level jobs, and the tool says so itself
+when given more threads than files:
+
+```
+note: only N file(s) to process, so at most N of the 16 threads can be used.
+```
+
+A shard holding one file therefore has nothing for a second core to do.
+Asking for sixteen anyway would reserve them and leave them idle - on a
+74 file run, over a thousand cores held for nothing - and it would also
+be *slower*, because LSF places a 1-core job into whatever gap exists
+now and a 16-core job only when a node frees up.
+
+The stage is three processes:
+
+| process | what it does | why separate |
+|---|---|---|
+| `SPLIT_LIST` | resolves the run to a list of FASTQ, one index and path per line | which files constitute a run is a decision with rules (`fastq_pass` in, `fastq_fail` out, pod5 ignored, barcode folders walked) and they live in `resolve_read_files()`. Nextflow asks the tool rather than globbing, so there is one answer and not two that agree until a run directory is reorganised |
+| `SPLIT_CONCATEMERS` | one task per file, `cpus 1`, no `--threads` | the unit of work |
+| `MERGE_SPLIT` | sums the per-shard statistics into `split_summary.json` | every read-funnel percentage downstream is taken against its `reads_in` |
+
+**There is no merge of the reads.** The splitter writes one output FASTQ
+per input FASTQ and demultiplexing walks a directory, so the shards
+*are* the output - gathering them is Nextflow staging them side by
+side, not a rewrite of tens of gigabytes.
+
+Three things that had to be got right:
+
+- **Output naming.** A shard sees one file and would number it `0000`,
+  so every shard of a fanned-out run names its output alike - and two
+  MinKNOW batches in different barcode folders can share a basename.
+  `--part-index`, carried from `SPLIT_LIST`, gives a shard the name the
+  whole-run route would have given it.
+- **One aggregation, not two.** `build_summary()` is shared by both
+  routes rather than reimplemented in the merger. The two quiet ways to
+  get it wrong both yield believable numbers:
+  `bases_retained_fraction` is a ratio of sums, and averaging per-file
+  fractions instead weights a thousand-read batch equally with a
+  million-read one; the pieces-per-read distribution is a histogram to
+  be summed bin by bin.
+- **A missing shard is fatal.** `--expect-parts` is checked, because
+  losing one part of seventy-four raises no error on its own - it
+  produces a read funnel that balances perfectly against a smaller run
+  than the one that was sequenced. A duplicated shard is refused too,
+  since it would double-count a file's reads.
+
+`tests/test_split.py::test_sharded_matches_whole_run` runs both routes
+on the same input and requires the output FASTQ to be identical file by
+file and the summaries to be equal. The first version of that test
+compared two sets of *empty* files and passed, because the fixture it
+used was truncated - so it now also asserts that reads went in, pieces
+came out, and at least one read was actually cut. A comparison of two
+no-ops agrees for the wrong reason.
+
+Demultiplexing is deliberately **not** fanned out this way. A sample's
+reads are scattered across every batch file, so the gather would be
+keyed by sample rather than by file - a different and larger change.
+
+The driver script `bin/run_nanopore.sh` is unaffected and still uses
+the tool's own threading; the two routes are tested against each other.
+
+### The fan-out trap
+
+The first fixture run produced **one** sample where the samplesheet has
+eight, and said nothing about it. The log line was:
+
+```
+PREP_ILLUMINA (BLANK-01) [  0%] 0 of 1
+```
+
+`0 of 1` reads like a small test. It was seven wells disappearing.
+
+Nextflow pairs a process's inputs **positionally and stops at the
+shortest**. `Channel.fromPath` on a single file gives a *queue* channel
+holding one item, and so does every process output. Pair a queue of
+eight samples with a queue of one reference file and you get one task —
+correctly, by Nextflow's own semantics, with no warning. Synthesis then
+reports confidently on the sample that survived.
+
+The fix is `.first()`, which converts a queue channel to a **value**
+channel. A value channel is inexhaustible: it is re-read for every item
+it is paired with and imposes no length on the pairing. In `main.nf`
+every single-file input is converted at the point of creation rather
+than at each call site, so a consumer added later cannot reintroduce it.
+
+**A static check was not enough on its own.** The deeper problem was
+that nothing in the pipeline ever asked whether the whole plate had
+arrived. Synthesis reads `file_resolution.tsv` — the cohort the run
+declared — and globs `*.counts.tsv` — the cohort that turned up — and
+had never compared the two. It does now, before computing anything,
+and a shortfall is fatal:
+
+```
+cohort incomplete: 8 samples declared for run 'RUN01', 1 reached synthesis.
+  lost: MOCK-A, NTC-01, POS-01, iCCH-001-r1, ...
+These samples have reads but no *.counts.tsv, so assignment never ran for them.
+Refusing to report on a partial cohort.
+```
+
+The one legitimate shortfall is a nanopore well that received no reads:
+an empty well demultiplexes to nothing and has no FASTQ to assign. That
+case is distinguishable, because the demultiplexing summary counts
+reads per sample — a well it never saw is empty, a well it wrote reads
+for that then vanished is a lost task. Only the second is fatal; the
+first is recorded in `run_qc.json` as `samples_absent`, with
+`cohort_complete: false`, rather than left as a silent difference
+between the samplesheet and the report. `--allow-missing` overrides,
+and the QC still records that the plate was partial.
+
+This guard protects the driver scripts as well as Nextflow, and would
+have caught the original bug at the first fixture run.
+
+The static check remains, because catching it before submission beats
+catching it an hour in —
+`test_fanout_is_not_capped` walks every call of a process whose first
+input is a `tuple val(meta)`, follows the requirement outward through
+subworkflow `take:` parameters to their callers, and rejects any scalar
+argument that is not value-shaped. Re-introducing either of the two
+original instances makes it fail.
+
+### What the checker still cannot tell you
+
+Whether a `collect()` blocks, whether the DAG deadlocks, whether a
+`join` silently drops a key, whether `stageAs` lands files where a
+process expects them. Those need Nextflow. On the first real run,
+verify in this order:
 
 1. `nextflow run . -profile test,local -stub-run` — every process has a
    stub, so this exercises the DAG's shape without touching data. A
    deadlock or a channel arity error shows up here in seconds.
 2. `-profile test,local` on the fixtures — real data, one machine.
+   **Count the samples before reading any result**: `cut -f2
+   results-test/synthesis/calls.tsv | tail -n +2 | sort -u | wc -l`
+   must equal the samplesheet, and `ls results-test/assign/*.counts.tsv
+   | wc -l` must agree with it. A number that is merely plausible is
+   not a pass.
 3. A single real plate on `-profile farm`, checking that the per-sample
    tasks fan out rather than running serially.
 

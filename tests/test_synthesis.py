@@ -367,6 +367,23 @@ def synth(tmp: str, reference: str, out: str):
                                delimiter="\t"))
 
 
+def synth_with(tmp: str, reference: str, out: str, extra):
+    """As synth(), plus extra flags. Kept separate so the existing
+    callers keep their exact argument list."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        S.main(["--assign-dir", os.path.join(tmp, "assign"),
+                "--samplesheet", os.path.join(tmp, "samplesheet.csv"),
+                "--reference", reference,
+                "--preflight-dir", os.path.join(tmp, "preflight"),
+                "--outdir", out, "--run-id", "RUN01",
+                "--permutations", "200", "--quiet"] + list(extra))
+    with open(os.path.join(out, "calls.tsv"), encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    with open(os.path.join(out, "run_qc.json"), encoding="utf-8") as fh:
+        qc = json.load(fh)
+    return rows, qc
+
+
 def test_end_to_end() -> None:
     print("\nquantification against the composition truth")
     tmp = tempfile.mkdtemp()
@@ -605,13 +622,161 @@ def test_read_funnel() -> None:
           f4["handoff_balances"] is None)
 
 
+def test_control_plasmid_reporting() -> None:
+    """Plasmids are contamination or subject, and the flag decides only calls.
+
+    A tagged control plasmid means two different things depending on the
+    run. In a faecal sample it is contamination, and the number that
+    matters is what share of the well it took. In a titration the
+    plasmids ARE the experiment and each needs a call of its own.
+
+    What must NOT depend on the flag is arithmetic. Both proportions are
+    emitted either way - within a reference's own group, and plasmid as a
+    share of all panel amplicons - because a column whose denominator
+    changes with a command-line switch is a column that will be misread.
+    """
+    print("\ncontrol plasmid reporting")
+    tmp = tempfile.mkdtemp()
+    try:
+        build_run(tmp)
+        ref = os.path.join(tmp, "reference.tsv")
+        off, qoff = synth_with(tmp, ref, os.path.join(tmp, "s_off"), [])
+        on, qon = synth_with(tmp, ref, os.path.join(tmp, "s_on"),
+                             ["--controls-as-targets"])
+
+        check("by default only targets are called",
+              {r["reference_type"] for r in off} == {"target"},
+              str({r["reference_type"] for r in off}))
+        check("with the flag, controls are called too",
+              {r["reference_type"] for r in on} == {"target", "control"},
+              str({r["reference_type"] for r in on}))
+        check("and every target row is byte-identical either way",
+              [r for r in on if r["reference_type"] == "target"] == off,
+              "the flag altered target rows, which it must not")
+
+        poff = qoff["plasmid_contamination"]
+        pon = qon["plasmid_contamination"]
+        check("the contamination measure does not depend on the flag",
+              poff["run_plasmid_share"] == pon["run_plasmid_share"],
+              f"{poff['run_plasmid_share']} vs {pon['run_plasmid_share']}")
+        check("it is reported even when plasmids are the subject",
+              pon["run_plasmid_share"] is not None)
+        check("and the flag is recorded in the output, not merely applied",
+              poff["controls_called_as_targets"] is False
+              and pon["controls_called_as_targets"] is True)
+
+        # A denominator error shows up here and almost nowhere else.
+        for tag, rows in (("off", off), ("on", on)):
+            by: dict = {}
+            for r in rows:
+                if r["fraction_of_group"]:
+                    by.setdefault((r["sample_id"], r["reference_type"]),
+                                  []).append(float(r["fraction_of_group"]))
+            bad = [k for k, v in by.items() if abs(sum(v) - 1.0) > 1e-3]
+            check(f"[{tag}] within-group proportions sum to 1 per sample",
+                  not bad, f"{len(bad)} groups off, e.g. {bad[:2]}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cohort_completeness() -> None:
+    """Synthesis must refuse to report on part of a plate.
+
+    This is the failure that motivated the check: a Nextflow fan-out
+    collapsed eight samples to one, every stage exited zero, and
+    synthesis produced a clean report on 1/8 of the run. Nothing in the
+    pipeline objected, because nothing compared the cohort that was
+    declared with the cohort that arrived - even though synthesis reads
+    both files.
+    """
+    print("\nsynthesis refuses a partial cohort")
+    # Which samples arrive is the subject here, not the
+    # statistics, so the permutation test is turned down.
+    CHEAP = ["--permutations", "5"]
+    tmp = tempfile.mkdtemp()
+    try:
+        build_run(tmp, n_samples=8, reads=700)
+        ref = os.path.join(tmp, "reference.tsv")
+        assign = os.path.join(tmp, "assign")
+        declared = sorted(glob.glob(os.path.join(assign, "*.counts.tsv")))
+        check("the fixture built a full cohort", len(declared) == 8,
+              str(len(declared)))
+
+        # Whole plate: no complaint, and the QC says so.
+        _, qc = synth_with(tmp, ref, os.path.join(tmp, "full"), CHEAP)
+        check("a complete cohort is reported normally", qc["cohort_complete"])
+        check("and records nothing absent", qc["samples_absent"] == [],
+              str(qc["samples_absent"]))
+
+        # Now lose seven of them, exactly as the fan-out bug did.
+        kept = declared[0]
+        for path in declared[1:]:
+            os.remove(path)
+            js = path.replace(".counts.tsv", ".assign.json")
+            if os.path.exists(js):
+                os.remove(js)
+
+        try:
+            synth_with(tmp, ref, os.path.join(tmp, "partial"), CHEAP)
+            check("a partial cohort is fatal", False, "no error raised")
+        except SystemExit as exc:
+            msg = str(exc)
+            check("a partial cohort is fatal", True)
+            check("and the error counts both sides",
+                  "8 samples declared" in msg and "1 reached" in msg, msg[:90])
+            check("and names the samples that were lost",
+                  "MOCK-A" in msg or "iCCH" in msg, msg[:90])
+
+        # A nanopore well that got no reads is NOT a lost sample. The
+        # demultiplexing summary is what tells the two apart, so the
+        # check must consult it rather than refusing every gap.
+        kept_id = os.path.basename(kept)[:-len(".counts.tsv")]
+        demux = os.path.join(tmp, "demux_summary.json")
+        with open(demux, "w", encoding="utf-8") as fh:
+            json.dump({"per_sample": {kept_id: 1500}}, fh)
+        _, qc = synth_with(tmp, ref, os.path.join(tmp, "empty"),
+                           CHEAP + ["--demux-summary", demux])
+        check("an empty nanopore well is not treated as lost",
+              len(qc["samples_absent"]) == 7, str(qc["samples_absent"]))
+        check("but the run is still not called complete",
+              qc["cohort_complete"] is False)
+
+        # ...whereas a sample the demultiplexer DID write reads for, and
+        # which then failed to arrive, is a lost task and still fatal.
+        gone = os.path.basename(declared[1])[:-len(".counts.tsv")]
+        with open(demux, "w", encoding="utf-8") as fh:
+            json.dump({"per_sample": {kept_id: 1500, gone: 9000}}, fh)
+        try:
+            synth_with(tmp, ref, os.path.join(tmp, "lost"),
+                       CHEAP + ["--demux-summary", demux])
+            check("reads written but not assigned is fatal", False,
+                  "no error raised")
+        except SystemExit as exc:
+            check("reads written but not assigned is fatal", True)
+            check("and only that sample is named as lost",
+                  gone in str(exc), str(exc)[:90])
+
+        # The override exists, and says what it cost.
+        _, qc = synth_with(tmp, ref, os.path.join(tmp, "forced"),
+                           CHEAP + ["--allow-missing"])
+        check("--allow-missing reports anyway", qc["n_samples"] == 1)
+        check("and the report admits the cohort was incomplete",
+              qc["cohort_complete"] is False
+              and len(qc["samples_absent"]) == 7,
+              str(qc["samples_absent"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calibration()
     test_read_funnel()
+    test_control_plasmid_reporting()
     test_detection_limit()
     test_calls()
     test_permutation_calibration()
     test_end_to_end()
+    test_cohort_completeness()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

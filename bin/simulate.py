@@ -651,17 +651,41 @@ def write_illumina(
                 )
 
 
-def write_nanopore(rng, reads_by_sample, out_path, model) -> None:
-    """One pooled FASTQ: nanopore demultiplexing happens in the pipeline."""
+def write_nanopore(rng, reads_by_sample, out_path, model,
+                   model_name="nanopore_hac", run_id="RUN01") -> None:
+    """One pooled FASTQ: nanopore demultiplexing happens in the pipeline.
+
+    Headers carry dorado's SAM-style tags, because the pipeline reads the
+    basecalling model out of RG and records it as provenance. Two details
+    that were previously wrong here and are worth keeping right:
+
+    the tags are TAB separated after the read id, not space separated,
+    which is what a parser written against real data expects;
+
+    and the model named is the model actually simulated. It used to say
+    sup whatever error rate had been applied, so a fixture generated as
+    fast would report itself as sup - exactly the kind of false
+    provenance the recording exists to prevent.
+    """
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    variant = model_name.replace("nanopore_", "") or "hac"
+    rg = f"{uuid_like(rng)}_dna_r10.4.1_e8.2_400bps_{variant}@v5.2.0"
     allr = [x for reads in reads_by_sample.values() for x in reads]
     rng.shuffle(allr)
     with gzip.open(out_path, "wt") as fh:
         for rid, mol, _ in allr:
+            qual = qual_string(rng, len(mol), model["rate"])
             fh.write(
-                f"@{rid} model_version_id=dna_r10.4.1_e8.2_400bps_sup@v5.0.0\n"
-                f"{mol}\n+\n{qual_string(rng, len(mol), model['rate'])}\n"
+                f"@{rid}\tRG:Z:{rg}\tPU:Z:SIM00000\tLB:Z:{run_id}\n"
+                f"{mol}\n+\n{qual}\n"
             )
+
+
+def uuid_like(rng) -> str:
+    """A 36-character identifier shaped like the one dorado writes, so the
+    RG parser is exercised on the real layout rather than a shortcut."""
+    h = "".join(rng.choice("0123456789abcdef") for _ in range(32))
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
 
 def write_composition(composition: dict, run_id: str, path: str) -> None:
@@ -780,7 +804,9 @@ def main(argv=None) -> int:
             write_illumina(rng, reads_by_sample, grp, out_dir, model, args.read_length)
         else:
             write_nanopore(
-                rng, reads_by_sample, os.path.join(out_dir, f"{run_id}.fastq.gz"), model
+                rng, reads_by_sample,
+                os.path.join(out_dir, f"{run_id}.fastq.gz"), model,
+                model_name=args.error_model, run_id=run_id,
             )
         write_truth(records, os.path.join(args.outdir, f"{run_id}.truth.tsv"))
         write_composition(

@@ -1,0 +1,9 @@
+run_id,platform,sample_id,index_i7,index_i5,sample_type
+ONT01,nanopore,BLANK-01,TAAGGCGA,CTCTCTAT,neg_extraction
+ONT01,nanopore,NTC-01,AGGCAGAA,CTCTCTAT,neg_ntc
+ONT01,nanopore,MOCK-A,GGACTCCT,CTCTCTAT,mock
+ONT01,nanopore,POS-01,AAGAGGCA,CTCTCTAT,pos_control
+ONT01,nanopore,iCCH-001-r1,GCTCATGA,CTCTCTAT,unknown
+ONT01,nanopore,iCCH-002-r1,GCGTAGTA,CTCTCTAT,unknown
+ONT01,nanopore,iCCH-003-r1,TACGCTGC,CTCTCTAT,unknown
+ONT01,nanopore,iCCH-004-r1,TAGCGCTC,CTCTCTAT,unknown

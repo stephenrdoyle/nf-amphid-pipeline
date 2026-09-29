@@ -331,8 +331,16 @@ def test_outputs() -> None:
         check("nanopore output is a single pooled fastq", os.path.exists(pooled))
         with gzip.open(pooled, "rt") as fh:
             head = fh.readline()
-        check("nanopore header records the basecall model",
-              "model_version_id" in head, head.strip()[:60])
+        # Dorado writes SAM-style tags separated by TABS, and names the
+        # model in RG. The fixture used to emit "model_version_id=" after
+        # a space, which no parser written against real output would find.
+        check("nanopore header carries dorado's RG tag",
+              "\tRG:Z:" in head, head.strip()[:80])
+        rg = [f for f in head.strip().split("\t") if f.startswith("RG:Z:")]
+        # And the model named must be the model simulated. It used to say
+        # sup regardless of the error rate applied.
+        check("and names the model that was actually simulated",
+              rg and "_hac@" in rg[0], rg[0][:80] if rg else "no RG tag")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

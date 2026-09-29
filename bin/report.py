@@ -907,6 +907,38 @@ def build(args) -> str:
             parts.append("</tbody></table>")
             parts.append(f'<p class="note">{esc(qc.get("plate_geometry_note", ""))}</p>')
 
+    # ---- plasmid contamination -----------------------------------------
+    pc = qc.get("plasmid_contamination") or {}
+    if pc.get("run_plasmid_share") is not None:
+        share = pc["run_plasmid_share"]
+        thr = pc.get("warn_above", 0.05)
+        parts.append("<h2>Control plasmid</h2>")
+        mode = ("called as targets - the plasmids are the subject of this run"
+                if pc.get("controls_called_as_targets")
+                else "treated as contamination")
+        parts.append(
+            f"<p>{flag('warn' if share > thr else 'ok', f'{100*share:.2f}%')} "
+            "of panel amplicon reads across the run came from tagged control "
+            f"plasmid. They are {esc(mode)}.</p>")
+        n_over = pc.get("n_wells_above_threshold", 0)
+        if n_over:
+            parts.append(
+                f"<p>{flag('warn', str(n_over))} well(s) are above "
+                f"{100*thr:.0f}%. The worst:</p>")
+            parts.append("<table><thead><tr><th>Well</th><th>Sample</th>"
+                         "<th>Type</th><th class='num'>Plasmid share</th>"
+                         "</tr></thead><tbody>")
+            for w in pc.get("wells_above_threshold", [])[:10]:
+                parts.append(
+                    f"<tr><td>{esc(w.get('well') or '')}</td>"
+                    f"<td>{esc(w['sample_id'])}</td>"
+                    f"<td>{esc(w.get('sample_type') or '')}</td>"
+                    f"<td class='num'>{100*w['plasmid_share']:.1f}%</td></tr>")
+            parts.append("</tbody></table>")
+        else:
+            parts.append(f'<p class="note">No well exceeds {100*thr:.0f}%.</p>')
+        parts.append(f'<p class="note">{esc(pc.get("note", ""))}</p>')
+
     # ---- quantification ------------------------------------------------
     parts.append("<h2>Quantification</h2>")
     slopes = [float(r["slope"]) for r in cal_rows if r.get("slope")]

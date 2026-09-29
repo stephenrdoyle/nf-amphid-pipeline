@@ -49,6 +49,7 @@ import gzip
 import json
 import os
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -388,6 +389,7 @@ def main(argv=None) -> int:
     ap.add_argument("--tag-max-edits", type=int, default=3)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
+    _T0 = time.time()
 
     if not (args.merged or args.reads):
         raise SystemExit("one of --merged (Illumina) or --reads (nanopore)")
@@ -503,7 +505,16 @@ def main(argv=None) -> int:
             fh.write(f"{sid}\t{tx}\t{n}\t{rel}\n")
 
     total = sum(n for _s, _m, n in items) + no_primer
+    # Wall clock per sample, and the read length that drives the cost.
+    # Assignment aligns within a band proportional to read length, so its
+    # cost grows as length squared - which makes "how long did this take"
+    # uninterpretable without "how long were the reads". Recorded together
+    # so a slow run can be explained rather than guessed at.
+    lengths = sorted(len(i[0]) for i in items) if items else [0]
     summary = {
+        "elapsed_s": round(time.time() - _T0, 2),
+        "read_length_median": lengths[len(lengths) // 2],
+        "read_length_p95": lengths[min(len(lengths) - 1, 19 * len(lengths) // 20)],
         "sample_id": sid,
         "sequences_in": total,
         "unique_in": len(items),

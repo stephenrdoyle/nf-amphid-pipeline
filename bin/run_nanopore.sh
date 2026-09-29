@@ -18,6 +18,14 @@
 #
 #   THREADS=16 bin/run_nanopore.sh ...
 #
+# MIN_DEPTH and PERMUTATIONS pass through to synthesis. They exist here
+# because the driver otherwise hardcodes what Nextflow exposes as
+# params, and the two then cannot be compared like for like: run the
+# same fixture both ways and every call differs, not because the
+# pipelines disagree but because one used min_depth 10 and the other
+# 100. That happened, and for a moment it looked like a real
+# discrepancy between the sharded and threaded routes.
+#
 # sets the worker count for both parallel stages. They are the two that
 # read every base of every read, and on a full flow cell they are hours
 # of work - the rest is minutes.
@@ -34,8 +42,31 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ASSAY=${ASSAY:-$HERE/../assets/assay/ampseq_helminth.json}
 IDXMAP=${IDXMAP:-$HERE/../assets/index_map.tsv}
 
+# Per-stage wall clock. A driver that prints only headers cannot answer
+# "where did the seventeen hours go", and on this pipeline the answer
+# has been different every time - splitting, demultiplexing and the
+# per-sample loop each dominated at some point.
+RUN_T0=$(date +%s)
+STAGE_T0=$RUN_T0
+stage() {
+    local now; now=$(date +%s)
+    if [ -n "${STAGE_NAME:-}" ]; then
+        printf '   [%s took %dm %ds]\n' "$STAGE_NAME" \
+            $(( (now - STAGE_T0) / 60 )) $(( (now - STAGE_T0) % 60 ))
+    fi
+    STAGE_NAME=$1
+    STAGE_T0=$now
+}
+finish() {
+    stage ""
+    local now; now=$(date +%s)
+    printf '\nTotal: %dh %dm\n' $(( (now - RUN_T0) / 3600 )) \
+        $(( ((now - RUN_T0) % 3600) / 60 ))
+}
+
 mkdir -p "$OUT"/{preflight,split,demux,assign,synthesis}
 
+stage "pre-flight"
 echo "== pre-flight =================================================="
 python3 "$HERE/preflight.py" \
     --reference "$REF" --samplesheet "$SS" --runs "$RUNS" \
@@ -72,9 +103,25 @@ if [ -z "${RUN_ID:-}" ]; then
     echo "changing, not just one." >&2
     exit 1
 fi
-[ -e "$READS" ] || { echo "run $RUN_ID: reads path does not exist: $READS" >&2; exit 1; }
+# A relative path in the manifest is relative to the MANIFEST, not to
+# wherever this script was invoked from. Pre-flight has always resolved
+# it that way; this driver and the nanopore branch of main.nf both read
+# the manifest directly and did not, so the same runs.tsv worked in one
+# place and not another. Third occurrence of this bug, so it is now
+# fixed in all three.
+case "$READS" in
+    /*) ;;
+    *)  READS="$(cd "$(dirname "$RUNS")" && pwd)/$READS" ;;
+esac
+[ -e "$READS" ] || {
+    echo "run $RUN_ID: reads path does not exist: $READS" >&2
+    echo "A relative path is taken relative to the run manifest" >&2
+    echo "($(cd "$(dirname "$RUNS")" && pwd)), not to \$PWD." >&2
+    exit 1
+}
 
 echo
+stage "split"
 echo "== split concatemers ($RUN_ID) ================================="
 echo "   reads: $READS"
 # Ligation joins amplicons into single reads. Left whole, the outer ends
@@ -93,6 +140,7 @@ python3 "$HERE/split_concatemers.py" \
     --outdir "$OUT/split"
 
 echo
+stage "demultiplex"
 echo "== demultiplex ($RUN_ID) ======================================="
 # Also sharded by input file and resumable per file, so this no longer
 # has to be redone wholesale after a timeout.
@@ -104,6 +152,21 @@ python3 "$HERE/demux_ont.py" \
     ${REPEATS:+--barcode-repeats "$REPEATS"} \
     ${THREADS:+--threads "$THREADS"} \
     --outdir "$OUT/demux"
+
+# If demultiplexing recomputed anything, the per-sample FASTQ have
+# changed and any counts already sitting in assign/ were derived from
+# the old ones. Resuming past that point would mix two vintages in one
+# results directory, which is exactly how a run ends up 88% one
+# algorithm and 12% another without saying so.
+RECOMPUTED=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('parts_recomputed',0))" "$OUT/demux/demux_summary.json" 2>/dev/null || echo 0)
+if [ "${RECOMPUTED:-0}" -gt 0 ]; then
+    n_stale=$(ls "$OUT"/assign/*.counts.tsv 2>/dev/null | wc -l)
+    if [ "$n_stale" -gt 0 ]; then
+        echo "   demultiplexing recomputed $RECOMPUTED part(s); discarding"
+        echo "   $n_stale stale assignment result(s) derived from the old reads"
+        rm -f "$OUT"/assign/*.counts.tsv "$OUT"/assign/*.assign.json
+    fi
+fi
 
 # Demultiplexing names its files after the sanitised sample id, because a
 # sample id is free text and a filename is not. Map back through pre-flight
@@ -126,26 +189,33 @@ if [ "$total" -eq 0 ]; then
     exit 1
 fi
 
-n=0
 echo
+stage "assign"
 echo "== assign ($total samples) ====================================="
+# Samples are independent, so this fans out too. Each command is built
+# with %q so a sample id containing a space or a quote cannot break the
+# line it is written into, and a sample whose counts already exist is
+# never queued - which is what keeps this resumable alongside the rest.
+JOBS="$OUT/assign/jobs.sh"
+: > "$JOBS"
+todo=0
 for fq in "${FQS[@]}"; do
-    n=$((n + 1))
     base=$(basename "$fq" .fastq.gz)
     sample_id=$(unsanitise "$base")
     [ -n "$sample_id" ] || sample_id=$base
-
-    if [ ! -s "$OUT/assign/$sample_id.counts.tsv" ]; then
-        python3 "$HERE/assign.py" \
-            --panel "$PANEL" --reference "$REF" --sample-id "$sample_id" \
-            --reads "$fq" --primers "$PRIMERS" \
-            --assay "$ASSAY" --outdir "$OUT/assign" --quiet
-    fi
-    printf '\r  [%d/%d] %-40s' "$n" "$total" "$sample_id"
+    [ -s "$OUT/assign/$sample_id.counts.tsv" ] && continue
+    printf 'python3 %q/assign.py --panel %q --reference %q --sample-id %q --reads %q --primers %q --assay %q --outdir %q --quiet\n' \
+        "$HERE" "$PANEL" "$REF" "$sample_id" "$fq" "$PRIMERS" "$ASSAY" \
+        "$OUT/assign" >> "$JOBS"
+    todo=$((todo + 1))
 done
-echo
+echo "  $total samples, $((total - todo)) already done, $todo to do on ${THREADS:-1} thread(s)"
+if [ "$todo" -gt 0 ]; then
+    xargs -a "$JOBS" -d '\n' -P "${THREADS:-1}" -I CMD bash -c CMD
+fi
 
 echo
+stage "synthesis"
 echo "== run-level synthesis ========================================="
 # No --prep-dir: there is no merge or pair step on this platform. The read
 # funnel is fed by the demultiplexing summary instead, which is where the
@@ -156,13 +226,19 @@ python3 "$HERE/synthesise.py" \
     --split-summary "$OUT/split/split_summary.json" \
     --samplesheet "$SS" --reference "$REF" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
+    ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
+    ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
+    ${MIN_DEPTH:+--min-depth "$MIN_DEPTH"} \
+    ${PERMUTATIONS:+--permutations "$PERMUTATIONS"} \
     --outdir "$OUT/synthesis"
 
+stage "report"
 echo "== report ======================================================"
 python3 "$HERE/report.py" \
     --synthesis-dir "$OUT/synthesis" --run-id "$RUN_ID" \
     --out "$OUT/${RUN_ID}_report.html"
 
+finish
 echo
 echo "Report:     $OUT/${RUN_ID}_report.html"
 echo "Calls:      $OUT/synthesis/calls.tsv"

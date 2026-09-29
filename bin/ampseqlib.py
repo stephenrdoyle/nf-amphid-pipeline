@@ -192,20 +192,6 @@ def load_primers(path: str) -> PrimerSet:
     return ps
 
 
-def load_primers(path: str) -> PrimerSet:
-    ps = PrimerSet()
-    for r in read_table(path):
-        d = r.get("direction", "").strip().lower()
-        seq = r.get("sequence", "").strip().upper()
-        if not seq:
-            continue
-        if d.startswith("f"):
-            ps.fwd.append((r.get("name", "?"), seq))
-        elif d.startswith("r"):
-            ps.rev.append((r.get("name", "?"), seq))
-    return ps
-
-
 # --------------------------------------------------------------------------
 # bounded edit distance
 # --------------------------------------------------------------------------
@@ -466,6 +452,68 @@ def open_reads(path: str):
             fh.readline()
             qual = fh.readline().rstrip("\n")
             yield head[1:].split()[0], seq, qual
+
+
+def read_run_metadata(paths) -> dict:
+    """What produced these reads, taken from the first read's header.
+
+    Dorado writes SAM-style tags after the read id, and one of them says
+    which basecalling model was used:
+
+        RG:Z:<run uuid>_dna_r10.4.1_e8.2_400bps_hac@v5.2.0
+
+    That belongs in the outputs. A basecalling model is not a neutral
+    detail - it changes the error profile, and therefore the barcode
+    recovery, the anchor hit rate and ultimately how many reads reach
+    each sample. Two runs basecalled with different models can differ in
+    composition for reasons that have nothing to do with biology, and
+    nothing downstream would reveal it. Recording the model is what makes
+    that check possible later.
+
+    Best effort by design: the tags are absent from reads written by
+    anything that rewrote the headers, and absent entirely from older
+    files. An empty dict is a fine answer and never an error.
+    """
+    if isinstance(paths, str):
+        paths = [paths]
+    for path in paths:
+        try:
+            op = gzip.open if str(path).endswith(".gz") else open
+            with op(path, "rt") as fh:
+                head = fh.readline().rstrip("\n")
+        except OSError:
+            continue
+        if not head.startswith("@"):
+            continue
+        fields = head[1:].split("\t")[1:]
+        tags = {}
+        for f in fields:
+            parts = f.split(":", 2)
+            if len(parts) == 3:
+                tags[parts[0]] = parts[2]
+        if not tags:
+            continue
+        out = {}
+        rg = tags.get("RG", "")
+        if rg:
+            # RG is "<36-char run uuid>_<model>". Split on the uuid width
+            # rather than on the first underscore, because model names
+            # contain underscores of their own.
+            if len(rg) > 37 and rg[36] == "_":
+                out["acquisition_id"], out["basecall_model"] = rg[:36], rg[37:]
+            else:
+                out["basecall_model"] = rg
+        for tag, name in (("PU", "flow_cell"), ("LB", "library"),
+                          ("DT", "run_started")):
+            if tags.get(tag):
+                out[name] = tags[tag]
+        if out:
+            # Deliberately NOT recording which file this came from. The
+            # same reads sharded differently would then report different
+            # provenance, and a run must not describe itself differently
+            # according to how its input happened to be batched.
+            return out
+    return {}
 
 
 def phred(qual: str) -> list[int]:

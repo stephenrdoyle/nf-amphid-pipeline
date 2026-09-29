@@ -23,8 +23,31 @@ ASSAY=${ASSAY:-$HERE/../assets/assay/ampseq_helminth.json}
 IDXMAP=${IDXMAP:-$HERE/../assets/index_map.tsv}
 RUN_ID=${RUN_ID:-$(awk 'NR==2{print $1}' "$RUNS")}
 
+# Per-stage wall clock. A driver that prints only headers cannot answer
+# "where did the seventeen hours go", and on this pipeline the answer
+# has been different every time - splitting, demultiplexing and the
+# per-sample loop each dominated at some point.
+RUN_T0=$(date +%s)
+STAGE_T0=$RUN_T0
+stage() {
+    local now; now=$(date +%s)
+    if [ -n "${STAGE_NAME:-}" ]; then
+        printf '   [%s took %dm %ds]\n' "$STAGE_NAME" \
+            $(( (now - STAGE_T0) / 60 )) $(( (now - STAGE_T0) % 60 ))
+    fi
+    STAGE_NAME=$1
+    STAGE_T0=$now
+}
+finish() {
+    stage ""
+    local now; now=$(date +%s)
+    printf '\nTotal: %dh %dm\n' $(( (now - RUN_T0) / 3600 )) \
+        $(( ((now - RUN_T0) % 3600) / 60 ))
+}
+
 mkdir -p "$OUT"/{preflight,prep,assign,synthesis}
 
+stage "pre-flight"
 echo "== pre-flight =================================================="
 python3 "$HERE/preflight.py" \
     --reference "$REF" --samplesheet "$SS" --runs "$RUNS" \
@@ -68,18 +91,23 @@ while IFS=$'\t' read -r run_id sample_id rest; do
 done < "$RES"
 echo
 
+stage "synthesis"
 echo "== run-level synthesis ========================================="
 python3 "$HERE/synthesise.py" \
     --assign-dir "$OUT/assign" --prep-dir "$OUT/prep" \
     --samplesheet "$SS" --reference "$REF" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
+    ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
+    ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
     --outdir "$OUT/synthesis"
 
+stage "report"
 echo "== report ======================================================"
 python3 "$HERE/report.py" \
     --synthesis-dir "$OUT/synthesis" --run-id "$RUN_ID" \
     --out "$OUT/${RUN_ID}_report.html"
 
+finish
 echo
 echo "Report:     $OUT/${RUN_ID}_report.html"
 echo "Calls:      $OUT/synthesis/calls.tsv"
