@@ -1317,27 +1317,72 @@ FORBIDDEN_METADATA = {
 }
 
 
-def parse_metadata(path: str, diag: Diagnostics) -> dict[str, dict]:
-    """Subject metadata, keyed on subject_id.
+METADATA_KEYS = ("subject_id", "sample_id")
+
+
+def parse_metadata(
+    path: str, diag: Diagnostics
+) -> tuple[str, dict[str, dict]]:
+    """Grouping metadata, keyed on subject_id OR sample_id.
 
     Kept in its own file rather than folded into the samplesheet, for
     reasons that are about lifecycle rather than tidiness. A samplesheet
-    row is a LIBRARY and is frozen at prep; a metadata row is a SUBJECT
-    and accumulates corrections for years. One subject is several
-    libraries - replicates, both platforms, re-runs - so merging them
-    would duplicate every field and make a correction an N-row edit.
+    row is a LIBRARY and is frozen at prep; a metadata row usually
+    describes a SUBJECT and accumulates corrections for years. One
+    subject is several libraries - replicates, both platforms, re-runs -
+    so merging them would duplicate every field and make a correction an
+    N-row edit.
 
     Separation is also a privacy control. The samplesheet travels: to the
     sequencing centre, into the run folder, into every results directory.
     Metadata should not ride along by default, and the pipeline runs
     perfectly well without it.
+
+    But not every grouping variable is a property of a subject, and the
+    ones this file exists to serve often are not. Testing uncleaned
+    against AMPure-cleaned PCR1 splits ONE subject's DNA into TWO
+    libraries that differ only in the treatment - so a subject-keyed
+    file cannot express it at all. It would give both arms the same
+    value, and the comparison would come out empty with nothing saying
+    why.
+
+    So the KEY COLUMN declares the level:
+
+        subject_id   the row describes a person or an isolate, and fans
+                     out to every library made from it
+        sample_id    the row describes one library, and applies to it
+                     alone
+
+    Exactly one of them, because a file with both is ambiguous about
+    which wins where they disagree, and guessing is worse than stopping.
+
+    Returns (level, rows-by-key). An unreadable or empty file returns
+    ("", {}).
     """
     rows = read_table(path, diag, "metadata")
     if not rows:
-        return {}
-    if not require_columns(rows, {"subject_id"}, diag, "metadata"):
-        return {}
+        return "", {}
 
+    present = [k for k in METADATA_KEYS if k in rows[0]]
+    if not present:
+        diag.error(
+            "metadata: needs a key column - 'subject_id' for rows that "
+            "describe a subject and apply to all of its libraries, or "
+            "'sample_id' for rows that describe one library (a bench "
+            "treatment, an input amount). Found: "
+            + ", ".join(sorted(rows[0])) or "no columns"
+        )
+        return "", {}
+    if len(present) > 1:
+        diag.error(
+            "metadata: has both 'subject_id' and 'sample_id'. Use one. "
+            "Two keys give a library two sources for the same field and "
+            "no rule for which wins - split the file by level instead, "
+            "or move the library-level fields to their own file"
+        )
+        return "", {}
+
+    level = present[0]
     banned = sorted(FORBIDDEN_METADATA & {c.lower() for c in rows[0]})
     if banned:
         diag.error(
@@ -1349,25 +1394,29 @@ def parse_metadata(path: str, diag: Diagnostics) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for r in rows:
-        sub = (r.get("subject_id") or "").strip()
-        if not sub:
-            diag.error("metadata: a row has an empty subject_id")
+        key = (r.get(level) or "").strip()
+        if not key:
+            diag.error(f"metadata: a row has an empty {level}")
             continue
-        if sub in out:
+        if key in out:
             diag.error(
-                f"metadata: subject_id '{sub}' appears more than once. One "
-                "row per subject - if these are different samplings, they "
-                "are different subjects or belong in the samplesheet"
+                f"metadata: {level} '{key}' appears more than once. One "
+                "row per "
+                + ("subject - if these are different samplings, they are "
+                   "different subjects or belong in the samplesheet"
+                   if level == "subject_id" else
+                   "library - a library has one set of bench conditions")
             )
             continue
-        out[sub] = {k: v for k, v in r.items() if k != "subject_id"}
-    return out
+        out[key] = {k: v for k, v in r.items() if k != level}
+    return level, out
 
 
 def check_metadata_join(
-    samples: list, meta: dict[str, dict], diag: Diagnostics
+    samples: list, meta: dict[str, dict], diag: Diagnostics,
+    level: str = "subject_id",
 ) -> dict:
-    """Does every library have a subject, and every subject a library?
+    """Does every library have a metadata row, and every row a library?
 
     A join that silently drops rows is the failure worth catching here.
     Missing metadata is a NOTE, not an error: the pipeline is designed to
@@ -1380,40 +1429,97 @@ def check_metadata_join(
     libraries_per_subject: dict[str, int] = defaultdict(int)
     for s in samples:
         libraries_per_subject[s.subject_id] += 1
+    repeats = {k: v for k, v in libraries_per_subject.items() if v > 1}
 
     if not meta:
-        return {"metadata_supplied": False, "subjects": len(subjects)}
+        return {"metadata_supplied": False, "subjects": len(subjects),
+                "subjects_with_multiple_libraries": repeats}
 
-    matched = sorted(subjects & set(meta))
-    no_meta = sorted(subjects - set(meta))
-    orphan = sorted(set(meta) - subjects)
+    # The join key on the samplesheet side, at whichever level the file
+    # declared. sample_id is unique only within a run, but the metadata
+    # file has no run column, so a library-level row applies to that id
+    # in every run it appears in - which is what re-running a library is.
+    if level == "sample_id":
+        keys = {s.sample_id for s in samples if s.sample_id}
+        noun, plural = "library", "libraries"
+    else:
+        keys = subjects
+        noun, plural = "subject", "subjects"
+
+    matched = sorted(keys & set(meta))
+    no_meta = sorted(keys - set(meta))
+    orphan = sorted(set(meta) - keys)
 
     if no_meta:
         diag.info(
-            f"{len(no_meta)} of {len(subjects)} subject(s) have no metadata "
+            f"{len(no_meta)} of {len(keys)} {noun}(s) have no metadata "
             f"row: {', '.join(no_meta[:5])}"
             + (" ..." if len(no_meta) > 5 else "")
-            + ". The run proceeds; anything grouped by those fields will "
-            "exclude them"
+            + ". The run proceeds; those libraries are grouped under "
+            "'(no value)' rather than dropped"
         )
     if orphan:
         diag.warn(
-            f"{len(orphan)} metadata row(s) match no subject in this "
+            f"{len(orphan)} metadata row(s) match no {noun} in this "
             f"samplesheet: {', '.join(orphan[:5])}"
             + (" ..." if len(orphan) > 5 else "")
             + ". Usually an identifier convention that changed on one side"
         )
 
-    repeats = {k: v for k, v in libraries_per_subject.items() if v > 1}
     return {
         "metadata_supplied": True,
+        "level": level,
         "subjects": len(subjects),
+        f"{plural}_in_samplesheet": len(keys),
         "matched": len(matched),
         "subjects_without_metadata": no_meta,
         "metadata_without_subject": orphan,
         "fields": sorted(next(iter(meta.values())).keys()) if meta else [],
         "subjects_with_multiple_libraries": repeats,
     }
+
+
+# A library with no metadata row still has to appear somewhere, or the
+# group counts stop adding up to the plate and a reader has no way to
+# notice. It gets this, spelled out rather than left blank, because a
+# blank cell in a TSV reads as an oversight.
+NO_VALUE = "(no value)"
+
+
+def write_sample_metadata(
+    samples: list, meta: dict[str, dict], level: str, outdir: str
+) -> str | None:
+    """One resolved row per library - the join, done once, here.
+
+    Every later stage that wants to group by a metadata field needs the
+    same thing: field values attached to library ids. Doing that join in
+    each of them means each of them re-derives which level the file was
+    keyed at, what to do with a library whose subject has no row, and
+    how to spell a missing value - and they would drift. So it happens
+    once, and what ships downstream is a flat table with no keys left to
+    resolve.
+
+    subject_id is emitted as a field in its own right, not just a key.
+    Replicates ARE a grouping - several libraries from one subject - and
+    they need no metadata file to exist, so a run with no --metadata at
+    all can still be summarised by subject.
+    """
+    if not samples:
+        return None
+    fields = sorted(next(iter(meta.values())).keys()) if meta else []
+    path = os.path.join(outdir, "sample_metadata.tsv")
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(["run_id", "sample_id", "subject_id", "sample_type"]
+                   + fields)
+        for s in samples:
+            key = s.sample_id if level == "sample_id" else s.subject_id
+            row = meta.get(key, {})
+            w.writerow(
+                [s.run_id, s.sample_id, s.subject_id, s.sample_type]
+                + [(row.get(f) or "").strip() or NO_VALUE for f in fields]
+            )
+    return path
 
 
 def parse_mocks(path: str, diag: Diagnostics) -> dict[str, list[dict]]:
@@ -2544,11 +2650,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--metadata",
-        help="optional subject metadata TSV, keyed on subject_id. Kept "
-             "separate from the samplesheet deliberately: a samplesheet "
-             "row is a library and is frozen at prep, a metadata row is a "
-             "subject and keeps changing, and one subject is several "
-             "libraries. The join is validated here rather than assumed",
+        help="optional grouping metadata TSV, keyed on EITHER subject_id "
+             "(the row describes a subject and applies to all of its "
+             "libraries) or sample_id (the row describes one library - a "
+             "bench treatment such as AMPure cleanup, an input amount). "
+             "Exactly one key column. Kept separate from the samplesheet "
+             "deliberately: a samplesheet row is frozen at prep and "
+             "travels to the sequencing centre, metadata keeps changing "
+             "and should not. The join is validated here, not assumed",
     )
     ap.add_argument("--outdir", default="preflight")
     args = ap.parse_args(argv)
@@ -2659,8 +2768,15 @@ def main(argv: list[str] | None = None) -> int:
     # half the plate into "unknown".
     meta_report: dict = {"metadata_supplied": False}
     if not reference_only:
-        meta = parse_metadata(args.metadata, diag) if args.metadata else {}
-        meta_report = check_metadata_join(samples, meta, diag)
+        level, meta = (parse_metadata(args.metadata, diag)
+                       if args.metadata else ("subject_id", {}))
+        meta_report = check_metadata_join(samples, meta, diag,
+                                          level or "subject_id")
+        # Written even with no --metadata: subject_id is a grouping
+        # field on its own, and a run of replicates should not need a
+        # metadata file to be summarised by subject.
+        write_sample_metadata(samples, meta, level or "subject_id",
+                              args.outdir)
 
     # -- machine-readable summary ----------------------------------------
     summary = {

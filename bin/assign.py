@@ -314,6 +314,26 @@ def _finish(panel: Panel, scored, has_tag: bool, min_margin: int, q: str,
 # --------------------------------------------------------------------------
 
 
+def _weighted_quantile(hist: Counter, q: float) -> int | None:
+    """Quantile of a distance histogram whose values are read counts.
+
+    Written out rather than expanded into a list and sorted: on a full
+    nanopore run a single sample's histogram can stand for tens of
+    millions of reads, and materialising one element per read to take a
+    median would cost more memory than the whole assignment.
+    """
+    total = sum(hist.values())
+    if not total:
+        return None
+    target = q * total
+    seen = 0
+    for d in sorted(hist):
+        seen += hist[d]
+        if seen >= target:
+            return d
+    return max(hist)
+
+
 def read_derep_fasta(path: str) -> list[tuple[str, int]]:
     op = gzip.open if path.endswith(".gz") else open
     out, seq, size = [], [], 0
@@ -444,7 +464,50 @@ def main(argv=None) -> int:
     by_type: Counter = Counter()
     tag_vs_map: Counter = Counter()
     dists: list[int] = []
-    tied_sets: Counter = Counter()
+    # Distance histograms per outcome, READ-weighted.
+    #
+    # This exists because of what a PCR chimera does here, which is not
+    # what it was assumed to do. The assumption was that a read built
+    # from two templates would fit both parents equally and arrive as
+    # `ambiguous`, so counting ambiguous reads would find it. Tested
+    # against a panel of two congeners 5% divergent, a 50/50 chimera
+    # came back `assigned`, to one parent, at distance 7 with a margin
+    # of 4 - comfortably past a min_margin of 2. It is counted as a
+    # confident species call.
+    #
+    # The reason is that the substitutions separating two references are
+    # never evenly spread, so a chimera is nearer one parent than the
+    # other and the margin rule is satisfied rather than tripped. The
+    # margin does not protect against this; it cannot, because the read
+    # really is closer to one reference.
+    #
+    # What does separate them is the DISTANCE. A clean read sits at 0-2,
+    # the error rate. A chimera sits at roughly half the divergence
+    # between its parents - 7 in that test - and keeps sitting there
+    # however deep the well is sequenced, because it is not an error.
+    # So a histogram of distances among ASSIGNED reads has a second mode
+    # where a clean run has one, and the median that was already being
+    # recorded averages it away.
+    #
+    # Kept for every outcome, not just `assigned`, because the same
+    # number says why a read failed to resolve: `ambiguous` at distance
+    # 1 is two references a read genuinely cannot separate, which is a
+    # property of the panel.
+    #
+    # Read-weighted rather than per-unique-sequence, deliberately: one
+    # chimeric sequence carried by five thousand reads is not the same
+    # finding as one carried by a single read, and dereplication would
+    # make them look identical. (`median_distance` below stays
+    # per-unique, which is what it has always been.)
+    dist_by_outcome: dict[str, Counter] = defaultdict(Counter)
+    # Tied reference sets, split by the outcome that produced them. One
+    # counter for all three was reported under the name
+    # `top_ambiguous_sets`, which claimed one outcome and contained
+    # three - and they do not mean the same thing. `taxon_only` is
+    # benign: every candidate is one taxon, so the taxon call stands.
+    # `ambiguous` ties ACROSS taxa and is the one that can corrupt a
+    # call. `tag_unobservable` is a geometry problem, not a panel one.
+    tied_by: dict[str, Counter] = defaultdict(Counter)
 
     for seq, mate, n in items:
         c = call_sequence(
@@ -452,6 +515,13 @@ def main(argv=None) -> int:
             tag_edits, second=mate,
         )
         outcomes[c.outcome] += n
+        # -1 is the Call default and means no distance was computed:
+        # `unmatched` never got one, because nothing came within the
+        # limit, and `no_primer` never reached the comparison. Recording
+        # -1 as a distance would put a sentinel in a histogram and drag
+        # any median taken from it.
+        if c.distance >= 0:
+            dist_by_outcome[c.outcome][c.distance] += n
         if c.outcome == "assigned":
             counts[c.seq_id] += n
             unique_by_ref[c.seq_id] += 1
@@ -469,9 +539,9 @@ def main(argv=None) -> int:
             by_type[c.ref_type] += n
             if c.ref_type == "target" and SPECIATION in c.purpose:
                 taxon_counts[c.taxon] += n
-            tied_sets[c.tied] += n
+            tied_by[c.outcome][c.tied] += n
         elif c.outcome in ("ambiguous", "tag_unobservable"):
-            tied_sets[c.tied] += n
+            tied_by[c.outcome][c.tied] += n
     outcomes["no_primer"] += no_primer
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -530,10 +600,41 @@ def main(argv=None) -> int:
             v for k, v in tag_vs_map.items()
             if k in ("tagged / non-control", "untagged / control")
         ),
-        "top_ambiguous_sets": [
-            {"references": list(k), "reads": v}
-            for k, v in tied_sets.most_common(5)
-        ],
+        # Read-weighted distance distribution per outcome. The SHAPE is
+        # the point, not the centre - which is why the histogram is here
+        # and not just a median. A clean run puts assigned reads in one
+        # mode at the error rate; a second mode further out is reads
+        # that are not errors, and a chimera between two panel members
+        # lands at about half their divergence.
+        "distance_by_outcome": {
+            k: {
+                "reads": sum(h.values()),
+                "median": _weighted_quantile(h, 0.5),
+                "p95": _weighted_quantile(h, 0.95),
+                "max": max(h),
+                "histogram": {str(d): h[d] for d in sorted(h)},
+            }
+            for k, h in sorted(dist_by_outcome.items())
+        },
+        "distance_by_outcome_note": (
+            "Edit distance to the best-fitting reference, weighted by "
+            "reads. `unmatched` and `no_primer` are absent by "
+            "construction: neither ever had a distance computed. "
+            "Read the SHAPE of the assigned histogram, not its median. "
+            "One mode at the platform's error rate is a clean run. A "
+            "second mode further out is reads that are not errors - a "
+            "chimera between two panel members sits at about half their "
+            "divergence and is assigned to one of them with a passing "
+            "margin, so neither the outcome nor the margin reveals it. "
+            "Nothing here changes a call; it is a measurement."
+        ),
+        # Split by outcome, because they do not mean the same thing and
+        # one counter under the name `top_ambiguous_sets` said they did.
+        "top_tied_sets": {
+            k: [{"references": list(t), "reads": v}
+                for t, v in h.most_common(5)]
+            for k, h in sorted(tied_by.items())
+        },
         "accounting_balances": total == sum(outcomes.get(k, 0) for k in OUTCOMES),
     }
     with open(os.path.join(args.outdir, f"{sid}.assign.json"), "w") as fh:
@@ -544,8 +645,25 @@ def main(argv=None) -> int:
         for k in OUTCOMES:
             n = outcomes.get(k, 0)
             if n:
-                print(f"    {k:12s} {n:8,}  {100*n/total:5.2f}%  "
+                d = summary["distance_by_outcome"].get(k)
+                # The distance is printed next to the count because the
+                # count on its own does not say whether an unresolved
+                # read is a panel property or an artifact, and a number
+                # that needs another number to be read should not need
+                # a second file to find it.
+                dtxt = (f"  [dist med {d['median']}, p95 {d['p95']}, "
+                        f"max {d['max']}]" if d else "")
+                print(f"    {k:12s} {n:8,}  {100*n/total:5.2f}%{dtxt}  "
                       f"{OUTCOME_MEANING[k]}")
+        # No threshold on the distance tail, deliberately. A second mode
+        # among assigned reads is the chimera signature, but where it
+        # sits depends on the divergence between whichever panel members
+        # recombined and on the platform's own error rate - so any cutoff
+        # here would be a number invented rather than measured, and this
+        # pipeline has already shipped one of those (a landmark tolerance
+        # of 2 edits over a 29bp tail) and had to take it back out. The
+        # quantiles are printed; the histogram is in the JSON; the
+        # judgement waits for a measurement on real reads.
         if summary["tag_mapping_conflicts"]:
             print(f"    tag/mapping conflicts: "
                   f"{summary['tag_mapping_conflicts']:,}")

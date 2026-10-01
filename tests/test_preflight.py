@@ -1347,11 +1347,16 @@ def test_subject_metadata() -> None:
             """Just enough of a Sample for the join."""
             def __init__(self, sid, sub):
                 self.sample_id, self.subject_id = sid, sub
+                self.run_id, self.sample_type = "RUN01", "unknown"
 
         samples = [Fake("iCCH-001-r1", "iCCH-001"),
                    Fake("iCCH-001-r2", "iCCH-001"),
                    Fake("iCCH-002-r1", "iCCH-002"),
                    Fake("iCCH-003-r1", "iCCH-003")]
+
+        def join(path, d):
+            lvl, m = pf.parse_metadata(path, d)
+            return pf.check_metadata_join(samples, m, d, lvl or "subject_id")
 
         # complete join
         p = os.path.join(tmp, "m1.tsv")
@@ -1359,7 +1364,7 @@ def test_subject_metadata() -> None:
                  ["iCCH-002", "Bangladesh", "Chandpur"],
                  ["iCCH-003", "Bangladesh", "Matlab"]])
         d = pf.Diagnostics()
-        rep = pf.check_metadata_join(samples, pf.parse_metadata(p, d), d)
+        rep = join(p, d)
         check("a complete join is clean", d.ok and not d.warnings, str(d.warnings))
         check("replicates collapse to one subject",
               rep["subjects"] == 3 and rep["matched"] == 3, str(rep))
@@ -1371,7 +1376,7 @@ def test_subject_metadata() -> None:
         p2 = os.path.join(tmp, "m2.tsv")
         meta(p2, [["iCCH-001", "Bangladesh", "Chandpur"]])
         d = pf.Diagnostics()
-        rep = pf.check_metadata_join(samples, pf.parse_metadata(p2, d), d)
+        rep = join(p2, d)
         check("missing metadata does not fail the run", d.ok, str(d.errors))
         check("but it is reported, with the subjects named",
               any("no metadata row" in m for m in d.notes), str(d.notes))
@@ -1384,7 +1389,7 @@ def test_subject_metadata() -> None:
         meta(p3, [["iCCH-001", "Bangladesh", "Chandpur"],
                   ["ICCH_099", "Bangladesh", "Matlab"]])
         d = pf.Diagnostics()
-        pf.check_metadata_join(samples, pf.parse_metadata(p3, d), d)
+        join(p3, d)
         check("metadata matching no subject is a warning",
               any("match no subject" in m for m in d.warnings), str(d.warnings))
 
@@ -1412,6 +1417,87 @@ def test_subject_metadata() -> None:
         rep = pf.check_metadata_join(samples, {}, d)
         check("a run with no metadata file is not an error",
               d.ok and rep["metadata_supplied"] is False)
+
+        # -- library-level keying ----------------------------------------
+        # The case a subject-keyed file physically cannot express: one
+        # subject's DNA split two ways at the bench. Keyed on subject_id
+        # both arms get the same value and the comparison is empty.
+        p6 = os.path.join(tmp, "m6.tsv")
+        meta(p6, [["iCCH-001-r1", "none"],
+                  ["iCCH-001-r2", "ampure"],
+                  ["iCCH-002-r1", "none"],
+                  ["iCCH-003-r1", "ampure"]],
+             header="sample_id\tpcr1_cleanup")
+        d = pf.Diagnostics()
+        lvl, m = pf.parse_metadata(p6, d)
+        check("a sample_id key is recognised as library level",
+              lvl == "sample_id", lvl)
+        rep = pf.check_metadata_join(samples, m, d, lvl)
+        check("a library-level join is clean",
+              d.ok and not d.warnings, f"{d.errors} {d.warnings}")
+        check("and it joins on libraries, not subjects",
+              rep["libraries_in_samplesheet"] == 4 and rep["matched"] == 4,
+              str(rep))
+
+        out = os.path.join(tmp, "resolved")
+        os.makedirs(out, exist_ok=True)
+        pf.write_sample_metadata(samples, m, lvl, out)
+        rows = list(csv.DictReader(
+            open(os.path.join(out, "sample_metadata.tsv")), delimiter="\t"))
+        check("the resolved table has one row per library",
+              len(rows) == len(samples), str(len(rows)))
+        by_id = {r["sample_id"]: r for r in rows}
+        check("two libraries of one subject get DIFFERENT treatments",
+              by_id["iCCH-001-r1"]["pcr1_cleanup"] == "none"
+              and by_id["iCCH-001-r2"]["pcr1_cleanup"] == "ampure",
+              str([by_id["iCCH-001-r1"], by_id["iCCH-001-r2"]]))
+
+        # subject-level rows must fan OUT to every library of the subject
+        d = pf.Diagnostics()
+        lvl1, m1 = pf.parse_metadata(p, d)
+        pf.write_sample_metadata(samples, m1, lvl1, out)
+        rows = {r["sample_id"]: r for r in csv.DictReader(
+            open(os.path.join(out, "sample_metadata.tsv")), delimiter="\t")}
+        check("a subject-level value reaches both of its libraries",
+              rows["iCCH-001-r1"]["population"] ==
+              rows["iCCH-001-r2"]["population"] == "Chandpur",
+              str(rows["iCCH-001-r1"]))
+
+        # a library with no row is bucketed, never dropped: the group
+        # counts have to add up to the plate or a reader cannot tell
+        # whether a group is small or a join failed
+        d = pf.Diagnostics()
+        lvl2, m2 = pf.parse_metadata(p2, d)
+        pf.write_sample_metadata(samples, m2, lvl2, out)
+        rows = {r["sample_id"]: r for r in csv.DictReader(
+            open(os.path.join(out, "sample_metadata.tsv")), delimiter="\t")}
+        check("an unannotated library is kept, under an explicit bucket",
+              len(rows) == 4 and rows["iCCH-003-r1"]["country"] == pf.NO_VALUE,
+              str(rows.get("iCCH-003-r1")))
+
+        # with no metadata at all, subject_id is still a grouping field
+        pf.write_sample_metadata(samples, {}, "subject_id", out)
+        rows = list(csv.DictReader(
+            open(os.path.join(out, "sample_metadata.tsv")), delimiter="\t"))
+        check("subject_id is a grouping field with no metadata file at all",
+              len(rows) == 4 and rows[0]["subject_id"] == "iCCH-001",
+              str(rows[:1]))
+
+        # -- keys that cannot both be honoured ---------------------------
+        p7 = os.path.join(tmp, "m7.tsv")
+        meta(p7, [["iCCH-001", "iCCH-001-r1", "none"]],
+             header="subject_id\tsample_id\tpcr1_cleanup")
+        d = pf.Diagnostics()
+        lvl, m = pf.parse_metadata(p7, d)
+        check("both key columns is refused rather than resolved by guess",
+              any("both" in e for e in d.errors) and not m, str(d.errors))
+
+        p8 = os.path.join(tmp, "m8.tsv")
+        meta(p8, [["Bangladesh", "Chandpur"]], header="country\tpopulation")
+        d = pf.Diagnostics()
+        lvl, m = pf.parse_metadata(p8, d)
+        check("no key column at all is refused",
+              any("key column" in e for e in d.errors), str(d.errors))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

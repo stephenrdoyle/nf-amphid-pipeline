@@ -17,6 +17,7 @@
 # killed by a wall-clock limit is simply started again.
 #
 #   THREADS=16 bin/run_nanopore.sh ...
+#   METADATA=metadata.tsv bin/run_nanopore.sh ...
 #
 # MIN_DEPTH and PERMUTATIONS pass through to synthesis. They exist here
 # because the driver otherwise hardcodes what Nextflow exposes as
@@ -68,9 +69,13 @@ mkdir -p "$OUT"/{preflight,split,demux,assign,synthesis}
 
 stage "pre-flight"
 echo "== pre-flight =================================================="
+# METADATA is optional and is the only way grouping fields reach
+# synthesis. Without it the run is still grouped by subject_id, which
+# the samplesheet already declares.
 python3 "$HERE/preflight.py" \
     --reference "$REF" --samplesheet "$SS" --runs "$RUNS" \
     --primers "$PRIMERS" --index-map "$IDXMAP" --assay "$ASSAY" \
+    ${METADATA:+--metadata "$METADATA"} \
     --outdir "$OUT/preflight"
 
 RES="$OUT/preflight/file_resolution.tsv"
@@ -226,6 +231,7 @@ python3 "$HERE/synthesise.py" \
     --split-summary "$OUT/split/split_summary.json" \
     --samplesheet "$SS" --reference "$REF" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
+    --sample-metadata "$OUT/preflight/sample_metadata.tsv" \
     ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
     ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
     ${MIN_DEPTH:+--min-depth "$MIN_DEPTH"} \

@@ -26,6 +26,11 @@ process PREFLIGHT {
     path "preflight/tag_report.txt"           , emit: tag_report_txt
     path "preflight/runs_resolved.tsv" , emit: runs_resolved
     path "preflight/file_resolution.tsv"      , emit: file_resolution
+    // The grouping join, resolved to one row per library. Written even
+    // with no --metadata, because subject_id is a grouping field the
+    // samplesheet already declares. Optional only because a
+    // reference-only run has no samplesheet to join to.
+    path "preflight/sample_metadata.tsv"      , emit: sample_metadata, optional: true
     path "preflight/preflight_summary.json"   , emit: summary
     path "preflight/validation.log"           , emit: log
     path "versions.yml"                       , emit: versions

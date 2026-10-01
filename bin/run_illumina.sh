@@ -9,6 +9,11 @@
 #
 # Resumable: a sample whose outputs already exist is skipped, so a run
 # killed by a wall-clock limit can simply be started again.
+#
+#   METADATA=metadata.tsv bin/run_illumina.sh ...
+#
+# adds the grouping file, which is what produces group_summary.tsv.
+# Without it the run is still grouped by subject_id.
 
 set -euo pipefail
 
@@ -52,6 +57,7 @@ echo "== pre-flight =================================================="
 python3 "$HERE/preflight.py" \
     --reference "$REF" --samplesheet "$SS" --runs "$RUNS" \
     --primers "$PRIMERS" --index-map "$IDXMAP" --assay "$ASSAY" \
+    ${METADATA:+--metadata "$METADATA"} \
     --outdir "$OUT/preflight"
 
 # Pre-flight resolves every sample to its files and checks they exist, so
@@ -97,6 +103,7 @@ python3 "$HERE/synthesise.py" \
     --assign-dir "$OUT/assign" --prep-dir "$OUT/prep" \
     --samplesheet "$SS" --reference "$REF" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
+    --sample-metadata "$OUT/preflight/sample_metadata.tsv" \
     ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
     ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
     --outdir "$OUT/synthesis"

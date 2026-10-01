@@ -217,6 +217,71 @@ def test_calls() -> None:
           c.outcome == "unmatched", str(c))
 
 
+def test_chimera_is_assigned_not_ambiguous() -> None:
+    """A read built from two templates is called confidently, and wrongly.
+
+    This test exists because the opposite was assumed. The reasoning was
+    that a chimera fits both parents equally, so it would arrive as
+    `ambiguous` and counting ambiguous reads would find it. That is
+    wrong, and the cost of it being wrong is a false positive in a
+    diagnostic: the read is counted as a confident species call.
+
+    The substitutions separating two references are never evenly
+    spread, so a 50/50 chimera is nearer one parent than the other.
+    The margin rule is then satisfied rather than tripped - and it
+    cannot do better, because the read genuinely is closer to one
+    reference.
+
+    What survives is the DISTANCE. A clean read sits at the error rate;
+    a chimera sits at roughly half the divergence between its parents
+    and stays there no matter how deep the well is sequenced, because it
+    is not an error. That is the only handle, so the test pins it: if a
+    chimera ever became indistinguishable by distance too, the
+    histogram in assign.json would be decoration.
+    """
+    print("\nchimeras")
+    rng = random.Random(3)
+    core = "".join(rng.choice("ACGT") for _ in range(360))
+    # A congener 5% divergent - the realistic case for an ITS2 panel,
+    # and the one that matters. Chimeras between DIVERGENT references
+    # exceed the distance limit and land in `unmatched`, where they are
+    # at least not counted as anything.
+    cong = list(core)
+    for p in random.Random(11).sample(range(360), 18):
+        cong[p] = "A" if cong[p] != "A" else "G"
+    cong = "".join(cong)
+    panel = A.Panel([
+        A.Ref("Sp_a", core, "ITS2", "target", "Species_a"),
+        A.Ref("Sp_c", cong, "ITS2", "target", "Species_c"),
+    ])
+
+    clean = A.call_sequence(core, panel, TAG, 0.10, 2, 3)
+    chim = A.call_sequence(core[:180] + cong[180:], panel, TAG, 0.10, 2, 3)
+
+    check("a chimera is NOT ambiguous - the assumption this corrects",
+          chim.outcome != "ambiguous", str(chim))
+    check("it is assigned, to one parent, as a confident call",
+          chim.outcome == "assigned" and chim.seq_id in ("Sp_a", "Sp_c"),
+          str(chim))
+    check("and the margin does not catch it",
+          chim.margin >= 2, f"margin {chim.margin}")
+    check("only the distance separates it from a clean read",
+          chim.distance > clean.distance + 2,
+          f"chimera {chim.distance} vs clean {clean.distance}")
+    # Half the divergence, within a couple of bases - the number that
+    # tells you where to expect the second mode for a given panel.
+    check("the distance is about half the parents' divergence",
+          4 <= chim.distance <= 14, str(chim.distance))
+
+    # and the histogram has to actually carry it
+    hist = A.Counter({clean.distance: 1000, chim.distance: 50})
+    check("the weighted quantile reads a minority mode's tail",
+          A._weighted_quantile(hist, 0.5) == clean.distance
+          and A._weighted_quantile(hist, 0.99) == chim.distance,
+          f"{A._weighted_quantile(hist, 0.5)} / "
+          f"{A._weighted_quantile(hist, 0.99)}")
+
+
 def test_tag_unobservable() -> None:
     """The bug this suite exists for."""
     print("\nwhen the tag falls between the mates")
@@ -598,6 +663,7 @@ def test_outputs() -> None:
 def main() -> int:
     test_bounded_edit()
     test_calls()
+    test_chimera_is_assigned_not_ambiguous()
     test_tag_unobservable()
     test_preflight_catches_it()
     test_tag_under_a_primer()

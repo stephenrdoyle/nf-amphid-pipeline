@@ -20,6 +20,11 @@ process SYNTHESISE {
     path "synthesis/calls.tsv"      , emit: calls
     path "synthesis/calibration.tsv", emit: calibration
     path "synthesis/read_fates.tsv" , emit: fates
+    // Optional because it is only written when there is a grouping to
+    // write - a metadata file, or a subject with more than one library.
+    // An empty file would say "no groups" and "no metadata" with the
+    // same bytes.
+    path "synthesis/group_summary.tsv", emit: groups, optional: true
     path "synthesis/run_qc.json"    , emit: qc
     path "versions.yml"             , emit: versions
 
@@ -34,12 +39,18 @@ process SYNTHESISE {
     // than at reads off the sequencer, and every percentage below it is
     // taken against a denominator the splitting quietly changed.
     def split_arg = !split_summary.name.startsWith('NO_') ? "--split-summary ${split_summary}" : ''
+    // The resolved metadata join already sits inside the staged
+    // pre-flight directory, so it needs no channel of its own. Passed
+    // by path rather than derived inside synthesise.py, because a tool
+    // that goes looking inside a directory for optional inputs is a
+    // tool whose inputs are not declared anywhere.
     """
     synthesise.py \\
         --assign-dir assign \\
         --samplesheet ${samplesheet} \\
         --reference ${reference} \\
         --preflight-dir ${preflight_dir} \\
+        --sample-metadata ${preflight_dir}/sample_metadata.tsv \\
         ${prep_arg} ${demux_arg} ${split_arg} \\
         --run-id ${run_id} \\
         --min-depth ${params.min_depth} \\
@@ -59,6 +70,7 @@ process SYNTHESISE {
     """
     mkdir -p synthesis
     touch synthesis/calls.tsv synthesis/calibration.tsv synthesis/read_fates.tsv
+    touch synthesis/group_summary.tsv
     echo '{"run_id":"${run_id}"}' > synthesis/run_qc.json
     touch versions.yml
     """

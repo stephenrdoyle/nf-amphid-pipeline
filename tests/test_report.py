@@ -433,6 +433,73 @@ def test_report() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_distance_chart_shows_a_minority_mode() -> None:
+    """A plot whose whole purpose is a 1% mode must not hide a 1% mode.
+
+    This chart exists to show a population of reads that is assigned,
+    counted as confident, and wrong - a read built from two panel
+    members. That population is a fraction of a percent next to the
+    clean mode, which has two consequences the drawing has to respect.
+
+    A LINEAR axis erases it. One bar of 70 beside one of 5,000 is under
+    two pixels tall in a 120px plot, and a reader cannot see what is not
+    drawn. Hence log counts, and hence the test asserts the ratio of
+    drawn heights is nothing like the ratio of counts.
+
+    A BAR OF ZERO HEIGHT erases it too. log10(1) is 0, so a distance
+    observed once would draw as nothing at all and read as absent.
+    """
+    print("\ndistance chart")
+    import re as _re
+
+    hist = {"0": 5000, "1": 1800, "2": 240, "9": 70}
+    svg = R.counts_bar_svg(hist, "test")
+
+    titles = dict(_re.findall(r'<title>distance (\d+): ([\d,]+) reads', svg))
+    check("every distance in the data is drawn",
+          set(titles) == {"0", "1", "2", "9"}, str(sorted(titles)))
+    check("and each bar carries its own count, readable on hover",
+          titles.get("9") == "70", str(titles))
+
+    rects = _re.findall(
+        r'<rect[^>]*height="([\d.]+)"[^>]*><title>distance (\d+)', svg)
+    heights = {d: float(h) for h, d in rects}
+    check("the minority mode is drawn tall enough to see",
+          heights.get("9", 0) > 0.35 * heights.get("0", 1),
+          f"{heights.get('9')} vs {heights.get('0')}")
+    check("which means the axis is not linear in counts",
+          heights["9"] / heights["0"] > 10 * (70 / 5000),
+          f"{heights['9'] / heights['0']:.3f} vs {70/5000:.3f}")
+
+    once = R.counts_bar_svg({"0": 5000, "40": 1}, "test")
+    r1 = dict((d, float(h)) for h, d in _re.findall(
+        r'<rect[^>]*height="([\d.]+)"[^>]*><title>distance (\d+)', once))
+    check("a distance seen exactly once still draws a bar",
+          r1.get("40", 0) > 0, str(r1))
+
+    check("a single distance says so in words rather than drawing an axis",
+          "no distribution to plot" in R.counts_bar_svg({"0": 10}, "t"),
+          R.counts_bar_svg({"0": 10}, "t")[:80])
+    check("an empty histogram draws nothing at all",
+          R.counts_bar_svg({}, "t") == "")
+
+    # note_hi colours the far mode. The colour IS the finding, so it has
+    # to actually change - a note_hi that quietly did nothing would
+    # leave the chimeric bars looking like error.
+    plain = R.counts_bar_svg(hist, "t")
+    marked = R.counts_bar_svg(hist, "t", note_hi=6)
+    check("note_hi recolours the bars beyond it, and only those",
+          marked.count("#b03030") == 1 and plain.count("#b03030") == 0,
+          f"{marked.count('#b03030')} / {plain.count('#b03030')}")
+
+    # flag() escapes its argument, which every other caller depends on.
+    # The first version of the fit-distance flag passed <b> tags and
+    # rendered them as literal &lt;b&gt; on the page.
+    f = R.flag("warn", "Not monotone: trough at distance 5")
+    check("a flag carries no markup of its own to be escaped",
+          "&lt;" not in f and "Not monotone" in f, f)
+
+
 def test_histograms() -> None:
     """A chart whose counts cannot be read is not evidence.
 
@@ -506,6 +573,7 @@ def test_histograms() -> None:
 def main() -> int:
     test_kappa()
     test_histograms()
+    test_distance_chart_shows_a_minority_mode()
     test_pairing()
     test_asymmetry()
     test_report()

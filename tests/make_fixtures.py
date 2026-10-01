@@ -327,6 +327,31 @@ def write_samplesheet(rows: list[dict], path: str) -> None:
             fh.write(",".join(str(r[c]) for c in SS_COLS) + "\n")
 
 
+def write_metadata(rows: list[dict], path: str) -> None:
+    """A grouping file keyed on sample_id, the harder of the two levels.
+
+    Keyed on the LIBRARY deliberately, because that is the level a
+    subject-keyed file cannot express and so the one a fixture has to
+    cover. pcr1_cleanup is the real experiment it exists for: the same
+    PCR1 product split into an uncleaned arm and an AMPure-cleaned one,
+    which under a subject key would give both arms the same value and a
+    comparison with nothing in it.
+
+    The negatives are annotated too. An arm's negatives are how you
+    know whether that arm stayed clean, and a fixture where only the
+    real samples carry a group never exercises the control column.
+
+    One sample is left out on purpose: a library with no metadata row
+    must be bucketed under '(no value)', not dropped, and a fixture in
+    which every library is annotated cannot show the difference.
+    """
+    arms = ["none", "ampure"]
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("sample_id\tpcr1_cleanup\n")
+        for i, r in enumerate(rows[:-1]):
+            fh.write(f"{r['sample_id']}\t{arms[i % 2]}\n")
+
+
 def write_runs(path: str, run_id: str, platform: str, run_path: str) -> None:
     cols = [
         "run_id",
@@ -391,6 +416,7 @@ def main() -> None:
         i7, i5, args.n_samples, args.leave_unused, "RUN01", args.platform
     )
     write_samplesheet(samples, os.path.join(args.outdir, "samplesheet.csv"))
+    write_metadata(samples, os.path.join(args.outdir, "metadata.tsv"))
     write_runs(os.path.join(args.outdir, "runs.tsv"), "RUN01", args.platform, run_path)
     if args.platform == "illumina":
         write_fake_fastqs(samples, run_path)

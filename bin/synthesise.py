@@ -92,6 +92,11 @@ SPECIATION = "speciation"
 class Sample:
     sample_id: str
     sample_type: str = "unknown"
+    # Who the library came from. Carried so that replicates can be
+    # grouped without a metadata file - several libraries of one subject
+    # is the commonest grouping there is, and it is already declared in
+    # the samplesheet.
+    subject_id: str = ""
     index_i5: str = ""
     index_i7: str = ""
     plate_row: str = ""
@@ -101,6 +106,11 @@ class Sample:
     depth: int = 0
     outcomes: dict = field(default_factory=dict)
     by_ref_type: dict = field(default_factory=dict)
+    # Read-weighted edit-distance histograms per outcome, as assignment
+    # measured them. Carried up because a per-sample JSON that nobody
+    # opens is not an output: on a 94-well plate the choice was 94 files
+    # by hand or nothing, and it was nothing.
+    dist: dict = field(default_factory=dict)
 
 
 def load_counts(assign_dir: str) -> dict[str, Sample]:
@@ -118,6 +128,7 @@ def load_counts(assign_dir: str) -> dict[str, Sample]:
             s.depth = j.get("sequences_in", 0)
             s.outcomes = j.get("outcomes", {}) or {}
             s.by_ref_type = j.get("reads_by_reference_type", {}) or {}
+            s.dist = j.get("distance_by_outcome", {}) or {}
     return out
 
 
@@ -651,6 +662,335 @@ def plate_qc(
 
 
 # --------------------------------------------------------------------------
+# grouping by metadata
+# --------------------------------------------------------------------------
+
+
+# Matches pre-flight. A library with no metadata row is bucketed here
+# rather than dropped, so the group counts always add up to the plate.
+NO_VALUE = "(no value)"
+
+# Fields that are identifiers rather than categories. Grouping by one
+# gives a row per library, which is the per-sample table again with a
+# worse layout. A cap rather than a name list, because the field names
+# are the user's and cannot be anticipated.
+MAX_GROUPS = 50
+
+# Declared once, because every row must carry every column. A row built
+# from whatever that group happened to have gives a TSV whose header
+# depends on which group sorted first.
+COLUMNS = (
+    ["run_id", "field", "value", "n_libraries", "n_controls", "n_analysed",
+     "n_subjects", "n_empty", "reads_assigned", "median_depth", "min_depth",
+     "max_depth"]
+    + [f"reads_{k}" for k in FATES]
+    + ["target_fraction", "plasmid_share", "detected", "not_detected",
+       "assay_failed", "detection_rate"]
+    + [f"wells_{k}" for k in INTERNAL]
+    + ["deepest_negative", "note"]
+)
+
+
+def load_sample_metadata(path: str | None, run_id: str
+                         ) -> tuple[dict[str, dict], list[str]]:
+    """The resolved per-library table pre-flight wrote.
+
+    Flat by design: the keying question - subject-level or
+    library-level, and what a subject with three libraries means - was
+    settled in pre-flight, and nothing here has to know how it was
+    answered. This reads sample_id -> {field: value} and the field
+    order, and that is the whole interface.
+    """
+    if not path or not os.path.exists(path):
+        return {}, []
+    rows = read_table(path)
+    if not rows:
+        return {}, []
+    skip = {"run_id", "sample_id", "sample_type"}
+    fields = [c for c in rows[0] if c not in skip]
+    out: dict[str, dict] = {}
+    for r in rows:
+        # sample_id is unique within a run, not across runs, so a
+        # multi-run table must be filtered or two plates' rows collide
+        # on one id.
+        if run_id and r.get("run_id") and r["run_id"] != run_id:
+            continue
+        out[r["sample_id"]] = {f: (r.get(f) or NO_VALUE) for f in fields}
+    return out, fields
+
+
+def _blank(v) -> str:
+    """None as an empty cell, not as the string 'None'.
+
+    A well with no assigned reads has no distance, and 'None' in a TSV
+    column of integers parses as a string and poisons whatever reads it.
+    """
+    return "" if v is None else str(v)
+
+
+def hist_quantile(hist: dict, q: float) -> int | None:
+    """Quantile of an integer-keyed histogram whose values are counts.
+
+    Keys arrive as strings, because JSON has no integer keys. Sorting
+    them as strings would put 10 before 2 and make every quantile
+    wrong - which is the kind of bug that produces a plausible number
+    rather than an error, so the cast is not optional.
+    """
+    pairs = sorted((int(k), v) for k, v in hist.items())
+    total = sum(v for _, v in pairs)
+    if not total:
+        return None
+    target, seen = q * total, 0
+    for d, v in pairs:
+        seen += v
+        if seen >= target:
+            return d
+    return pairs[-1][0]
+
+
+# How much higher than the trough the far mode must peak before a dip is
+# called a trough at all. Not a biological threshold - it is a noise
+# criterion for reading the SHAPE, and it is needed because a single
+# stray read one bin out otherwise makes a trough out of a clean tail.
+# 2x is deliberately weak: the signal it exists to find was 18x on the
+# validation set, and a weak criterion that is documented beats a strong
+# one that quietly discards real second modes.
+TROUGH_RISE = 2.0
+
+
+def find_trough(hist: dict, rise: float = TROUGH_RISE) -> int | None:
+    """Where the error mode ends and something that is not error begins.
+
+    The per-well summary this feeds used to be a 95th percentile, and
+    that could not work. The population worth finding is a fraction of a
+    percent - measured at 0.70% on a plate spiked with 1.5% chimeras -
+    so it sits above p95 AND above p99, and the column read identically
+    in spiked and clean wells. A quantile cannot see a tail smaller than
+    its own complement; no choice of quantile fixes that.
+
+    What does work is to find the boundary in the RUN's own pooled
+    histogram and then measure each well against it. The boundary is
+    measured, not chosen: a clean run decays monotonically from the
+    error mode and has no trough, so the answer is None and the column
+    is empty - which is itself the finding. A run carrying chimeras
+    dips and rises again, and the dip is the boundary.
+
+    Returns the last distance belonging to the error mode, so "beyond
+    the trough" means strictly greater. None when the histogram is
+    monotone, too short to have a shape, or the rise is too weak to
+    distinguish from a noisy tail.
+    """
+    if not hist:
+        return None
+    pairs = sorted((int(k), int(v)) for k, v in hist.items())
+    # Gaps are counts of zero and are part of the shape - a histogram
+    # that jumps 4 -> 0 -> 37 has a trough at 5, and reading only the
+    # keys present would miss it entirely.
+    lo, hi = pairs[0][0], pairs[-1][0]
+    if hi - lo < 3:
+        return None
+    counts = dict(pairs)
+    series = [counts.get(d, 0) for d in range(lo, hi + 1)]
+
+    mode = max(range(len(series)), key=lambda i: series[i])
+    i = mode
+    while i + 1 < len(series) and series[i + 1] <= series[i]:
+        i += 1
+    if i >= len(series) - 1:
+        return None                      # monotone decay: a clean run
+    trough_i, trough_v = i, series[i]
+    far = series[trough_i + 1:]
+    if max(far) < max(trough_v, 1) * rise:
+        return None                      # a noisy tail, not a second mode
+    return lo + trough_i
+
+
+def pool_distances(samples: dict) -> dict:
+    """One distance distribution for the run, per outcome.
+
+    Pooled rather than averaged, because the thing worth seeing is the
+    SHAPE and a mean of medians destroys it. A clean run puts assigned
+    reads in a single mode at the platform's error rate. A second mode
+    further out is reads that are not errors - a chimera between two
+    panel members sits at about half their divergence, is assigned to
+    one of them, and passes the margin rule, so it appears in no
+    outcome count anywhere. This histogram is the only place it shows.
+
+    Controls are included. The pooled distribution is a property of the
+    chemistry rather than a per-sample metric, an NTC's handful of reads
+    cannot move it, and if a negative IS full of chimeras that is worth
+    seeing rather than excluding.
+    """
+    pooled: dict[str, Counter] = defaultdict(Counter)
+    for s in samples.values():
+        for outcome, block in (s.dist or {}).items():
+            for d, n in (block.get("histogram") or {}).items():
+                pooled[outcome][int(d)] += n
+    out = {}
+    for outcome, h in sorted(pooled.items()):
+        as_str = {str(d): h[d] for d in sorted(h)}
+        trough = find_trough(as_str)
+        beyond = sum(v for d, v in h.items() if trough is not None
+                     and d > trough)
+        total = sum(h.values())
+        out[outcome] = {
+            "reads": total,
+            "median": hist_quantile(as_str, 0.5),
+            "p95": hist_quantile(as_str, 0.95),
+            "p99": hist_quantile(as_str, 0.99),
+            "max": max(h),
+            # None means the histogram is monotone - one mode, no
+            # boundary to draw, which is what a clean run looks like.
+            "trough": trough,
+            "reads_beyond_trough": beyond if trough is not None else None,
+            "fraction_beyond_trough": (f"{beyond / total:.5f}"
+                                       if trough is not None and total
+                                       else None),
+            "histogram": as_str,
+        }
+    return out
+
+
+def median(vals: list) -> float:
+    if not vals:
+        return 0.0
+    v = sorted(vals)
+    n = len(v)
+    return float(v[n // 2]) if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0
+
+
+def group_summary(
+    samples: dict, meta: dict[str, dict], fields: list[str],
+    call_rows: list[dict], cals: dict, plasmid_share: dict, run_id: str,
+) -> list[dict]:
+    """Consolidate the run by each grouping field in turn.
+
+    What this is for is the comparison a run is often designed around -
+    uncleaned against AMPure-cleaned PCR1, one extraction batch against
+    another, replicates of one subject. The question is always the same
+    shape: did the arms differ, and in what.
+
+    It consolidates and does NOT pool. The arms of a designed comparison
+    are the experiment; summing their reads into one number answers a
+    question nobody asked and destroys the one that was. So each group
+    gets its own row and they sit side by side.
+
+    Two things that decide whether a row can be read at all:
+
+    CONTROLS ARE EXCLUDED from every metric, and counted in their own
+    column. A group's median depth is meaningless if an NTC is in the
+    denominator - and worse, it moves when the number of NTCs changes,
+    which makes two runs incomparable for a reason invisible in the
+    table. What the negatives are for is a different question, so it
+    gets its own column: the deepest negative in the group, which is
+    what says whether that arm stayed clean.
+
+    EVERY LIBRARY APPEARS. A library whose subject has no metadata row
+    is grouped under '(no value)', never dropped, so n_libraries summed
+    over a field's rows equals the plate. Without that a reader cannot
+    tell a small group from a broken join.
+
+    No test statistic. With two arms and a handful of libraries each, a
+    p-value here would be read as an answer when it is barely evidence;
+    the counts are the honest output, and a comparison worth testing is
+    worth designing for.
+    """
+    detected_by: dict[str, Counter] = defaultdict(Counter)
+    for r in call_rows:
+        if r.get("reference_type") == "target":
+            detected_by[r["sample_id"]][r["call"]] += 1
+
+    rows: list[dict] = []
+    # subject_id first, and unconditionally: replicates are a grouping
+    # that needs no metadata file, and a run of replicates should be
+    # summarisable with nothing supplied at all.
+    all_fields = ["subject_id"] + [f for f in fields if f != "subject_id"]
+
+    def value_of(sid: str, field: str) -> str:
+        # subject_id is read off the sample itself, not the metadata
+        # table, so grouping by subject works with no --metadata at all.
+        # A library whose samplesheet declared no subject is its own
+        # subject, which is what pre-flight already assumes.
+        if field == "subject_id":
+            return samples[sid].subject_id or sid
+        return meta.get(sid, {}).get(field, NO_VALUE)
+
+    for field in all_fields:
+        members: dict[str, list[str]] = defaultdict(list)
+        for sid in samples:
+            members[value_of(sid, field)].append(sid)
+
+        if field == "subject_id" and all(len(v) < 2 for v in members.values()):
+            # One library per subject: grouping by it reproduces the
+            # per-sample table, so it is not a grouping at all.
+            continue
+        if len(members) > MAX_GROUPS:
+            # Still a row, with the full column set. A skipped field
+            # that leaves no trace looks the same as a field that was
+            # never in the file.
+            rows.append({
+                **{k: "" for k in COLUMNS},
+                "run_id": run_id, "field": field, "value": "(not grouped)",
+                "n_libraries": len(samples),
+                "note": f"{len(members)} distinct values, above the limit of "
+                        f"{MAX_GROUPS} - this looks like an identifier "
+                        f"rather than a category",
+            })
+            continue
+
+        for value in sorted(members):
+            sids = members[value]
+            ctrl = [s for s in sids if samples[s].sample_type in NEGATIVE_TYPES]
+            keep = [s for s in sids
+                    if samples[s].sample_type not in NEGATIVE_TYPES]
+
+            fates = Counter()
+            for s in keep:
+                for k, v in read_fates(samples[s]).items():
+                    fates[k] += v
+            depths = [samples[s].depth for s in keep]
+            total = sum(depths)
+            calls = Counter()
+            for s in keep:
+                calls.update(detected_by.get(s, Counter()))
+            states = Counter(cals[s].state for s in keep if s in cals)
+            shares = [plasmid_share[s] for s in keep
+                      if plasmid_share.get(s) is not None]
+
+            rows.append({
+                "run_id": run_id,
+                "field": field,
+                "value": value,
+                "n_libraries": len(sids),
+                "n_controls": len(ctrl),
+                "n_analysed": len(keep),
+                "n_subjects": len({samples[s].subject_id or s for s in keep}),
+                "n_empty": sum(1 for d in depths if d == 0),
+                "reads_assigned": total,
+                "median_depth": f"{median(depths):g}",
+                "min_depth": min(depths) if depths else 0,
+                "max_depth": max(depths) if depths else 0,
+                **{f"reads_{k}": fates[k] for k in FATES},
+                "target_fraction": (f"{fates['target'] / total:.4f}"
+                                    if total else ""),
+                "plasmid_share": (f"{median(shares):.4f}" if shares else ""),
+                "detected": calls["detected"],
+                "not_detected": calls["not_detected"],
+                "assay_failed": calls["assay_failed"],
+                "detection_rate": (
+                    f"{calls['detected'] / (calls['detected'] + calls['not_detected']):.4f}"
+                    if (calls["detected"] + calls["not_detected"]) else ""),
+                **{f"wells_{k}": states[k] for k in INTERNAL},
+                # The one control number that matters for a bench
+                # comparison: did this arm's negatives stay clean.
+                "deepest_negative": (max((samples[s].depth for s in ctrl),
+                                         default="") if ctrl else ""),
+                "note": "",
+            })
+    return rows
+
+
+# --------------------------------------------------------------------------
 
 
 def check_cohort_complete(samples: dict, preflight_dir: str, run_id: str,
@@ -742,6 +1082,13 @@ def main(argv=None) -> int:
     ap.add_argument("--split-summary",
                     help="split_summary.json, so the funnel starts at reads "
                          "off the sequencer rather than at amplicon units")
+    ap.add_argument(
+        "--sample-metadata",
+        help="preflight/sample_metadata.tsv - the resolved one-row-per-"
+             "library join. Given it, synthesis writes group_summary.tsv: "
+             "the run consolidated by each grouping field in turn. Absent, "
+             "grouping by subject_id still happens, since that is declared "
+             "in the samplesheet")
     ap.add_argument("--preflight-dir",
                     help="for plate geometry derived at pre-flight")
     ap.add_argument("--outdir", default="synthesis")
@@ -796,6 +1143,7 @@ def main(argv=None) -> int:
         s = samples.get(r.get("sample_id", ""))
         if s:
             s.sample_type = r.get("sample_type", "unknown")
+            s.subject_id = (r.get("subject_id") or "").strip()
             s.index_i5 = r.get("index_i5", "")
             s.index_i7 = r.get("index_i7", "")
 
@@ -808,6 +1156,10 @@ def main(argv=None) -> int:
             s = samples.get(r.get("sample_id", ""))
             if s:
                 s.plate_row = r.get("plate_row", "")
+                # file_resolution is pre-flight's resolved view, so it
+                # carries the subject even when the samplesheet column
+                # was absent and pre-flight defaulted it to the library.
+                s.subject_id = (r.get("subject_id") or s.subject_id or "")
                 try:
                     s.plate_col = int(r.get("plate_col") or 0)
                 except ValueError:
@@ -921,6 +1273,22 @@ def main(argv=None) -> int:
         w.writeheader()
         w.writerows(rows)
 
+    # -- consolidation by metadata group ----------------------------------
+    # Written whenever there is a grouping to write: a metadata file, or
+    # simply a subject with more than one library. Absent otherwise,
+    # rather than an empty file, so its presence means something.
+    meta, meta_fields = load_sample_metadata(args.sample_metadata,
+                                             args.run_id)
+    group_rows = group_summary(samples, meta, meta_fields, rows, cals,
+                               plasmid_share, args.run_id)
+    if group_rows:
+        with open(os.path.join(args.outdir, "group_summary.tsv"), "w",
+                  newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=COLUMNS, delimiter="\t",
+                               lineterminator="\n", restval="")
+            w.writeheader()
+            w.writerows(group_rows)
+
     with open(os.path.join(args.outdir, "calibration.tsv"), "w",
               newline="") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
@@ -936,6 +1304,13 @@ def main(argv=None) -> int:
             ])
 
     # -- read fates -------------------------------------------------------
+    # Pooled first, because the per-well column is measured against the
+    # RUN's boundary rather than its own. A trough found inside one well
+    # would move from well to well and the column would not be
+    # comparable across the plate - which is the only thing it is for.
+    pooled_dist = pool_distances(samples)
+    trough = (pooled_dist.get("assigned") or {}).get("trough")
+
     fate_rows, fate_totals, unbalanced = [], Counter(), []
     for sid in sorted(samples):
         s = samples[sid]
@@ -945,6 +1320,22 @@ def main(argv=None) -> int:
             unbalanced.append(sid)
         for k, v in f.items():
             fate_totals[k] += v
+        # Distance summary for the reads that were ASSIGNED. Here rather
+        # than in a diagnostic file because this is the one column set
+        # that can betray a chimera: the read is assigned, to one parent,
+        # with a passing margin, so every other count in this table looks
+        # clean. Only how far it sat from its reference does not.
+        #
+        # The share beyond the run's trough, NOT a quantile. A p95 column
+        # shipped here first and was useless: the population it exists to
+        # find was 0.70% of reads, so it sat above p95 and above p99 both,
+        # and the column read 2 in every well whether spiked or clean. A
+        # quantile cannot see a tail smaller than its own complement.
+        assigned_d = (s.dist or {}).get("assigned") or {}
+        hist = assigned_d.get("histogram") or {}
+        n_assigned = sum(int(v) for v in hist.values())
+        over = (sum(int(v) for d, v in hist.items() if int(d) > trough)
+                if trough is not None else None)
         fate_rows.append({
             "run_id": args.run_id, "sample_id": sid,
             "sample_type": s.sample_type, "well": well_of(s.plate_row,
@@ -952,6 +1343,15 @@ def main(argv=None) -> int:
             "depth": s.depth, **f,
             "target_fraction": (f"{f['target']/s.depth:.6f}"
                                 if s.depth else ""),
+            "assigned_dist_median": _blank(hist_quantile(hist, 0.5)),
+            "assigned_dist_max": _blank(max((int(k) for k in hist),
+                                            default=None)),
+            # Empty for the whole plate when the run is monotone, which
+            # is the clean case and is meant to look like nothing.
+            "assigned_dist_over_trough": _blank(over),
+            "assigned_dist_over_trough_frac": (
+                f"{over / n_assigned:.5f}"
+                if over is not None and n_assigned else ""),
         })
     with open(os.path.join(args.outdir, "read_fates.tsv"), "w",
               newline="") as fh:
@@ -1012,6 +1412,35 @@ def main(argv=None) -> int:
         "cohort_complete": not empty_wells,
         "call_summary": dict(summary_calls),
         "call_meaning": CALL_MEANING,
+        "assignment_distance": pooled_dist,
+        "assignment_distance_note": (
+            "Edit distance from each read to the reference it was "
+            "assigned to, pooled over the run and weighted by reads. "
+            "Read the shape, not the median. One mode at the platform's "
+            "error rate is a clean run. A second mode further out is "
+            "reads that are not errors: a chimera between two panel "
+            "members sits at about half their divergence, is assigned to "
+            "one of them, and passes the margin rule - so it is counted "
+            "as a confident call and appears in no outcome tally "
+            "anywhere. This is the only place it is visible. "
+            "`trough` is where the first mode ends, FOUND in this run's "
+            "own histogram rather than chosen: a monotone histogram has "
+            "none and reports null, which is the clean case. Per-well "
+            "shares beyond it are in read_fates.tsv. Nothing is "
+            "filtered on this."
+        ),
+        "groups": {
+            "fields": sorted({r["field"] for r in group_rows}),
+            "n_rows": len(group_rows),
+            "metadata_supplied": bool(meta),
+            "note": (
+                "Consolidated per group in group_summary.tsv. Negative "
+                "controls are excluded from every metric and counted "
+                "separately, and a library with no metadata row is "
+                "grouped under '(no value)' rather than dropped, so "
+                "n_libraries sums to the plate within each field."
+            ),
+        },
         "run_was_spiked": spiked_run,
         "internal_control_summary": dict(
             Counter(c.state for c in cals.values())),

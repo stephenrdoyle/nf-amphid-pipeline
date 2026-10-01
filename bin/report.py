@@ -196,6 +196,73 @@ def _axis_ticks(lo: float, hi: float, n: int = 5) -> list[float]:
     return [lo + (hi - lo) * i / (n - 1) for i in range(n)]
 
 
+def counts_bar_svg(hist: dict, title: str, note_hi: int | None = None) -> str:
+    """An integer-keyed, count-valued distribution drawn as itself.
+
+    Separate from histogram_svg, which takes a list of values. The read
+    counts here can be tens of millions, so expanding the histogram into
+    one element per read to reuse that function would cost more memory
+    than the whole report. Edit distances are small integers anyway, so
+    there is nothing to bin: every distance gets its bar.
+
+    Log-scaled counts, because the point of the plot is a MINORITY mode.
+    A chimeric fraction of a percent is invisible on a linear axis next
+    to the clean mode, and invisible is the same as absent to a reader.
+    """
+    pairs = sorted((int(k), int(v)) for k, v in hist.items() if int(v) > 0)
+    if not pairs:
+        return ""
+    if len(pairs) == 1:
+        return (f'<p class="note">Every assigned read sits at distance '
+                f'<b>{pairs[0][0]}</b> — no distribution to plot.</p>')
+    top = max(v for _, v in pairs)
+    lo_d, hi_d = pairs[0][0], pairs[-1][0]
+    w, h, pad_l, pad_b, pad_t = 560, 160, 46, 30, 12
+    plot_h = h - pad_t - pad_b
+    cols = hi_d - lo_d + 1
+    bw = (w - pad_l - 14) / cols
+
+    out = [f'<svg viewBox="0 0 {w} {h}" width="100%" style="max-width:{w}px" '
+           f'role="img" aria-label="{esc(title)}">']
+    # Decade gridlines, since the axis is log and the reader needs to
+    # know which order of magnitude a short bar is in.
+    dec = 0
+    while 10 ** dec <= top:
+        y = pad_t + plot_h - plot_h * (math.log10(10 ** dec + 1)
+                                       / math.log10(top + 1))
+        out.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{w-14}" '
+                   f'y2="{y:.1f}" stroke="#eceef0"/>')
+        out.append(f'<text x="{pad_l-6}" y="{y+3:.1f}" font-size="9" '
+                   f'fill="#5f6368" text-anchor="end">'
+                   f'{_num(10 ** dec)}</text>')
+        dec += 1
+    out.append(f'<text x="11" y="{pad_t + plot_h/2}" font-size="9" '
+               f'fill="#5f6368" text-anchor="middle" '
+               f'transform="rotate(-90 11 {pad_t + plot_h/2})">reads</text>')
+
+    for d, v in pairs:
+        # +1 inside the log so a count of 1 still draws a visible bar. A
+        # real observation rendered at zero height reads as absent, and
+        # a minority mode is the entire point of this plot.
+        bh = plot_h * math.log10(v + 1) / math.log10(top + 1)
+        x = pad_l + (d - lo_d) * bw
+        fill = ("#b03030" if note_hi is not None and d >= note_hi
+                else "#3d6b8e")
+        out.append(f'<rect x="{x:.1f}" y="{pad_t + plot_h - bh:.1f}" '
+                   f'width="{max(1.0, bw - 1):.1f}" '
+                   f'height="{max(0.8, bh):.1f}" fill="{fill}">'
+                   f'<title>distance {d}: {fmt(v)} reads</title></rect>')
+    for d in sorted({lo_d, (lo_d + hi_d) // 2, hi_d}):
+        x = pad_l + (d - lo_d) * bw + bw / 2
+        out.append(f'<text x="{x:.1f}" y="{h - 12}" font-size="9" '
+                   f'fill="#5f6368" text-anchor="middle">{d}</text>')
+    out.append(f'<text x="{(w + pad_l)/2:.0f}" y="{h - 1}" font-size="9" '
+               f'fill="#5f6368" text-anchor="middle">'
+               f'edit distance to the assigned reference</text>')
+    out.append('</svg>')
+    return "".join(out)
+
+
 def histogram_svg(values: list, title: str, log=False, bins=26,
                   unit: str = "") -> str:
     """A distribution, drawn so its counts can be read off it.
@@ -706,6 +773,54 @@ def build(args) -> str:
                 + "</p>"
             )
 
+    # ---- how well the reads fit ---------------------------------------
+    # Before the calls, because it is about whether the calls mean what
+    # they say. Every read in this plot was ASSIGNED - it is not a loss
+    # category, and it appears in no outcome tally. A chimera between two
+    # panel members is assigned to one of them with a passing margin, so
+    # the only trace it leaves is how far it sat from that reference.
+    ad = (qc.get("assignment_distance") or {}).get("assigned") or {}
+    if ad.get("histogram"):
+        trough = ad.get("trough")
+        parts.append("<h2>How well the reads fit</h2>")
+        parts.append(
+            f'<p>Edit distance from each assigned read to the reference it '
+            f'was assigned to, pooled over the run. Median '
+            f'<b>{esc(ad.get("median"))}</b>, max '
+            f'<b>{esc(ad.get("max"))}</b> over '
+            f'{fmt(ad.get("reads", 0))} reads.</p>'
+        )
+        if trough is not None:
+            # The bar colour is the finding, so it is stated in words
+            # too - a reader who prints this in greyscale still gets it.
+            # flag() escapes its argument, as every other caller relies
+            # on, so this is plain text and emphasises by wording.
+            share = ad.get("fraction_beyond_trough")
+            pct = f"{float(share) * 100:.2f}%" if share else "?"
+            parts.append(flag(
+                "warn",
+                f"Not monotone: the distribution falls to a trough at "
+                f"distance {trough} and rises again. "
+                f"{fmt(ad.get('reads_beyond_trough') or 0)} reads "
+                f"({pct} of assigned) sit beyond it, drawn in red below. "
+                f"Reads that far out are not sequencing error."))
+        parts.append(counts_bar_svg(
+            ad["histogram"], "Assigned reads by distance to their reference",
+            note_hi=None if trough is None else trough + 1))
+        parts.append(
+            '<p class="note">Read the shape, not the median. One mode at '
+            'the platform&rsquo;s error rate is a clean run. A second '
+            'mode further out is reads that are not errors &mdash; a '
+            'read built from two panel members sits at roughly half '
+            'their divergence, is assigned to one of them, and passes '
+            'the margin rule, so it is counted as a confident call and '
+            'appears nowhere else in this report. The trough is found in '
+            'this run&rsquo;s own histogram, not chosen in advance, and '
+            'nothing is filtered on it. Per-well shares are in '
+            '<code>read_fates.tsv</code> under '
+            '<code>assigned_dist_over_trough_frac</code>.</p>'
+        )
+
     # ---- calls --------------------------------------------------------
     parts.append("<h2>Calls</h2>")
     parts.append('<div class="cards">')
@@ -741,6 +856,69 @@ def build(args) -> str:
             f"<td>{stacked_bar([(k, cc[k], CALL_COLOUR[k]) for k in CALL_COLOUR])}</td></tr>"
         )
     parts.append("</tbody></table>")
+
+    # ---- by metadata group ---------------------------------------------
+    # Placed after the calls because it consolidates them, and before the
+    # composition because a designed comparison - cleaned against
+    # uncleaned, one batch against another - decides how much of what
+    # follows is signal and how much is handling.
+    #
+    # Rendered, not computed. Every number is read from group_summary.tsv
+    # exactly as synthesis wrote it, including its exclusions: negative
+    # controls are out of the metrics and counted separately, and a
+    # library with no metadata row sits under '(no value)'.
+    groups = []
+    gpath = os.path.join(args.synthesis_dir, "group_summary.tsv")
+    if os.path.exists(gpath):
+        groups = read_table(gpath)
+    if groups:
+        parts.append("<h2>By group</h2>")
+        parts.append(
+            "<p>The run consolidated by each grouping field in turn. Groups "
+            "sit side by side and are never pooled: where the groups are "
+            "the arms of a designed comparison, summing them answers a "
+            "question nobody asked. Negative controls are excluded from "
+            "every metric and counted in their own column, because a "
+            "median depth with an NTC in the denominator moves when the "
+            "number of NTCs does. Libraries with no metadata row appear "
+            "under &lsquo;(no value)&rsquo; rather than vanishing, so the "
+            "library counts within a field add up to the plate.</p>"
+        )
+        by_field: dict = defaultdict(list)
+        for g in groups:
+            by_field[g["field"]].append(g)
+        for field, rows_g in by_field.items():
+            parts.append(f"<h3>{esc(field)}</h3>")
+            note = (rows_g[0].get("note") or "").strip()
+            if len(rows_g) == 1 and rows_g[0]["value"] == "(not grouped)":
+                parts.append(f'<p class="sub">{esc(note)}</p>')
+                continue
+            parts.append(
+                "<table><thead><tr><th>Value</th>"
+                "<th class='num'>Libraries</th><th class='num'>Controls</th>"
+                "<th class='num'>Reads assigned</th>"
+                "<th class='num'>Median depth</th>"
+                "<th class='num'>Target fraction</th>"
+                "<th class='num'>Detected</th>"
+                "<th class='num'>Detection rate</th>"
+                "<th class='num'>Deepest negative</th>"
+                "<th>Where the reads went</th></tr></thead><tbody>")
+            for g in sorted(rows_g, key=lambda r: r["value"]):
+                bar = stacked_bar([
+                    (k, int(g.get(f"reads_{k}") or 0), FATE_COLOURS[k])
+                    for k in FATE_ORDER])
+                parts.append(
+                    f"<tr><td>{esc(g['value'])}</td>"
+                    f"<td class='num'>{fmt(g.get('n_analysed') or 0)}</td>"
+                    f"<td class='num'>{fmt(g.get('n_controls') or 0)}</td>"
+                    f"<td class='num'>{fmt(g.get('reads_assigned') or 0)}</td>"
+                    f"<td class='num'>{fmt(g.get('median_depth') or 0)}</td>"
+                    f"<td class='num'>{esc(g.get('target_fraction') or '-')}</td>"
+                    f"<td class='num'>{fmt(g.get('detected') or 0)}</td>"
+                    f"<td class='num'>{esc(g.get('detection_rate') or '-')}</td>"
+                    f"<td class='num'>{esc(g.get('deepest_negative') or '-')}</td>"
+                    f"<td>{bar}</td></tr>")
+            parts.append("</tbody></table>")
 
     # ---- composition ---------------------------------------------------
     # Only speciation targets form a composition. A panel carrying a second

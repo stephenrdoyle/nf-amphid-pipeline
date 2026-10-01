@@ -84,7 +84,7 @@ A samplesheet row is a *library*, and it is frozen at prep time.
 | `index_i7` | yes | i7 index sequence or name |
 | `index_i5` | yes | i5 index sequence or name |
 | `sample_type` | yes | `unknown`, `neg_extraction`, `neg_ntc`, `mock`, `pos_control` |
-| `subject_id` | no | joins to the metadata file; one subject may be several libraries |
+| `subject_id` | no | who the library came from. Groups replicates with no metadata file needed; also the join key for a subject-keyed `--metadata`. Defaults to `sample_id` |
 | `file_prefix` | no | overrides filename matching for Illumina file resolution |
 
 The `sample_type` vocabulary is **not** configurable. The logic depends
@@ -138,17 +138,54 @@ Used to trim primer sequence off the panel, producing
 `preflight/reference.insert.fasta`. The nanopore path **requires** this:
 without it there is no primer-trimmed panel and the run stops.
 
-### 2.5 `--metadata` — subject metadata (TSV, optional)
+### 2.5 `--metadata` — grouping metadata (TSV, optional)
 
 Kept deliberately *out* of the samplesheet. A samplesheet row is a
-library and is frozen at prep; a metadata row is a subject and keeps
-changing; and one subject is usually several libraries. Pre-flight
-validates the join rather than assuming it.
+library, is frozen at prep, and travels to the sequencing centre and
+into every results directory; metadata keeps changing and should not
+ride along by default. Pre-flight validates the join rather than
+assuming it.
+
+Every field in this file becomes a grouping in `group_summary.tsv`
+(§5), so this is how you ask "how many reads per arm".
+
+**The key column declares the level, and there must be exactly one:**
+
+| key column | the row describes | applies to |
+|---|---|---|
+| `subject_id` | a subject or isolate | every library made from it |
+| `sample_id` | one library | that library alone |
 
 | column | required | meaning |
 |---|---|---|
-| `subject_id` | yes | joins to `subject_id` in the samplesheet |
-| anything else | no | your own fields |
+| one of the two above | yes | the join key |
+| anything else | no | your own fields, each of which becomes a grouping |
+
+Which one you want is decided by the variable, not by preference. A
+country or a population is a property of the subject. A **bench
+treatment is not**: testing uncleaned against AMPure-cleaned PCR1
+splits one subject's product into two libraries that differ only in
+the treatment, so keyed on `subject_id` both arms would get the same
+value and the comparison would come out empty with nothing saying why.
+That file has to be keyed on `sample_id`.
+
+```tsv
+sample_id	pcr1_cleanup
+iCCH-001-r1	none
+iCCH-001-r2	ampure
+```
+
+A file with both key columns is refused: it gives a library two
+sources for one field and no rule for which wins.
+
+Replicates need no file at all. Several libraries declaring the same
+`subject_id` in the samplesheet are already a grouping, and are
+summarised as one whenever at least one subject has more than one
+library.
+
+A library with no metadata row is grouped under `(no value)`, never
+dropped — so the library counts within a field always add up to the
+plate, and a small group is distinguishable from a broken join.
 
 **Refused as a hard error**, not a warning: `latitude`, `longitude`,
 `lat`, `lon`, `lng`, `gps`, `coordinates`, `coord`, `easting`,
@@ -200,7 +237,7 @@ both Nextflow and `preflight.py`, so the values are defined once.
 | `--platform` | — | `illumina` or `nanopore`; only with `--input_dir` |
 | `--run_id` | `RUN01` | run id when using `--input_dir` |
 | `--primers` | — | PCR1 primers TSV |
-| `--metadata` | — | subject metadata TSV |
+| `--metadata` | — | grouping metadata TSV, keyed on `subject_id` **or** `sample_id` |
 | `--mocks` | — | mock composition TSV |
 | `--comparison` | — | a previous run's `calls.tsv`, to pair against this one |
 | `--index_map` | `${projectDir}/assets/index_map.tsv` | index primer map |
@@ -331,6 +368,7 @@ reproducibility choice, not a dependency.
   preflight/
     validation.log              every check, passed and failed
     file_resolution.tsv         each sample resolved to its files
+    sample_metadata.tsv         the grouping join, one row per library
     runs_resolved.tsv           the run manifest with absolute paths
     reference.fasta             the panel
     reference.insert.fasta      the panel, primers trimmed
@@ -355,7 +393,8 @@ reproducibility choice, not a dependency.
   synthesis/
     calls.tsv                   the results table
     calibration.tsv             per-well internal control
-    read_fates.tsv              the read funnel
+    read_fates.tsv              the read funnel, + per-well fit distance
+    group_summary.tsv           the run consolidated by each grouping field
     run_qc.json                 run-level QC
   calibration/                  only with --mocks
   comparison/                   only with --comparison
@@ -377,6 +416,104 @@ The distinction matters: a negative result is only a negative result if
 the internal control says the well amplified. `assay_failed` is not a
 missing value to be dropped — it is the honest answer for a well whose
 spike-in did not come back.
+
+### Reading the fit distance
+
+`read_fates.tsv` carries four columns per well; `run_qc.json` carries
+the pooled histogram under `assignment_distance`; the report draws it
+under **How well the reads fit**.
+
+| column | meaning |
+|---|---|
+| `assigned_dist_median` | the error mode — the platform, not the assay |
+| `assigned_dist_max` | furthest assigned read; one read, so noisy |
+| `assigned_dist_over_trough` | assigned reads beyond the run's trough |
+| `assigned_dist_over_trough_frac` | the same as a share of the well |
+
+**The trough is found, not chosen.** Synthesis walks the run's own
+pooled histogram out from the error mode; if it dips and then rises
+again by at least 2x, the dip is the boundary. A monotone histogram has
+no trough, so `trough` is null, the two columns are empty for the whole
+plate, and that is the clean answer — no threshold had to be invented
+to produce it.
+
+A 95th percentile shipped here first and was useless. The population it
+existed to find was **0.70%** of assigned reads on a plate spiked with
+1.5% chimeras, so it sat above p95 *and* p99, and the column read `2`
+in every well, spiked and clean alike. A quantile cannot resolve a tail
+smaller than its own complement. The trough share separates the same
+wells 1.38% against 0.00%.
+
+These describe reads that **were assigned** — it is not a loss
+category. Read the shape, not the median:
+
+- **one mode at the platform's error rate** — a clean run
+- **a second mode further out** — reads that are not errors
+
+The second case is what a read built from two panel members looks like.
+It sits at roughly half the divergence between its two parents, is
+assigned to one of them, and **passes the margin rule** — because the
+read genuinely is closer to one reference, the substitutions separating
+two references never being evenly spread. Measured on a two-reference
+panel 5% divergent, a 50/50 chimera came back `assigned` at distance 7
+with a margin of 4, against a `min_margin` of 2. So it is counted as a
+confident species call and appears in no outcome tally anywhere. This
+is the only place it is visible.
+
+No threshold is applied and nothing is filtered. Where the second mode
+sits depends on which references recombined and on the platform's error
+rate, so a cutoff set here would be invented rather than measured.
+Sorting `read_fates.tsv` on `assigned_dist_over_trough_frac` finds the
+odd well; the pooled histogram finds the artifact. Nothing is filtered
+on either.
+
+### Reading `group_summary.tsv`
+
+One row per (`field`, `value`): the run consolidated by each grouping
+field in turn. Present whenever there is a grouping to write — a
+`--metadata` file, or simply a subject with more than one library.
+
+Three things about it decide how to read it:
+
+**Groups are never pooled.** Where the groups are the arms of a
+designed comparison, summing them answers a question nobody asked and
+destroys the one that was. Each arm gets its own row, side by side.
+
+**Negative controls are excluded from every metric** and counted in
+`n_controls`. A median depth with an NTC in the denominator moves when
+the number of NTCs does, which would make two runs incomparable for a
+reason invisible in the table. What the negatives say gets its own
+column instead: `deepest_negative`, the read count of the deepest
+negative in that group — which is how you tell whether an arm stayed
+clean.
+
+**Every library appears.** One with no metadata row sits under
+`(no value)`. So `n_libraries` summed over a field's rows equals the
+plate, and a small group is distinguishable from a broken join.
+
+| column | meaning |
+|---|---|
+| `field`, `value` | the grouping and one of its values |
+| `n_libraries` | all libraries in the group, controls included |
+| `n_controls` | negatives, excluded from everything below |
+| `n_analysed` | the denominator for every metric that follows |
+| `n_subjects`, `n_empty` | distinct subjects; libraries with zero reads |
+| `reads_assigned` | reads reaching assignment — "how many reads per group" |
+| `median_depth`, `min_depth`, `max_depth` | the spread, not just the centre |
+| `reads_<fate>` | the eight read fates, summed over the group |
+| `target_fraction` | on-target share — the usable fraction |
+| `plasmid_share` | median plasmid carryover |
+| `detected`, `not_detected`, `assay_failed` | target calls |
+| `detection_rate` | detected / (detected + not detected) |
+| `wells_<state>` | internal-control states |
+| `deepest_negative` | the deepest negative control in this group |
+| `note` | why a field was skipped, when one was |
+
+There is **no test statistic here on purpose**. With two arms and a
+handful of libraries each, a p-value would be read as an answer when
+it is barely evidence. A field with more distinct values than
+libraries-worth of meaning — above 50 — is skipped with a note, on the
+grounds that it is an identifier rather than a category.
 
 ---
 
@@ -511,7 +648,8 @@ Predate the Nextflow layer and are kept because every stage in them has
 been executed on real data. They are single-platform, take positional
 arguments, and reimplement in shell what `-resume` does properly. The
 nanopore driver takes `THREADS`, `CONTROLS_AS_TARGETS`, `PLASMID_WARN`,
-`MIN_DEPTH`, `PERMUTATIONS` and `RUN_ID` from the environment.
+`MIN_DEPTH`, `PERMUTATIONS`, `METADATA` and `RUN_ID` from the
+environment.
 
 Use them until the workflow has been shaken down on real data, then
 stop. The longer both exist the further they drift, and they have

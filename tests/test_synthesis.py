@@ -679,6 +679,291 @@ def test_control_plasmid_reporting() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_group_summary() -> None:
+    """Consolidation by metadata group, and what it must refuse to hide.
+
+    The run this exists for is a designed comparison: one subject's PCR1
+    product split into an uncleaned arm and an AMPure-cleaned one. Three
+    ways that goes wrong quietly, and each is checked here rather than
+    trusted.
+
+    A LOST LIBRARY. If a library with no metadata row is dropped instead
+    of bucketed, a group summary of 40 libraries silently describes 31,
+    and nothing in the table says which. So the library counts within a
+    field must sum to the plate exactly.
+
+    A CONTROL IN THE DENOMINATOR. NTCs are near-empty by design. Leave
+    them in and a group's median depth is a function of how many
+    negatives that arm happened to carry - which makes two arms
+    incomparable for a reason invisible in the output.
+
+    AN ARM THAT DOES NOT MOVE. The point of the comparison is that the
+    arms can differ, so the test builds arms that DO differ and checks
+    the difference survives into the table. A summary that reports the
+    same number for both arms passes every structural check and answers
+    nothing.
+    """
+    print("\ngrouping by metadata")
+
+    def sample(sid, sub, depth, target, stype="unknown"):
+        s = S.Sample(sample_id=sid, sample_type=stype, subject_id=sub,
+                     depth=depth)
+        s.by_ref_type = {"target": target, "quant": depth - target}
+        s.outcomes = {}
+        return s
+
+    # Two arms that genuinely differ: the cleaned arm is deeper and a
+    # larger share of it is on target.
+    samples = {
+        "S1a": sample("S1a", "SUB1", 1000, 900),
+        "S1b": sample("S1b", "SUB1", 200, 60),
+        "S2a": sample("S2a", "SUB2", 1200, 1100),
+        "S2b": sample("S2b", "SUB2", 300, 90),
+        # No metadata row, and not a control: the bucketing case.
+        "S3": sample("S3", "SUB3", 500, 250),
+        "NTC": sample("NTC", "NTC", 4, 0, stype="neg_ntc"),
+    }
+    meta = {
+        "S1a": {"pcr1_cleanup": "ampure"}, "S1b": {"pcr1_cleanup": "none"},
+        "S2a": {"pcr1_cleanup": "ampure"}, "S2b": {"pcr1_cleanup": "none"},
+        "NTC": {"pcr1_cleanup": "ampure"},
+    }
+    calls = [
+        {"sample_id": "S1a", "reference_type": "target", "call": "detected"},
+        {"sample_id": "S2a", "reference_type": "target", "call": "detected"},
+        {"sample_id": "S1b", "reference_type": "target",
+         "call": "not_detected"},
+        {"sample_id": "S2b", "reference_type": "target",
+         "call": "not_detected"},
+        # A control-plasmid row, which must not enter the detection rate:
+        # that rate is about targets.
+        {"sample_id": "S1b", "reference_type": "control",
+         "call": "detected"},
+    ]
+    cals = {k: S.Calibration(sample_id=k, state="spiked") for k in samples}
+    shares = {k: 0.01 for k in samples}
+
+    rows = S.group_summary(samples, meta, ["pcr1_cleanup"], calls, cals,
+                           shares, "RUN01")
+    by = {(r["field"], r["value"]): r for r in rows}
+
+    check("both arms appear as their own rows",
+          ("pcr1_cleanup", "ampure") in by and ("pcr1_cleanup", "none") in by,
+          str(sorted(by)))
+    check("and they are not pooled into one",
+          by[("pcr1_cleanup", "ampure")]["reads_assigned"] !=
+          by[("pcr1_cleanup", "none")]["reads_assigned"])
+
+    # the difference the experiment is about, arriving intact
+    amp = by[("pcr1_cleanup", "ampure")]
+    none = by[("pcr1_cleanup", "none")]
+    check("the cleaned arm's reads are counted, controls excluded",
+          amp["reads_assigned"] == 2200, str(amp["reads_assigned"]))
+    check("the uncleaned arm's separately",
+          none["reads_assigned"] == 500, str(none["reads_assigned"]))
+    check("target fraction distinguishes the arms",
+          float(amp["target_fraction"]) > 0.9
+          and float(none["target_fraction"]) < 0.4,
+          f"{amp['target_fraction']} vs {none['target_fraction']}")
+    check("detection rate distinguishes them too",
+          amp["detection_rate"] == "1.0000"
+          and none["detection_rate"] == "0.0000",
+          f"{amp['detection_rate']} vs {none['detection_rate']}")
+
+    # the lost-library failure
+    total = sum(r["n_libraries"] for r in rows
+                if r["field"] == "pcr1_cleanup")
+    check("every library is in exactly one group of a field",
+          total == len(samples), f"{total} vs {len(samples)}")
+    check("an unannotated library is bucketed, not dropped",
+          by[("pcr1_cleanup", S.NO_VALUE)]["n_libraries"] == 1,
+          str(by.get(("pcr1_cleanup", S.NO_VALUE))))
+
+    # the control-in-the-denominator failure
+    check("the NTC is counted but kept out of the metrics",
+          amp["n_controls"] == 1 and amp["n_analysed"] == 2,
+          f"controls={amp['n_controls']} analysed={amp['n_analysed']}")
+    check("median depth is over the real samples only",
+          float(amp["median_depth"]) == 1100.0, str(amp["median_depth"]))
+    check("and the negative is reported where it belongs",
+          amp["deepest_negative"] == 4 and none["deepest_negative"] == "",
+          f"{amp['deepest_negative']!r} {none['deepest_negative']!r}")
+
+    check("a control-plasmid call does not enter the detection rate",
+          none["detected"] == 0, str(none["detected"]))
+
+    # replicates: a grouping that needs no metadata file at all
+    rows2 = S.group_summary(samples, {}, [], calls, cals, shares, "RUN01")
+    subs = {r["value"]: r for r in rows2 if r["field"] == "subject_id"}
+    check("subjects group with no metadata supplied",
+          subs and subs["SUB1"]["n_analysed"] == 2, str(sorted(subs)))
+
+    # ...but not when every subject is a single library, where it would
+    # just be the per-sample table with a worse layout
+    singles = {k: sample(k, k, 100, 50) for k in ("A", "B", "C")}
+    rows3 = S.group_summary(singles, {}, [], [], {}, {}, "RUN01")
+    check("one library per subject is not reported as a grouping",
+          not rows3, str(rows3))
+
+    # an identifier masquerading as a category
+    many = {f"S{i}": sample(f"S{i}", f"S{i}", 100, 50) for i in range(60)}
+    wide = {k: {"barcode": k} for k in many}
+    rows4 = S.group_summary(many, wide, ["barcode"], [], {}, {}, "RUN01")
+    bc = [r for r in rows4 if r["field"] == "barcode"]
+    check("a field with a value per library is refused, and says why",
+          len(bc) == 1 and "identifier" in bc[0]["note"], str(bc))
+
+    # every row carries every column, or the header depends on sort order
+    check("all rows share the declared column set",
+          all(set(r) == set(S.COLUMNS) for r in rows + rows2 + rows4),
+          str([sorted(set(r) ^ set(S.COLUMNS)) for r in rows][:1]))
+
+
+def test_assignment_distance_reaches_the_output() -> None:
+    """The chimera signal survives the trip out of the per-sample JSON.
+
+    Assignment measures it; before this it stopped there. A diagnostic
+    that lives in 94 per-sample files is not an output - the choice is
+    94 files opened by hand or nothing, and it is nothing. So what is
+    tested here is the PLUMBING, plus the one arithmetic trap in it.
+
+    The signal itself is a minority second mode. A chimeric fraction of
+    a percent is the realistic case and is exactly what a mean, a
+    median, or a careless pool would erase, so the test builds one that
+    small and insists it is still there and still findable at the far
+    quantiles.
+    """
+    print("\nassignment distance in the output")
+
+    def s_with(hist, stype="unknown"):
+        s = S.Sample(sample_id="x", sample_type=stype, depth=sum(hist.values()))
+        s.dist = {"assigned": {"histogram": {str(k): v
+                                             for k, v in hist.items()}}}
+        return s
+
+    # Two wells of clean reads and one carrying a 1% chimeric population
+    # at distance 9 - half the divergence of a pair of congeners.
+    samples = {
+        "A": s_with({0: 5000, 1: 2000, 2: 300}),
+        "B": s_with({0: 4000, 1: 1500, 2: 200}),
+        "C": s_with({0: 4000, 1: 1500, 2: 200, 9: 70}),
+    }
+    pooled = S.pool_distances(samples)["assigned"]
+
+    check("the pool sums every well's reads",
+          pooled["reads"] == 7300 + 5700 + 5770, str(pooled["reads"]))
+    check("the clean mode sets the median", pooled["median"] == 0,
+          str(pooled["median"]))
+    check("a 1% second mode is NOT erased by pooling",
+          pooled["histogram"]["9"] == 70, str(pooled["histogram"]))
+    check("and it is reachable at the far quantile",
+          pooled["p99"] >= 2 and pooled["max"] == 9,
+          f"p99 {pooled['p99']} max {pooled['max']}")
+
+    # The trap: JSON has no integer keys, so a histogram arrives keyed on
+    # strings. Sorted as strings, '10' precedes '2' and every quantile
+    # comes out wrong - silently, as a plausible number rather than an
+    # error. This is the assertion that catches it.
+    wide = {str(d): 1 for d in (0, 2, 9, 10, 11, 40)}
+    check("string keys are ordered numerically, not lexically",
+          S.hist_quantile(wide, 1.0) == 40 and S.hist_quantile(wide, 0.0) == 0,
+          f"{S.hist_quantile(wide, 1.0)} / {S.hist_quantile(wide, 0.0)}")
+    check("and the median lands between them, not at '10'",
+          S.hist_quantile(wide, 0.5) == 9, str(S.hist_quantile(wide, 0.5)))
+
+    check("an empty histogram gives no quantile rather than a zero",
+          S.hist_quantile({}, 0.5) is None)
+    check("a well with no assigned reads writes an empty cell, not 'None'",
+          S._blank(None) == "" and S._blank(0) == "0")
+
+    # a run where assignment predates this field must not crash
+    old = {"A": S.Sample(sample_id="A", depth=10)}
+    check("a sample whose JSON has no distances is survivable",
+          S.pool_distances(old) == {}, str(S.pool_distances(old)))
+
+
+def test_trough_is_found_not_chosen() -> None:
+    """The boundary between error and not-error, read off the run.
+
+    This replaced a 95th percentile, which could not work: the
+    population it had to find was 0.70% of reads on a plate spiked at
+    1.5%, so it sat above p95 and above p99 both, and the column read
+    identically in spiked and clean wells. A quantile cannot resolve a
+    tail smaller than its own complement, and no choice of quantile
+    fixes that.
+
+    So the boundary is measured instead. What that buys is the clean
+    case for free: a monotone histogram has no trough, reports None, and
+    the per-well column comes back empty - no threshold had to be
+    invented to say "nothing here".
+
+    What it costs is a detector that can be fooled, so the refusals are
+    tested as hard as the detections. A detector that fires on a noisy
+    tail would put a red flag on every clean run and be switched off
+    within a week.
+    """
+    print("\nfinding the trough")
+
+    # The real shape, from the validation plate: decay to 5 at distance
+    # 5, then a second mode peaking at 93.
+    real = {"0": 14999, "1": 7138, "2": 1668, "3": 284, "4": 25, "5": 4,
+            "6": 37, "7": 93, "8": 31, "9": 7, "11": 1}
+    check("the trough is the last distance of the error mode",
+          S.find_trough(real) == 5, str(S.find_trough(real)))
+
+    # -- it must refuse -----------------------------------------------
+    clean = {"0": 15000, "1": 7000, "2": 1700, "3": 280, "4": 25, "5": 4}
+    check("a monotone run has no trough, and says None not 0",
+          S.find_trough(clean) is None, str(S.find_trough(clean)))
+
+    jitter = {"0": 15000, "1": 7000, "2": 1700, "3": 280, "4": 4, "5": 5,
+              "6": 3, "7": 1}
+    check("a noisy tail is not a second mode",
+          S.find_trough(jitter) is None, str(S.find_trough(jitter)))
+
+    stray = {"0": 15000, "1": 7000, "2": 1700, "3": 0, "4": 1}
+    check("one stray read does not make a trough",
+          S.find_trough(stray) is None, str(S.find_trough(stray)))
+
+    check("a histogram too short to have a shape is refused",
+          S.find_trough({"0": 10, "1": 2}) is None)
+    check("and an empty one", S.find_trough({}) is None)
+
+    # A gap is a count of zero and part of the shape. Reading only the
+    # keys present would walk 4 -> 37 and see a rise with no trough.
+    gapped = {"0": 9000, "1": 400, "2": 25, "3": 4, "6": 37, "7": 90}
+    check("a gap in the keys is read as zeros, so the trough is found",
+          S.find_trough(gapped) == 5, str(S.find_trough(gapped)))
+
+    # -- and it has to carry through to the pooled block --------------
+    def s_with(hist):
+        s = S.Sample(sample_id="x", depth=sum(hist.values()))
+        s.dist = {"assigned": {"histogram": {str(k): v
+                                             for k, v in hist.items()}}}
+        return s
+
+    pooled = S.pool_distances({"A": s_with({0: 14999, 1: 7138, 2: 1668,
+                                            3: 284, 4: 25, 5: 4, 6: 37,
+                                            7: 93, 8: 31, 9: 7})})
+    a = pooled["assigned"]
+    check("the pooled block reports the trough",
+          a["trough"] == 5, str(a["trough"]))
+    check("and the reads beyond it",
+          a["reads_beyond_trough"] == 37 + 93 + 31 + 7,
+          str(a["reads_beyond_trough"]))
+    check("as a fraction small enough that p95 would have missed it",
+          float(a["fraction_beyond_trough"]) < 0.01
+          and a["p95"] == 2 and a["p99"] == 3,
+          f"{a['fraction_beyond_trough']} p95={a['p95']} p99={a['p99']}")
+
+    clean_pooled = S.pool_distances({"A": s_with({0: 15000, 1: 7000,
+                                                  2: 1700, 3: 280, 4: 25})})
+    ca = clean_pooled["assigned"]
+    check("a clean run reports no trough and no share",
+          ca["trough"] is None and ca["fraction_beyond_trough"] is None,
+          str(ca["trough"]))
+
+
 def test_cohort_completeness() -> None:
     """Synthesis must refuse to report on part of a plate.
 
@@ -777,6 +1062,9 @@ def main() -> int:
     test_permutation_calibration()
     test_end_to_end()
     test_cohort_completeness()
+    test_group_summary()
+    test_assignment_distance_reaches_the_output()
+    test_trough_is_found_not_chosen()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
