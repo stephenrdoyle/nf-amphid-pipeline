@@ -170,6 +170,41 @@ class BarcodeSet:
             return best
         return None
 
+    def candidates(self, window: str, max_dist: int = 4
+                   ) -> tuple[tuple[str, ...], int]:
+        """Every declared barcode tied for nearest, and that distance.
+
+        What `match` throws away. `match` resolves one end in isolation,
+        so a window equidistant from two declared barcodes is
+        unresolvable and is correctly declined. But the read has a
+        SECOND end, and if the plate is SPARSE the two together can
+        resolve what neither can alone: a window tied between two i7
+        candidates still resolves when only one of them forms a declared
+        well with the i5 this read carries. That is MiniBar's trick.
+
+        How much it can deliver is a property of the PLATE, not of this
+        function, and it is worth knowing before reading any number it
+        produces. On the reference titration plate the grid is 8 i5 x 12
+        i7 = 96 combinations with 94 declared - 97.9% saturated. A tie
+        there almost always has both candidates forming real wells, so
+        the trick has nearly no room to work. MiniBar's own example
+        plate was three samples drawn from a much larger index space.
+
+        Returns the TIED set, not the k nearest: a candidate further
+        away than another is already excluded by distance and needs no
+        combination to rule it out. A set of ONE therefore means nothing
+        was tied, and the caller must not treat it as a combination
+        win - see combination_check(). Empty when nothing is within
+        max_dist, which is the genuinely unreadable case.
+        """
+        if not self.by_seq or len(window) != self.length:
+            return (), -1
+        ds = sorted((hamming(window, c), c) for c in self.by_seq)
+        if not ds or ds[0][0] > max_dist:
+            return (), -1
+        best_d = ds[0][0]
+        return tuple(c for d, c in ds if d == best_d), best_d
+
 
 @dataclass
 class EndCall:
@@ -185,6 +220,14 @@ class EndCall:
     # assignment per end and is read by bin/diagnose_demux.py.
     reason: str = "ok"
     anchor_edits: int = -1
+    # The declared barcodes tied for nearest, when this end was declined
+    # and the window was at least readable. Populated only on failure -
+    # a resolved end has nothing to disambiguate - and used by the
+    # combination check, which asks whether the OTHER end narrows these
+    # to one declared well. Measurement only: nothing here changes a
+    # barcode, a tier or a sample.
+    candidates: tuple[str, ...] = ()
+    candidate_dist: int = -1
 
 
 def call_end(
@@ -253,8 +296,16 @@ def call_end(
     # duplication exists to survive. Slack is small and anchored, so this is
     # still a handful of tested windows rather than a scan.
     calls = []
+    # The best window per copy, kept whether or not it matched, so a
+    # declined end can still report what it was nearest to. Taken at the
+    # EXPECTED offset only: the shift search exists to find a match, and
+    # reusing it here would let the candidate set drift to a different
+    # position than the one that failed.
+    windows = []
     for k in range(repeats):
         expect = start + k * bc.length
+        if 0 <= expect and expect + bc.length <= len(read):
+            windows.append(read[expect : expect + bc.length])
         best, best_d = None, bc.max_mismatch + 1
         for shift in range(-slack, slack + 1):
             a = expect + shift
@@ -268,10 +319,28 @@ def call_end(
                 best, best_d = hit, d
         calls.append(best)
 
+    def record_candidates() -> None:
+        """Nearest declared barcodes over the copies, for the combination
+        check. Pooled across copies by taking the closest: the copies are
+        the same 8bp in the same context, so the better-read one is the
+        better evidence about which barcodes are in contention."""
+        pooled: tuple[str, ...] = ()
+        pooled_d = -1
+        for w in windows:
+            cand, d = bc.candidates(w)
+            if not cand:
+                continue
+            if pooled_d < 0 or d < pooled_d:
+                pooled, pooled_d = cand, d
+            elif d == pooled_d:
+                pooled = tuple(sorted(set(pooled) | set(cand)))
+        out.candidates, out.candidate_dist = pooled, pooled_d
+
     seen = [c for c in calls if c]
     out.copies_seen = len(seen)
     if not seen:
         out.reason = "no_copy_matched"
+        record_candidates()
         return out
 
     if len(set(seen)) == 1:
@@ -285,6 +354,7 @@ def call_end(
         out.barcode = None
         out.copies_agreed = False
         out.reason = "copies_disagreed"
+        record_candidates()
     return out
 
 
@@ -312,6 +382,34 @@ class ReadCall:
     # is not a reasonable answer.
     i5_reason: str = "ok"
     i7_reason: str = "ok"
+    # Verdict of the combination check, which costs nothing and decides
+    # nothing. See combination_check().
+    combo: str = "not_applicable"
+    combo_sample: str | None = None
+    combo_dist: int = -1
+
+
+COMBO_MEANING = {
+    "not_applicable": "both ends resolved, or neither - no tie to narrow",
+    "unreadable": "the tied end had no declared index within reach, so "
+                  "there was no candidate set to narrow",
+    "no_declared": "none of the tied candidates forms a declared well with "
+                   "the resolved end, so declining this read cost nothing",
+    "resolved": "the end was genuinely TIED between two or more declared "
+                "indices, and exactly one of them forms a declared well "
+                "with the end that did resolve. This is the safe recovery: "
+                "the combination supplied the evidence, not a looser "
+                "distance, so no misassignment risk is added",
+    "distance_only": "there was only ONE candidate, so nothing was tied and "
+                     "the combination contributed nothing. The read was "
+                     "declined because that candidate sits further away "
+                     "than the index set safely supports, and accepting it "
+                     "would be a tolerance increase wearing a combination "
+                     "check as a disguise. Counted separately, and by "
+                     "distance, because it is not the same offer",
+    "still_ambiguous": "more than one tied candidate forms a declared "
+                       "well, so declining it was right",
+}
 
 
 END_REASON_MEANING = {
@@ -415,6 +513,17 @@ def assign_read(
 
         call.i5_reason = five.reason
         call.i7_reason = three.reason
+        # Measurement only. The verdict is recorded and counted; the
+        # tier, the sample and the output files are untouched. Whether
+        # to act on it is a decision that needs this number first.
+        call.combo, call.combo_sample, _ = combination_check(
+            five, three, pair_to_sample)
+        # The distance matters only for distance_only: "unique nearest
+        # at 2" and "unique nearest at 4" are different risks, and one
+        # number covering both would hide that.
+        tied_end = three if five.barcode else five
+        call.combo_dist = (tied_end.candidate_dist
+                           if call.combo == "distance_only" else -1)
         if best is None or resolved > _resolved(best):
             best = call
             best._resolved = resolved  # type: ignore[attr-defined]
@@ -423,6 +532,84 @@ def assign_read(
 
 def _resolved(call: ReadCall) -> int:
     return getattr(call, "_resolved", 0)
+
+
+def combination_check(
+    five: EndCall,
+    three: EndCall,
+    pair_to_sample: dict[tuple[str, str], str],
+) -> tuple[str, str | None, str | None]:
+    """Does the resolved end narrow the other end's tie to one well?
+
+    The question MiniBar answers and this demultiplexer currently does
+    not. Each end is resolved in isolation, so a window equidistant from
+    two declared barcodes is declined - correctly, for one end alone.
+    But the plate is sparse. 16 i5 x 24 i7 is 384 possible combinations
+    and 94 were used, so roughly three in four combinations are not a
+    well at all, and a tie between two candidates is more likely than
+    not to contain only one that pairs with the other end.
+
+    This MEASURES the prize and changes nothing. It returns a verdict,
+    and the caller counts verdicts. Deciding whether to act on it needs
+    a number first, and the number has never been taken:
+
+      not_applicable  neither end tied, or both failed - nothing to do
+      unreadable      the tied end had no candidate within reach
+      no_declared     none of the tied candidates forms a declared well
+                      with the resolved end, so the read was never
+                      assignable and declining it lost nothing
+      resolved        exactly one does - this read is recoverable, and
+                      recoverable with no new misassignment risk,
+                      because the alternatives are not wells
+      still_ambiguous more than one does - correctly declined
+
+    On `no_declared` being good news: it means the decline was free. A
+    large no_declared count would say the current rule is already
+    taking everything there is to take.
+    """
+    i5, i7 = five.barcode, three.barcode
+    # Exactly one end resolved, and the other must have candidates to
+    # narrow. Both-resolved is already tier A or C; both-failed has no
+    # fixed end to pivot on and the declared set cannot narrow a tie
+    # against another tie without inventing evidence.
+    if bool(i5) == bool(i7):
+        return "not_applicable", None, None
+    tied = three if i5 else five
+    if not tied.candidates:
+        return "unreadable", None, None
+
+    # THE SPLIT THAT MATTERS, and the first version of this got it
+    # wrong by not making it.
+    #
+    # A candidate set of ONE is not a tie. `match` declines a unique
+    # nearest candidate whenever its distance exceeds what the set's
+    # geometry safely supports and the margin rule does not rescue it.
+    # The combination check then "confirms" the single candidate forms a
+    # declared well and contributes NOTHING - the only thing that
+    # recovered the read was looking further out. That is a tolerance
+    # increase, and on this index set a tolerance increase is exactly
+    # what is unsafe: minimum Hamming 4 caps safe substitutions at 1,
+    # and i7 N721 vs N723 are edit distance 2 apart.
+    #
+    # Reporting both as "resolved" put the safe mechanism and the unsafe
+    # one in one number. On the reference plate that number was 25% of
+    # tier B and almost none of it was the combination.
+    if len(tied.candidates) < 2:
+        c = tied.candidates[0]
+        pair = (i5, c) if i5 else (c, i7)
+        if pair not in pair_to_sample:
+            return "no_declared", None, None
+        return "distance_only", pair_to_sample[pair], c
+
+    fits = [c for c in tied.candidates
+            if (i5, c) in pair_to_sample or (c, i7) in pair_to_sample]
+    if not fits:
+        return "no_declared", None, None
+    if len(fits) > 1:
+        return "still_ambiguous", None, None
+    c = fits[0]
+    pair = (i5, c) if i5 else (c, i7)
+    return "resolved", pair_to_sample[pair], c
 
 
 def _classify(
@@ -684,6 +871,13 @@ def demux_one_file(job: dict) -> dict:
     grid: Counter = Counter()
     i5_why: Counter = Counter()
     i7_why: Counter = Counter()
+    combo: Counter = Counter()
+    combo_dist: Counter = Counter()
+    # Which samples the recoverable reads would land in. A recovery that
+    # all went to one well is a different finding from one spread over
+    # the plate - the first looks like one bad index, the second like a
+    # rule that is simply too strict.
+    combo_by_sample: Counter = Counter()
     total = assigned = 0
 
     tmp_tsv = job["assign_tsv"] + ".partial"
@@ -702,6 +896,11 @@ def demux_one_file(job: dict) -> dict:
             orients[call.orientation] += 1
             i5_why[call.i5_reason] += 1
             i7_why[call.i7_reason] += 1
+            combo[call.combo] += 1
+            if call.combo == "distance_only" and call.combo_dist >= 0:
+                combo_dist[call.combo_dist] += 1
+            if call.combo == "resolved" and call.combo_sample:
+                combo_by_sample[call.combo_sample] += 1
             if call.i5 and call.i7:
                 grid[(call.i5, call.i7)] += 1
             w.writerow([call.read_id, call.tier, call.sample_id or "",
@@ -731,6 +930,10 @@ def demux_one_file(job: dict) -> dict:
         "orientation": dict(orients),
         "i5_end_reasons": dict(i5_why),
         "i7_end_reasons": dict(i7_why),
+        "combination_check": dict(combo),
+        "combination_distance_only_by_distance": {
+            str(d): combo_dist[d] for d in sorted(combo_dist)},
+        "combination_recoverable_by_sample": dict(combo_by_sample),
         # Tuple keys are not JSON; the pair is joined with a tab, which
         # cannot occur in a barcode.
         "grid": {f"{a}\t{b}": c for (a, b), c in grid.items()},
@@ -1024,6 +1227,9 @@ def main(argv=None) -> int:
     per_sample: Counter = Counter()
     i5_why: Counter = Counter()
     i7_why: Counter = Counter()
+    combo: Counter = Counter()
+    combo_dist: Counter = Counter()
+    combo_by_sample: Counter = Counter()
     total = assigned = written = 0
     for r in ordered:
         total += r["total_reads"]
@@ -1037,6 +1243,11 @@ def main(argv=None) -> int:
         # than dying on a missing key.
         i5_why.update(r.get("i5_end_reasons", {}))
         i7_why.update(r.get("i7_end_reasons", {}))
+        combo.update(r.get("combination_check", {}))
+        combo_dist.update({int(k): v for k, v in r.get(
+            "combination_distance_only_by_distance", {}).items()})
+        combo_by_sample.update(
+            r.get("combination_recoverable_by_sample", {}))
         for key, c in r["grid"].items():
             a, b = key.split("\t")
             grid[(a, b)] += c
@@ -1068,6 +1279,35 @@ def main(argv=None) -> int:
         # opposite remedies.
         "i5_end_reasons": dict(i5_why),
         "i7_end_reasons": dict(i7_why),
+        # Per READ, and a measurement only - nothing here has changed a
+        # tier, a sample or a file. `resolved` is the size of the prize:
+        # reads whose tied end is narrowed to exactly one declared well
+        # by the end that did resolve. See combination_check().
+        "combination_check": dict(combo),
+        "combination_meaning": COMBO_MEANING,
+        # How saturated the plate is, because that is what decides
+        # whether the combination can resolve anything at all. A full
+        # grid leaves no room: every tie has both candidates forming
+        # real wells. Reported beside the verdicts so the two are never
+        # read apart.
+        "combination_grid": {
+            "i5_used": len({a for a, _ in pair_to_sample}),
+            "i7_used": len({b for _, b in pair_to_sample}),
+            "combinations_possible": (
+                len({a for a, _ in pair_to_sample})
+                * len({b for _, b in pair_to_sample})),
+            "wells_declared": len(pair_to_sample),
+            "note": (
+                "The combination check can only resolve a tie when some "
+                "of the tied candidates do NOT form declared wells. The "
+                "closer wells_declared is to combinations_possible, the "
+                "less it can ever do."
+            ),
+        },
+        "combination_distance_only_by_distance": {
+            str(d): combo_dist[d] for d in sorted(combo_dist)},
+        "combination_recoverable_by_sample": dict(
+            sorted(combo_by_sample.items(), key=lambda kv: -kv[1])[:20]),
         "end_reason_meaning": END_REASON_MEANING,
         "orientation": dict(orients),
         "index_matrix": write_index_matrix(
@@ -1136,6 +1376,36 @@ def main(argv=None) -> int:
               "(index never added - PCR2 efficiency)")
         print(f"  ends read but not matched       {matched_but_rejected:>9,}  "
               "(index present - matching or index set)")
+
+    # The combination check. Printed because it is the one number that
+    # says whether the current per-end rule is leaving anything on the
+    # table, and a number nobody sees does not get acted on.
+    if combo:
+        decided = sum(v for k, v in combo.items() if k != "not_applicable")
+        if decided:
+            print(f"\n  single-ended reads whose tie the other end could "
+                  f"narrow ({decided:,} with a tie to narrow)")
+            for k in ("resolved", "distance_only", "still_ambiguous",
+                      "no_declared", "unreadable"):
+                n = combo.get(k, 0)
+                if n:
+                    print(f"    {k:16s} {n:>9,}  {100*n/decided:5.1f}%  "
+                          f"{COMBO_MEANING[k]}")
+            r = combo.get("resolved", 0)
+            do = combo.get("distance_only", 0)
+            print(f"\n    SAFE  {r:,} reads ({100*r/max(1,total):.2f}% of "
+                  f"input) recoverable from the PAIR - genuinely tied, "
+                  f"narrowed to one declared well.")
+            if do:
+                print(f"    NOT   {do:,} reads ({100*do/max(1,total):.2f}% "
+                      f"of input) had a single candidate too far out. "
+                      f"Taking those is a tolerance increase, which this "
+                      f"index set does not support - not a combination win.")
+                if combo_dist:
+                    lo = ", ".join(f"d={d}: {combo_dist[d]:,}"
+                                   for d in sorted(combo_dist))
+                    print(f"            by distance - {lo}")
+            print("    NOTHING WAS CHANGED - this is a measurement.")
 
     if accounted != total:
         print(

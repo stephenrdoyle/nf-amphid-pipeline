@@ -1207,10 +1207,123 @@ def test_barcode_margin_rule() -> None:
           far.match("AAAAGGGG") is None, str(far.match("AAAAGGGG")))
 
 
+def test_combination_check() -> None:
+    """A tie at one end, narrowed by the end that did resolve.
+
+    MiniBar's trick, which this demultiplexer did not have. Its
+    README reports the case directly: three forward barcodes matched at
+    4 errors each, unresolvable alone, but paired with a perfect reverse
+    barcode only one of the three identified a declared sample.
+
+    The reason it works is sparseness. 16 i5 x 24 i7 is 384 possible
+    combinations and 94 were used, so most pairs are not wells at all
+    and a tie is more likely than not to contain exactly one that is.
+
+    Everything here is a MEASUREMENT. The verdict is counted and no
+    tier, sample or output file moves - so the test asserts that too,
+    because a check that quietly started assigning reads would change
+    results with no sign in the tiers.
+    """
+    print("\ncombination check")
+    E = dx.EndCall
+
+    # Three i7 candidates tied, one i5 resolved. Only (I5a, B) is a well.
+    wells = {("I5a", "B"): "S1", ("I5b", "A"): "S2", ("I5b", "C"): "S3"}
+    five = E(barcode="I5a")
+    three = E(barcode=None, candidates=("A", "B", "C"), candidate_dist=4)
+    verdict, sample, which = dx.combination_check(five, three, wells)
+    check("three tied candidates, one declared well: resolved",
+          verdict == "resolved", verdict)
+    check("and it names the sample the read belongs to",
+          sample == "S1" and which == "B", f"{sample} {which}")
+
+    # Two of the tied candidates are wells with that i5: still ambiguous.
+    amb = {("I5a", "A"): "S1", ("I5a", "B"): "S2"}
+    check("two declared wells among the tie is still declined",
+          dx.combination_check(five, three, amb)[0] == "still_ambiguous")
+
+    # None of them pairs with this i5: the read was never assignable, so
+    # declining it cost nothing. Good news, and distinguished from the
+    # recoverable case rather than lumped with it.
+    none_declared = {("I5z", "A"): "S1", ("I5z", "B"): "S2"}
+    check("no declared well among the tie is reported as a free decline",
+          dx.combination_check(five, three, none_declared)[0]
+          == "no_declared")
+
+    # It must work from the other side too - an i7 resolved, i5 tied.
+    v, s, _ = dx.combination_check(
+        E(barcode=None, candidates=("I5a", "I5b")), E(barcode="B"), wells)
+    check("the check is symmetric: a tied i5 is narrowed by the i7",
+          v == "resolved" and s == "S1", f"{v} {s}")
+
+    # Guards.
+    check("both ends resolved is not this check's business",
+          dx.combination_check(E(barcode="I5a"), E(barcode="B"),
+                               wells)[0] == "not_applicable")
+    check("neither end resolved cannot be narrowed either",
+          dx.combination_check(E(), E(), wells)[0] == "not_applicable")
+    check("a tied end with no candidates at all is unreadable",
+          dx.combination_check(five, E(barcode=None), wells)[0]
+          == "unreadable")
+
+    # A CANDIDATE SET OF ONE IS NOT A TIE, and this is the assertion the
+    # first version of this check lacked. `match` declines a unique
+    # nearest candidate whenever it sits further out than the set's
+    # geometry safely supports; the combination then "confirms" it and
+    # has contributed nothing. Counting that as a combination win put
+    # the safe mechanism and an unsafe tolerance increase in one
+    # number - and on the real plate almost all of it was the latter.
+    lone = E(barcode=None, candidates=("B",), candidate_dist=3)
+    v, s_, _ = dx.combination_check(five, lone, wells)
+    check("a single candidate is NOT reported as a combination win",
+          v == "distance_only", v)
+    check("it still names where the read would go, for costing",
+          s_ == "S1", str(s_))
+    check("and a single candidate forming no well is a free decline",
+          dx.combination_check(five, lone, none_declared)[0]
+          == "no_declared")
+
+    # The distinction has to survive the real call path, not just the
+    # function: that is where the verdict is attached to the read.
+    check("resolved requires two or more tied candidates",
+          dx.combination_check(five, three, wells)[0] == "resolved"
+          and len(three.candidates) >= 2)
+
+    # NON-INTERFERENCE. The same ends, through the real classifier: the
+    # read must still be tier B with no sample, even though the
+    # combination check can name one. A measurement that quietly began
+    # assigning reads would move results with no sign in the tiers,
+    # which is the failure this project has already had twice.
+    call = dx._classify("r1", five, three, "+", wells, False)
+    verdict, named, _ = dx.combination_check(five, three, wells)
+    check("the classifier is untouched: still tier B, still unassigned",
+          call.tier == "B" and call.sample_id is None,
+          f"{call.tier} {call.sample_id}")
+    check("while the check names the sample it WOULD have gone to",
+          verdict == "resolved" and named == "S1", f"{verdict} {named}")
+
+    # candidates() returns the TIED set, not the k nearest: anything
+    # further off is already excluded by distance.
+    bs = dx.BarcodeSet.build({"AAAACCCC", "AAAAGGGG", "TTTTCCCC"}, 1)
+    cand, d = bs.candidates("AAAAGGCC")
+    check("candidates returns every barcode tied for nearest",
+          set(cand) == {"AAAACCCC", "AAAAGGGG"} and d == 2,
+          f"{cand} at {d}")
+    cand2, _ = bs.candidates("AAAACCCC")
+    check("an exact window returns just itself",
+          cand2 == ("AAAACCCC",), str(cand2))
+    check("nothing within reach returns an empty set, not a guess",
+          bs.candidates("GGGGGGGG", max_dist=1) == ((), -1),
+          str(bs.candidates("GGGGGGGG", max_dist=1)))
+    check("a window of the wrong length returns nothing",
+          bs.candidates("AAAA") == ((), -1))
+
+
 def main() -> int:
     test_parallel_matches_serial()
     test_end_reasons_discriminate()
     test_barcode_margin_rule()
+    test_combination_check()
     test_stats_only()
     test_barcode_diagnostic_discriminates()
     test_ligation_chimeras()
