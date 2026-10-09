@@ -55,6 +55,7 @@ A = _load("assign", "bin/assign.py")
 P = _load("prep_illumina", "bin/prep_illumina.py")
 pf = _load("preflight", "bin/preflight.py")
 sim = _load("simulate", "bin/simulate.py")
+al = _load("ampseqlib", "bin/ampseqlib.py")
 sys.path.insert(0, HERE)
 import make_fixtures as mf  # noqa: E402
 
@@ -735,8 +736,13 @@ def test_group_summary() -> None:
          "call": "not_detected"},
         {"sample_id": "S2b", "reference_type": "target",
          "call": "not_detected"},
-        # A control-plasmid row, which must not enter the detection rate:
-        # that rate is about targets.
+        # A control-plasmid row. It MUST count. calls.tsv only contains
+        # references synthesis chose to call - targets, or targets plus
+        # controls under --controls-as-targets - so the decision about
+        # what is a result has already been made, and re-filtering here
+        # discards real calls on any plate whose templates ARE the
+        # plasmids. The first version of this test asserted the
+        # opposite and was wrong.
         {"sample_id": "S1b", "reference_type": "control",
          "call": "detected"},
     ]
@@ -767,7 +773,7 @@ def test_group_summary() -> None:
           f"{amp['target_fraction']} vs {none['target_fraction']}")
     check("detection rate distinguishes them too",
           amp["detection_rate"] == "1.0000"
-          and none["detection_rate"] == "0.0000",
+          and float(none["detection_rate"]) < 0.4,
           f"{amp['detection_rate']} vs {none['detection_rate']}")
 
     # the lost-library failure
@@ -789,8 +795,14 @@ def test_group_summary() -> None:
           amp["deepest_negative"] == 4 and none["deepest_negative"] == "",
           f"{amp['deepest_negative']!r} {none['deepest_negative']!r}")
 
-    check("a control-plasmid call does not enter the detection rate",
-          none["detected"] == 0, str(none["detected"]))
+    # The correction. On a plate of plasmid templates these ARE the
+    # result, and dropping them reported a detection rate built from
+    # whatever handful of genuine targets happened to be present.
+    check("a called control-plasmid row DOES count",
+          none["detected"] == 1, str(none["detected"]))
+    check("so the rate is over everything synthesis chose to call",
+          none["detected"] + none["not_detected"] == 3,
+          f"{none['detected']} + {none['not_detected']}")
 
     # replicates: a grouping that needs no metadata file at all
     rows2 = S.group_summary(samples, {}, [], calls, cals, shares, "RUN01")
@@ -964,6 +976,93 @@ def test_trough_is_found_not_chosen() -> None:
           str(ca["trough"]))
 
 
+def test_declared_ids_survive_the_round_trip() -> None:
+    """Sample ids come back from being filenames, or every join misses.
+
+    Reported from a real run. A plate whose ids contained '=' produced a
+    cohort check reading "88 declared, 88 reached" and then listing all
+    88 as lost - true on both counts, because the 88 that arrived were
+    the same samples under their filename-safe names. sanitise_id turns
+    '=' into '_'; the earlier plates used hyphens, which survive, so this
+    sat unexposed until a naming convention changed.
+
+    The failed check is the harmless half. Four joins key on the declared
+    id - sample_type, the indices, plate position and the metadata
+    grouping - and all four silently no-op on a miss. Overriding the
+    check would have produced a report in which no negative control was
+    recognised as one, so the detection limits were computed from an
+    empty set, with nothing anywhere saying so.
+
+    So what is tested is the round trip, and the refusals: an ambiguous
+    mapping must be declined rather than guessed, because renaming a
+    sample onto the wrong id is worse than leaving it unmatched.
+    """
+    print("\ndeclared ids through the filename round trip")
+    tmp = tempfile.mkdtemp()
+    try:
+        def resolution(rows):
+            p = os.path.join(tmp, f"fr{len(os.listdir(tmp))}")
+            os.makedirs(p, exist_ok=True)
+            with open(os.path.join(p, "file_resolution.tsv"), "w") as fh:
+                fh.write("run_id\tsample_id\tsanitised_id\tplatform\n")
+                for rid, declared, safe in rows:
+                    fh.write(f"{rid}\t{declared}\t{safe}\tnanopore\n")
+            return p
+
+        raw = "ampure_F1=400_F2=100_rep1"
+        safe = pf.sanitise_id(raw)
+        check("sanitise_id is what changes the name", safe != raw
+              and safe == "ampure_F1_400_F2_100_rep1", safe)
+
+        # the round trip
+        d = resolution([("R1", raw, safe), ("R1", "neg_ctrl", "neg_ctrl")])
+        samples = {safe: S.Sample(sample_id=safe, depth=100),
+                   "neg_ctrl": S.Sample(sample_id="neg_ctrl", depth=9)}
+        done = al.restore_declared_ids(samples, d, "R1")
+        check("the sanitised key is renamed to the declared one",
+              raw in samples and safe not in samples, str(sorted(samples)))
+        check("and the Sample carries the declared id too",
+              samples[raw].sample_id == raw, samples[raw].sample_id)
+        check("an id that needed no sanitising is left alone",
+              "neg_ctrl" in samples and len(done) == 1, str(done))
+        check("the counts travel with the rename",
+              samples[raw].depth == 100, str(samples[raw].depth))
+
+        # the cohort check, which is where this surfaced
+        lost = S.check_cohort_complete(samples, d, "R1", "", False)
+        check("and the cohort check then passes", lost == [], str(lost))
+
+        # -- refusals ----------------------------------------------------
+        # Two declared ids sanitising to one filename. Pre-flight refuses
+        # this already; if it ever reaches here, guessing would attach a
+        # sample's reads to the wrong well.
+        d2 = resolution([("R1", "a=1", "a_1"), ("R1", "a-1", "a_1")])
+        amb = {"a_1": S.Sample(sample_id="a_1", depth=5)}
+        check("an ambiguous mapping is declined, not guessed",
+              al.restore_declared_ids(amb, d2, "R1") == []
+              and "a_1" in amb, str(sorted(amb)))
+
+        # The declared id already present: renaming would clobber it.
+        d3 = resolution([("R1", "x", "x_safe")])
+        both = {"x_safe": S.Sample(sample_id="x_safe", depth=1),
+                "x": S.Sample(sample_id="x", depth=2)}
+        al.restore_declared_ids(both, d3, "R1")
+        check("an occupied declared id is not overwritten",
+              both["x"].depth == 2 and "x_safe" in both, str(sorted(both)))
+
+        # Rows belonging to another run must not be used.
+        d4 = resolution([("R2", raw, safe)])
+        other = {safe: S.Sample(sample_id=safe)}
+        check("rows from another run are ignored",
+              al.restore_declared_ids(other, d4, "R1") == []
+              and safe in other, str(sorted(other)))
+
+        check("no pre-flight directory is survivable",
+              al.restore_declared_ids({"a": 1}, None, "R1") == [])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_cohort_completeness() -> None:
     """Synthesis must refuse to report on part of a plate.
 
@@ -1062,6 +1161,7 @@ def main() -> int:
     test_permutation_calibration()
     test_end_to_end()
     test_cohort_completeness()
+    test_declared_ids_survive_the_round_trip()
     test_group_summary()
     test_assignment_distance_reaches_the_output()
     test_trough_is_found_not_chosen()

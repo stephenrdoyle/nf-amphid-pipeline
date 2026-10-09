@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampseqlib import find_anchor_cost  # noqa: E402
+from ampseqlib import delimiter_for, find_anchor_cost  # noqa: E402
 from itertools import product
 from math import comb
 
@@ -320,7 +320,7 @@ def read_table(path: str, diag: Diagnostics, label: str) -> list[dict[str, str]]
         diag.error(f"{label}: file not found: {path}")
         return []
 
-    delim = "," if path.lower().endswith(".csv") else "\t"
+    delim = delimiter_for(path)
     with open(path, newline="", encoding="utf-8") as fh:
         lines = [ln for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
 
@@ -2331,6 +2331,42 @@ def parse_samplesheet(
             )
 
     # -- indices ----------------------------------------------------------
+    # Rows whose two index columns hold each other's indices. Collected
+    # before anything is reported, because the per-row complaint for this
+    # is true and useless: "not in the index map" sends the reader to
+    # check the index map, where nothing is wrong. The same failure the
+    # delimiter check exists for.
+    #
+    # This is a MEASUREMENT, not a guess. The i5 and i7 sets share no
+    # sequence, so "declared as i7, present only in the i5 set" has one
+    # explanation. If the two sets ever overlap the test below stops
+    # being exact, and the message says how many rows it is sure about
+    # rather than asserting the whole file is swapped.
+    #
+    # The column order in the template is index_i7 THEN index_i5, which
+    # is the reverse of how most people write a pair down - so a sheet
+    # built by filling in the first index column with i5 produces
+    # exactly this, and it is worth naming rather than diagnosing twice.
+    swapped: list[str] = []
+    if im.i5 and im.i7:
+        for s in samples:
+            if not (s.index_i5 and s.index_i7):
+                continue
+            if (s.index_i7 not in im.i7 and s.index_i7 in im.i5
+                    and s.index_i5 not in im.i5 and s.index_i5 in im.i7):
+                swapped.append(s.sample_id)
+    if swapped:
+        diag.error(
+            f"samplesheet: index_i5 and index_i7 are SWAPPED in "
+            f"{len(swapped)} of {len(samples)} row(s) - each column holds "
+            f"the other's indices. Example: '{swapped[0]}'. The two sets "
+            f"share no sequence, so this is certain rather than inferred. "
+            f"Note the template's column order is index_i7 THEN index_i5. "
+            f"Swap the two columns' contents and re-run; the individual "
+            f"'not in the index map' errors below are a consequence of "
+            f"this and will clear with it"
+        )
+
     for s in samples:
         for label, seq in (("index_i7", s.index_i7), ("index_i5", s.index_i5)):
             if not seq:

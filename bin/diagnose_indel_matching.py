@@ -38,7 +38,7 @@ only be read off the data.
 Nothing is written but a report.
 
   diagnose_indel_matching.py --reads split/reads \\
-      --samplesheet samples.csv --run-id RUN01 \\
+      --samplesheet samples.tsv --run-id RUN01 \\
       --assay assay.json --limit 200000
 """
 

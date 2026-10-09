@@ -6,7 +6,7 @@ Generated, not curated — rebuild at any time with:
 python3 tests/make_fixtures.py --outdir tests/data --platform illumina \
     --n-samples 8 --leave-unused 2
 python3 bin/simulate.py --reference tests/data/reference.tsv \
-    --samplesheet tests/data/samplesheet.csv --runs tests/data/runs.tsv \
+    --samplesheet tests/data/samplesheet.tsv --runs tests/data/runs.tsv \
     --assay assets/assay/ampseq_helminth.json --outdir tests/data/sim \
     --reads-per-sample 300
 ```

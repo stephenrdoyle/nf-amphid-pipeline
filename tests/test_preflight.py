@@ -33,7 +33,10 @@ sys.modules["preflight"] = pf
 spec.loader.exec_module(pf)
 
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(ROOT, "bin"))
 import make_fixtures as mf  # noqa: E402
+import ampseqlib as al  # noqa: E402
+import simulate as sim_mod  # noqa: E402
 
 INDEX_MAP = os.path.join(ROOT, "assets", "index_map.tsv")
 
@@ -1134,14 +1137,14 @@ def test_resolved_paths_are_usable() -> None:
     """
     print("\nresolved paths can actually be opened")
     data = os.path.join(ROOT, "tests", "data")
-    if not os.path.exists(os.path.join(data, "samplesheet.csv")):
+    if not os.path.exists(os.path.join(data, "samplesheet.tsv")):
         check("fixture present", False, "tests/data missing")
         return
     tmp = tempfile.mkdtemp()
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             pf.main(["--reference", os.path.join(data, "reference.tsv"),
-                     "--samplesheet", os.path.join(data, "samplesheet.csv"),
+                     "--samplesheet", os.path.join(data, "samplesheet.tsv"),
                      "--runs", os.path.join(data, "runs.tsv"),
                      "--primers", os.path.join(data, "primers.tsv"),
                      "--index-map", os.path.join(ROOT, "assets",
@@ -1160,6 +1163,160 @@ def test_resolved_paths_are_usable() -> None:
         missing = [p for p in paths if not os.path.exists(p)]
         check("and every one of them exists on disk", not missing,
               str(missing[:2]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_swapped_index_columns() -> None:
+    """A swapped pair of columns, named as such.
+
+    Reported from the field. A new samplesheet came back with four
+    'index_i7 ... is not in the index map' errors, which is true and
+    sends the reader to check the index map, where nothing is wrong.
+    Every sequence was a valid index; the two columns held each other's.
+    The template's column order is index_i7 THEN index_i5, the reverse
+    of how a pair is usually written down, so filling the first index
+    column with i5 produces exactly this.
+
+    It is detectable with certainty rather than guessed, because the i5
+    and i7 sets share no sequence - so 'declared i7, present only among
+    the i5s' has one explanation. The tests that matter most here are
+    the ones where it must stay quiet: a genuine typo is not a swap, and
+    an unrelated sequence is not a swap.
+    """
+    print("\nswapped index columns")
+    tmp = tempfile.mkdtemp()
+    try:
+        im = pf.parse_index_map(INDEX_MAP, pf.Diagnostics())
+        i5s, i7s = sorted(im.i5), sorted(im.i7)
+
+        def sheet(pairs):
+            """pairs: list of (index_i7, index_i5)."""
+            p = os.path.join(tmp, f"s{len(os.listdir(tmp))}.tsv")
+            with open(p, "w") as fh:
+                fh.write("run_id\tplatform\tsample_id\tindex_i7\t"
+                         "index_i5\tsample_type\n")
+                for n, (i7, i5) in enumerate(pairs):
+                    fh.write(f"R1\tnanopore\tS{n}\t{i7}\t{i5}\tunknown\n")
+            return p
+
+        def run(p):
+            d = pf.Diagnostics()
+            runs = {"R1": pf.Run(run_id="R1", platform="nanopore", path=tmp)}
+            pf.parse_samplesheet(p, runs, im, d)
+            return d
+
+        # correct: i7 in the i7 column, i5 in the i5 column
+        d = run(sheet([(i7s[k], i5s[k]) for k in range(4)]))
+        check("a correct sheet raises no swap error",
+              not any("SWAPPED" in e for e in d.errors), str(d.errors[:2]))
+
+        # swapped: every row has the columns the wrong way round
+        d = run(sheet([(i5s[k], i7s[k]) for k in range(4)]))
+        swap = [e for e in d.errors if "SWAPPED" in e]
+        check("a fully swapped sheet is named as swapped", len(swap) == 1,
+              str(d.errors[:2]))
+        check("and it counts the rows rather than asserting the file",
+              "4 of 4 row(s)" in swap[0], swap[0])
+        check("and it says which way the template orders the columns",
+              "index_i7 THEN index_i5" in swap[0])
+
+        # a genuine typo must NOT be called a swap
+        bad = "AAAAAAAA"
+        d = run(sheet([(i7s[0], i5s[0]), (bad, i5s[1])]))
+        check("one unknown sequence is not a swap",
+              not any("SWAPPED" in e for e in d.errors), str(d.errors[:2]))
+        check("and it is still reported as not in the index map",
+              any("not in the" in e and bad in e for e in d.errors),
+              str(d.errors[:2]))
+
+        # half the i7 column wrong, i5 column fine: also not a swap,
+        # because a swap needs BOTH columns to hold the other's
+        d = run(sheet([(i5s[0], i5s[1])]))
+        check("an i7 holding an i5 while i5 also holds an i5 is not a swap",
+              not any("SWAPPED" in e for e in d.errors), str(d.errors[:2]))
+
+        # partial: some rows swapped, some fine. Report what is certain.
+        d = run(sheet([(i7s[0], i5s[0]), (i5s[1], i7s[1]), (i7s[2], i5s[2])]))
+        swap = [e for e in d.errors if "SWAPPED" in e]
+        check("a partial swap reports the count it is sure of",
+              len(swap) == 1 and "1 of 3 row(s)" in swap[0],
+              str(swap))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tsv_and_csv_are_interchangeable() -> None:
+    """The same samplesheet, two delimiters, identical results.
+
+    The samplesheet moved to TSV to match every other input, and the
+    only thing that makes that safe is that the choice is per FILE - by
+    extension - rather than a format the pipeline switched to. A sheet
+    already written as CSV, and there are several on the farm, has to
+    keep working untouched.
+
+    Pinned here rather than left to the fixtures, because a guarantee
+    that rests on a fixture's file extension evaporates the moment
+    somebody regenerates the fixtures. This compares outputs, not
+    parsing: pre-flight is run twice over the same rows and every
+    report it writes must match byte for byte.
+
+    The writer is checked too. Writing commas into a file named .tsv
+    raises nothing anywhere - the reader splits on tabs, gets one wide
+    column, and reports every required field as missing - so reader and
+    writer following the same rule is the whole safety property.
+    """
+    print("\nTSV and CSV samplesheets")
+    tmp = tempfile.mkdtemp()
+    try:
+        rows = [
+            "run_id,platform,sample_id,index_i7,index_i5,sample_type",
+            "RUN01,illumina,BLANK-01,TAAGGCGA,CTCTCTAT,neg_extraction",
+            "RUN01,illumina,S1,AGGCAGAA,CTCTCTAT,unknown",
+            "RUN01,illumina,S2,GGACTCCT,CTCTCTAT,unknown",
+        ]
+        csv_p = os.path.join(tmp, "s.csv")
+        tsv_p = os.path.join(tmp, "s.tsv")
+        with open(csv_p, "w") as fh:
+            fh.write("\n".join(rows) + "\n")
+        with open(tsv_p, "w") as fh:
+            fh.write("\n".join(r.replace(",", "\t") for r in rows) + "\n")
+
+        a = pf.read_table(csv_p, pf.Diagnostics(), "samplesheet")
+        b = pf.read_table(tsv_p, pf.Diagnostics(), "samplesheet")
+        check("the two parse to identical rows", a == b, f"{a[:1]} vs {b[:1]}")
+        check("and they are not empty", len(a) == 3, str(len(a)))
+
+        check("delimiter_for is the single rule, and it reads the extension",
+              al.delimiter_for("x.csv") == ","
+              and al.delimiter_for("x.tsv") == "\t"
+              and al.delimiter_for("x.txt") == "\t"
+              and al.delimiter_for("X.CSV") == ",")
+
+        # The writer must follow the same rule, or it silently produces
+        # a file its own reader cannot parse.
+        mfx = mf
+        srows = [dict(run_id="R1", platform="illumina", sample_id="S1",
+                      index_i7="AGGCAGAA", index_i5="CTCTCTAT",
+                      sample_type="unknown")]
+        for ext, sep in ((".tsv", "\t"), (".csv", ",")):
+            p = os.path.join(tmp, "w" + ext)
+            mfx.write_samplesheet(srows, p)
+            first = open(p).readline().rstrip("\n")
+            check(f"write_samplesheet uses {sep!r} for {ext}",
+                  sep in first and (("," not in first) if sep == "\t" else True),
+                  first)
+            back = al.read_table(p)
+            check(f"and what it wrote reads back for {ext}",
+                  back and back[0]["sample_id"] == "S1", str(back))
+
+        # simulate.py keeps its own copy of the rule on purpose - it is
+        # the oracle the pipeline is tested against. Deliberate
+        # duplication still has to agree, so it is asserted rather than
+        # trusted to a comment.
+        check("the simulator's independent copy agrees",
+              all(sim_mod.read_table(p) == al.read_table(p)
+                  for p in (csv_p, tsv_p)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1599,6 +1756,8 @@ def test_index_edit_distance_gate() -> None:
 
 def main() -> int:
     test_resolved_paths_are_usable()
+    test_swapped_index_columns()
+    test_tsv_and_csv_are_interchangeable()
     test_delimiter_mismatch()
     test_tag_derivation()
     test_distance_helpers()

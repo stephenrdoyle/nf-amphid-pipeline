@@ -26,8 +26,8 @@ def helpMessage() {
     nf-helminth-amplicon  ${workflow.manifest.version}
 
     Usage:
-      nextflow run . --reference ref.tsv --samplesheet samples.csv --runs runs.tsv
-      nextflow run . --reference ref.tsv --samplesheet samples.csv \\
+      nextflow run . --reference ref.tsv --samplesheet samples.tsv --runs runs.tsv
+      nextflow run . --reference ref.tsv --samplesheet samples.tsv \\
                      --input_dir /data/run01 --platform illumina
 
     Required:
@@ -247,6 +247,7 @@ workflow {
             ch_mocks,
             ASSIGN.out.counts.collect(),
             ch_reference,
+            PREFLIGHT.out.dir,
         )
     }
 

@@ -286,8 +286,92 @@ def writer(fh, fieldnames=None, delimiter: str = "\t"):
                           lineterminator="\n")
 
 
+def restore_declared_ids(keyed: dict, preflight_dir: str | None,
+                         run_id: str = "") -> list[tuple[str, str]]:
+    """Re-key a per-sample dict from filename-safe ids back to declared ids.
+
+    Sample ids reach the later stages as FILENAMES. Demultiplexing writes
+    one FASTQ per sample, the workflow takes the id from that file's
+    name, and assignment stamps it into counts.tsv - so anything
+    sanitise_id() had to replace arrives changed. Every downstream join
+    is then against the samplesheet's ORIGINAL id and quietly matches
+    nothing.
+
+    Found on a plate whose sample ids contained '=':
+
+        ampure_F1=400_F2=100_rep1    declared
+        ampure_F1_400_F2_100_rep1    what arrived
+
+    The earlier plates used hyphens, which survive sanitisation, so this
+    sat unexposed until a naming convention changed. The symptom was a
+    cohort check reporting "88 declared, 88 reached" and then listing all
+    88 as lost - incoherent on its face, which is what made it visible.
+    What it would have done unnoticed is worse: sample_type, indices,
+    plate position and metadata all join on the declared id, and all of
+    them silently no-op on a miss, so negative controls stop being
+    negative controls and detection limits are computed from nothing.
+
+    file_resolution.tsv carries both spellings side by side for exactly
+    this purpose, so the mapping is read rather than recomputed - a
+    second implementation of sanitise_id here is one that can disagree
+    with the first.
+
+    Mutates `keyed` in place and returns the renames made, so the caller
+    can report them. Ambiguity is declined rather than guessed: a
+    sanitised form claimed by two declared ids is left alone (pre-flight
+    already refuses those), and so is one whose declared id is in use.
+    """
+    if not keyed or not preflight_dir:
+        return []
+    path = os.path.join(preflight_dir, "file_resolution.tsv")
+    if not os.path.exists(path):
+        return []
+
+    owners: dict[str, list[str]] = {}
+    for r in read_table(path):
+        if run_id and r.get("run_id", "") != run_id:
+            continue
+        safe, declared = r.get("sanitised_id", ""), r.get("sample_id", "")
+        if safe and declared and safe != declared:
+            owners.setdefault(safe, []).append(declared)
+
+    renamed: list[tuple[str, str]] = []
+    for safe, declared_ids in sorted(owners.items()):
+        if len(set(declared_ids)) != 1:
+            continue                      # ambiguous: two ids, one filename
+        declared = declared_ids[0]
+        if safe not in keyed or declared in keyed:
+            continue
+        value = keyed.pop(safe)
+        if hasattr(value, "sample_id"):
+            value.sample_id = declared
+        keyed[declared] = value
+        renamed.append((safe, declared))
+    return renamed
+
+
+def delimiter_for(path: str) -> str:
+    """Comma for .csv, tab for everything else. The ONE copy of this rule.
+
+    It lived in three files - here, preflight.py and simulate.py - as
+    three identical lines that had to agree. They did, which is the only
+    reason it was not already a bug: a reader and a writer that disagree
+    about a delimiter do not raise, they produce one wide column whose
+    header matches nothing, and the complaint that comes back names
+    every required field as missing. That sends the reader to check
+    their headers, where nothing is wrong.
+
+    The rule is the file EXTENSION rather than sniffing the content,
+    which makes it per-file and therefore mixable: a TSV samplesheet
+    beside a CSV one both work, and neither has to be converted. That
+    is what lets the samplesheet move to TSV without invalidating
+    every sheet already written.
+    """
+    return "," if path.lower().endswith(".csv") else "\t"
+
+
 def read_table(path: str) -> list[dict[str, str]]:
-    delim = "," if path.lower().endswith(".csv") else "\t"
+    delim = delimiter_for(path)
     with open(path, newline="", encoding="utf-8") as fh:
         lines = [ln for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
     return [

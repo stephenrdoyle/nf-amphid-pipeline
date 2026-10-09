@@ -1,0 +1,9 @@
+run_id	platform	sample_id	index_i7	index_i5	sample_type
+RUN01	illumina	BLANK-01	TAAGGCGA	CTCTCTAT	neg_extraction
+RUN01	illumina	NTC-01	AGGCAGAA	CTCTCTAT	neg_ntc
+RUN01	illumina	MOCK-A	GGACTCCT	CTCTCTAT	mock
+RUN01	illumina	POS-01	AAGAGGCA	CTCTCTAT	pos_control
+RUN01	illumina	iCCH-001-r1	GCTCATGA	CTCTCTAT	unknown
+RUN01	illumina	iCCH-002-r1	GCGTAGTA	CTCTCTAT	unknown
+RUN01	illumina	iCCH-003-r1	TACGCTGC	CTCTCTAT	unknown
+RUN01	illumina	iCCH-004-r1	TAGCGCTC	CTCTCTAT	unknown

@@ -33,7 +33,7 @@ problems.
 Read-only: it writes a report and touches no pipeline output.
 
     bin/diagnose_demux.py --reads <minknow dir|fastq> \
-        --samplesheet samplesheet.csv --run-id RUN01 \
+        --samplesheet samplesheet.tsv --run-id RUN01 \
         --assay assets/assay/ampseq_helminth.json
 
 Self-contained: standard library only.

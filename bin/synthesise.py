@@ -52,7 +52,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampseqlib import read_table  # noqa: E402
+from ampseqlib import read_table, restore_declared_ids  # noqa: E402
 
 CALLS = ("detected", "not_detected", "assay_failed")
 
@@ -895,10 +895,21 @@ def group_summary(
     the counts are the honest output, and a comparison worth testing is
     worth designing for.
     """
+    # Every row, with no filter on reference_type - and the absence of
+    # that filter is the point.
+    #
+    # calls.tsv is built by looping over `called`, which is targets, or
+    # targets plus controls when --controls-as-targets is set. So the
+    # decision about what counts as a result has already been made
+    # upstream, once, where it belongs. Re-applying it here looked like
+    # caution and was a bug: on a plate whose TEMPLATES are the control
+    # plasmids, filtering to reference_type == "target" discards every
+    # real call and reports a detection rate built from the handful of
+    # genuine targets that happen to be present. Measured on such a run,
+    # that read 4-11% where the plasmids themselves were never scored.
     detected_by: dict[str, Counter] = defaultdict(Counter)
     for r in call_rows:
-        if r.get("reference_type") == "target":
-            detected_by[r["sample_id"]][r["call"]] += 1
+        detected_by[r["sample_id"]][r["call"]] += 1
 
     rows: list[dict] = []
     # subject_id first, and unconditionally: replicates are a grouping
@@ -1133,6 +1144,19 @@ def main(argv=None) -> int:
     samples = load_counts(args.assign_dir)
     if not samples:
         raise SystemExit(f"no *.counts.tsv found in {args.assign_dir}")
+
+    # Before anything is compared: put the declared ids back.
+    #
+    # Assignment keys its output on the filename-safe form of the sample
+    # id, because that is what reached it - demultiplexing writes one
+    # FASTQ per sample and the workflow reads the id off the file. Every
+    # join below is against the samplesheet's ORIGINAL id, so this has to
+    # happen before the cohort check and before anything is attached to a
+    # sample, or all of it silently matches nothing.
+    renamed = restore_declared_ids(samples, args.preflight_dir, args.run_id)
+    if renamed and not args.quiet:
+        print(f"restored {len(renamed)} declared sample id(s) from their "
+              f"filename-safe form, e.g. {renamed[0][0]} -> {renamed[0][1]}")
 
     # Before anything is computed: is this the whole plate?
     empty_wells = check_cohort_complete(

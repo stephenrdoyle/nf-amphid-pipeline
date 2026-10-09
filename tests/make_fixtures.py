@@ -321,10 +321,22 @@ SS_COLS = ["run_id", "platform", "sample_id", "index_i7", "index_i5", "sample_ty
 
 
 def write_samplesheet(rows: list[dict], path: str) -> None:
+    """Delimiter from the extension, the same rule the readers use.
+
+    Writing commas into a file called .tsv produces no error anywhere -
+    the reader splits on tabs, gets one wide column, and reports every
+    required field as missing. So the writer has to follow the same rule
+    as the reader rather than hardcode one, which is also what lets the
+    fixtures move to TSV while the dozens of temporary .csv samplesheets
+    inside the test suite keep working unchanged. Those are not legacy:
+    they are what keeps the CSV path exercised now that the fixtures no
+    longer do it.
+    """
+    sep = "," if path.lower().endswith(".csv") else "\t"
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(",".join(SS_COLS) + "\n")
+        fh.write(sep.join(SS_COLS) + "\n")
         for r in rows:
-            fh.write(",".join(str(r[c]) for c in SS_COLS) + "\n")
+            fh.write(sep.join(str(r[c]) for c in SS_COLS) + "\n")
 
 
 def write_metadata(rows: list[dict], path: str) -> None:
@@ -415,7 +427,7 @@ def main() -> None:
     samples = build_samplesheet(
         i7, i5, args.n_samples, args.leave_unused, "RUN01", args.platform
     )
-    write_samplesheet(samples, os.path.join(args.outdir, "samplesheet.csv"))
+    write_samplesheet(samples, os.path.join(args.outdir, "samplesheet.tsv"))
     write_metadata(samples, os.path.join(args.outdir, "metadata.tsv"))
     write_runs(os.path.join(args.outdir, "runs.tsv"), "RUN01", args.platform, run_path)
     if args.platform == "illumina":

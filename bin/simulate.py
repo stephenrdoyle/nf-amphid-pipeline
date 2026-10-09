@@ -74,6 +74,13 @@ def revcomp(seq: str) -> str:
 
 
 def read_table(path: str) -> list[dict[str, str]]:
+    # The delimiter rule is duplicated from ampseqlib.delimiter_for, and
+    # that is deliberate. This simulator is the oracle the pipeline is
+    # tested against; importing the pipeline's own parsing would mean a
+    # shared bug produced agreeing right and wrong answers and no test
+    # could see it. The copy is held honest by a test that asserts the
+    # two agree, rather than by a comment asking the next person to
+    # remember.
     delim = "," if path.lower().endswith(".csv") else "\t"
     with open(path, newline="", encoding="utf-8") as fh:
         lines = [ln for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]

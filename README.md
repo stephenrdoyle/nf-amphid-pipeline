@@ -124,7 +124,7 @@ python3 tests/make_fixtures.py --outdir tests/data
 # run pre-flight directly - no Nextflow needed
 python3 bin/preflight.py \
     --reference tests/data/reference.tsv \
-    --samplesheet tests/data/samplesheet.csv \
+    --samplesheet tests/data/samplesheet.tsv \
     --runs tests/data/runs.tsv \
     --index-map assets/index_map.tsv \
     --outdir preflight
@@ -155,7 +155,7 @@ That is the design, and the switch is built.
 ```bash
 nextflow run . -profile test,local          # fixtures, end to end
 nextflow run . -profile farm \
-    --reference reference.tsv --samplesheet samplesheet.csv \
+    --reference reference.tsv --samplesheet samplesheet.tsv \
     --runs runs.tsv --primers primers.tsv --outdir results
 ```
 
@@ -165,8 +165,8 @@ data and the workflow has not. They are single-platform, take positional
 arguments, and reimplement in shell what `-resume` does properly.
 
 ```bash
-bin/run_illumina.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
-THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.csv runs.tsv primers.tsv
+bin/run_illumina.sh  results reference.tsv samplesheet.tsv runs.tsv primers.tsv
+THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.tsv runs.tsv primers.tsv
 ```
 
 Use the drivers until the workflow has been shaken down on real data,
@@ -292,7 +292,7 @@ bin/split_concatemers.py --reads <minknow dir> --threads 16 --outdir split
 Demultiplexing is sharded the same way, and for the same reason:
 
 ```bash
-THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.csv runs.tsv primers.tsv
+THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.tsv runs.tsv primers.tsv
 ```
 
 Work is divided by **input file**, which needs no chunking scheme
@@ -316,7 +316,7 @@ A large tier B means the two ends are failing separately; a large tier D
 means whole reads are failing. Neither says why, so:
 
 ```bash
-bin/diagnose_demux.py --reads <minknow dir> --samplesheet samplesheet.csv \
+bin/diagnose_demux.py --reads <minknow dir> --samplesheet samplesheet.tsv \
     --run-id RUN01 --assay assets/assay/ampseq_helminth.json
 ```
 
@@ -496,7 +496,7 @@ python3 tests/make_fixtures.py --outdir example \
 
 python3 bin/simulate.py \
     --reference   example/reference.tsv \
-    --samplesheet example/samplesheet.csv \
+    --samplesheet example/samplesheet.tsv \
     --runs        example/runs.tsv \
     --assay       assets/assay/ampseq_helminth.json \
     --outdir      example/reads \

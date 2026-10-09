@@ -31,7 +31,7 @@ recovered against ambiguity introduced.
 
 Nothing here changes any output. It reads reads and prints.
 
-  diagnose_barcodes.py --reads split/reads --samplesheet samples.csv \\
+  diagnose_barcodes.py --reads split/reads --samplesheet samples.tsv \\
       --run-id RUN01 --assay assay.json --limit 200000
 """
 

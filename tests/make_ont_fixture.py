@@ -86,7 +86,7 @@ def main() -> int:
 
     mf.write_reference(ref, os.path.join(out, "reference.tsv"))
     mf.write_primers(os.path.join(out, "primers.tsv"))
-    mf.write_samplesheet(samples, os.path.join(out, "samplesheet.csv"))
+    mf.write_samplesheet(samples, os.path.join(out, "samplesheet.tsv"))
     mf.write_metadata(samples, os.path.join(out, "metadata.tsv"))
     # The manifest points at the MinKNOW run folder, not at a file: the
     # fastq_pass / fastq_fail rules are part of what the nanopore path
@@ -102,7 +102,7 @@ def main() -> int:
     sim_runs = os.path.join(work, "runs.abs.tsv")
     mf.write_runs(sim_runs, "ONT01", "nanopore", os.path.join(out, "run"))
     quiet(sim.main, ["--reference", os.path.join(out, "reference.tsv"),
-                     "--samplesheet", os.path.join(out, "samplesheet.csv"),
+                     "--samplesheet", os.path.join(out, "samplesheet.tsv"),
                      "--runs", sim_runs,
                      "--assay", ASSAY, "--outdir", work,
                      "--reads-per-sample", str(args.reads_per_sample)])

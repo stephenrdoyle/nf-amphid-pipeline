@@ -17,7 +17,7 @@ NF=/nfs/users/nfs_s/sd21/lustre_link/software/nf-helminth-amplicon
 
 nextflow run $NF -resume -bg \
     --reference   reference.tsv \
-    --samplesheet samplesheet.csv \
+    --samplesheet samplesheet.tsv \
     --runs        runs.tsv \
     --primers     primers.tsv \
     --outdir      results
@@ -72,9 +72,18 @@ measured value and others do not. Mixing them puts corrected and assumed
 copy numbers in the same column, which is only comparable if the
 unmeasured ones really do amplify at unity.
 
-### 2.2 `--samplesheet` — one row per library (CSV, **required**)
+### 2.2 `--samplesheet` — one row per library (TSV or CSV, **required**)
 
 A samplesheet row is a *library*, and it is frozen at prep time.
+
+**TSV is the default; CSV still works.** Every table in this pipeline
+picks its delimiter from the file extension — `.csv` means comma,
+anything else means tab — so the two are interchangeable per file and a
+sheet already written as CSV needs no conversion. The rule lives in one
+place, `ampseqlib.delimiter_for`, because a reader and a writer that
+disagree about a delimiter do not raise: they produce one wide column
+whose header matches nothing, and the error that comes back names every
+required field as missing.
 
 | column | required | meaning |
 |---|---|---|
@@ -310,6 +319,44 @@ the plasmids — a titration, or a mock-only pool. **The proportions are
 emitted either way**; the flag changes calling only, because a plasmid in
 a titration is the measurement and the same plasmid in a faecal sample is
 contamination.
+
+**What the flag changes downstream, which is easy to miss.** `calls.tsv`
+contains one row per (sample, *called* reference), so the flag doubles
+its size on a panel with equal targets and controls — and every count
+built from it moves with that. On an 88-sample plate with 11 targets and
+11 controls:
+
+| | rows in `calls.tsv` | `detected + not_detected` per 19-library arm |
+|---|---|---|
+| flag off | 968 | 209 |
+| flag on | 1,936 | 418 |
+
+So `detection_rate` is **not** comparable between a run with the flag and
+one without — the denominator is a different set of references. Compare
+the `detected` counts, or the per-reference rows in `calls.tsv`, not the
+headline rate.
+
+`group_summary.tsv` counts **everything** in `calls.tsv`, with no filter
+on `reference_type`. That is deliberate: the decision about what counts
+as a result is made once, here, by this flag. A version that re-filtered
+to `reference_type == "target"` shipped briefly and was wrong — on a
+plasmid plate it discarded every real call and reported a detection rate
+built from whichever genuine targets happened to be present.
+
+One consequence worth knowing when you read the result: with the flag on,
+`detection_rate` pools target and control calls into one number, and on a
+plasmid plate those mean opposite things — a plasmid detection is the
+measurement, a target detection is contamination. Split them by
+`reference_type` in `calls.tsv` when that distinction matters.
+
+**You cannot turn this off from the command line.** A bare
+`--controls_as_targets` sets it to `true`, which is what you want; but
+`--controls_as_targets false` sets the *string* `"false"`, which is
+truthy in Groovy and switches it **on**. This worsened in Nextflow
+26.04+, where every CLI parameter arrives as a string. To disable it,
+edit `nextflow.config` — where it is a real boolean — or use a
+`-params-file`, which preserves types. The same trap applies to
+`--include_failed` and `--allow_missing`.
 
 ### 3.8 Calling and run QC
 
@@ -603,6 +650,28 @@ present *before* concatemer splitting — so splitting did not cause it.
 **Everything is `assay_failed`** — check `--min_depth` against your
 actual depths in `calls.tsv`.
 
+**"I passed that flag and it did nothing."** Read what the task actually
+ran, rather than what you typed:
+
+```bash
+grep -l "controls-as-targets" work/*/*/.command.sh
+```
+
+`.command.sh` is the rendered script for one task, so it settles whether
+a parameter reached the tool — upstream of any assumption about Nextflow
+parsing, your config, or the module.
+
+**Make sure it is the right task's.** A failed attempt leaves its work
+directory behind looking entirely authoritative, and the hash printed in
+an error message is the *failed* one. After a fix and a `-resume` the
+successful task has a different hash, and reading the old directory will
+tell you the opposite of the truth. `grep -l` across `work/*/*/` finds
+the task that has the flag rather than the one you happen to know the
+path of; `nextflow log` lists them properly.
+
+This is worth reaching for early. Twice in one session it resolved in
+seconds a question that inference had got wrong in both directions.
+
 **A `-stub-run` reports `Complete` having run almost nothing** — read the
 task table, not the last line. Every process should show a count.
 
@@ -615,7 +684,7 @@ matrix **without** writing per-sample FASTQ:
 
 ```bash
 python3 bin/demux_ont.py --reads results/split/reads \
-    --samplesheet samplesheet.csv --run-id RUN01 \
+    --samplesheet samplesheet.tsv --run-id RUN01 \
     --assay assets/assay/ampseq_helminth.json --threads 16 \
     --stats-only --outdir demux-reasons
 ```
@@ -640,8 +709,8 @@ that passed.
 ## 9. The shell drivers
 
 ```bash
-bin/run_illumina.sh  results reference.tsv samplesheet.csv runs.tsv primers.tsv
-THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.csv runs.tsv primers.tsv
+bin/run_illumina.sh  results reference.tsv samplesheet.tsv runs.tsv primers.tsv
+THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.tsv runs.tsv primers.tsv
 ```
 
 Predate the Nextflow layer and are kept because every stage in them has

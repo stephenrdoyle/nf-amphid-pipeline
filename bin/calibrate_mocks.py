@@ -51,7 +51,7 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampseqlib import read_table  # noqa: E402
+from ampseqlib import read_table, restore_declared_ids  # noqa: E402
 
 MODELS = ("constant", "composition_dependent", "insufficient_data")
 
@@ -256,6 +256,13 @@ def main(argv=None) -> int:
     ap.add_argument("--mocks", required=True)
     ap.add_argument("--assign-dir", required=True)
     ap.add_argument("--reference", required=True)
+    ap.add_argument("--preflight-dir",
+                    help="preflight/, for file_resolution.tsv. Without it "
+                         "the counts tables stay keyed on the filename-safe "
+                         "sample id and the join to --mocks, which names the "
+                         "declared one, finds nothing")
+    ap.add_argument("--run-id", default="",
+                    help="restrict the id mapping to one run")
     ap.add_argument("--outdir", default="calibration")
     ap.add_argument("--min-reads", type=int, default=50,
                     help="reads below which a species is not used in a well")
@@ -274,6 +281,11 @@ def main(argv=None) -> int:
     quants = {r["seq_id"] for r in refs if r.get("type") == "quant"}
     mocks = load_mocks(args.mocks)
     observed = load_observed(args.assign_dir)
+    # Same reason as in synthesise.py: the counts tables are keyed on the
+    # filename-safe id, the mocks file names the declared one. Without
+    # this the join finds nothing and the only symptom is "no mock sample
+    # has counts", which reads as a bench problem.
+    restore_declared_ids(observed, args.preflight_dir, args.run_id)
     if not mocks:
         raise SystemExit(f"no mock definitions in {args.mocks}")
     usable = [s for s in mocks if s in observed]
