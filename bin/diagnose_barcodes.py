@@ -375,7 +375,9 @@ def main(argv=None) -> int:
               f"{100*d.get(2,0)/n:5.1f}%  (needs min Hamming >= 5)")
         print(f"    distance 2 with a margin rule  "
               f"{margin2[end]['clear']:>8,}  "
-              f"{100*margin2[end]['clear']/n:5.1f}%  (no ambiguity added)")
+              f"{100*margin2[end]['clear']/n:5.1f}%  (this window only - "
+              "with the +/-3bp slack it cost more ends than it saved on "
+              "simulated plates; see BarcodeSet.match)")
         print(f"    1-2 indels, blanket tolerance  {i.get(1,0)+i.get(2,0):>8,}  "
               f"{100*(i.get(1,0)+i.get(2,0))/n:5.1f}%  UNSAFE on this set "
               f"(min edit 2 allows 0)")

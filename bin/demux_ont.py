@@ -95,15 +95,15 @@ class BarcodeSet:
     length: int = 0
     max_mismatch: int = 1
     # How much further the runner-up must be for a match beyond
-    # max_mismatch to be accepted, and how far the best may be. 0
-    # disables the margin rule entirely and restores tolerance-only
-    # behaviour.
-    margin: int = 2
+    # max_mismatch to be accepted, and how far the best may be. 0 - the
+    # default - disables the margin rule and keeps tolerance-only
+    # matching; see match() for why it is off.
+    margin: int = 0
     margin_max_dist: int = 2
 
     @classmethod
     def build(cls, seqs: set[str], requested: int = 1,
-              margin: int = 2, margin_max_dist: int = 2) -> "BarcodeSet":
+              margin: int = 0, margin_max_dist: int = 2) -> "BarcodeSet":
         seqs = {s for s in seqs if s}
         if not seqs:
             return cls()
@@ -147,6 +147,26 @@ class BarcodeSet:
         further away. The ambiguous remainder is declined, as before -
         guessing would be worse than declining, and that has not
         changed.
+
+        OFF BY DEFAULT, and that measurement is why it is not enough.
+        It was taken one window at a time, at the expected offset. In
+        call_end each copy is also sought at +/-3bp of slack, and a
+        shifted window reads part of the neighbouring copy or the
+        adapter - a rotation of the index, which these sets are prone
+        to. Under tolerance alone such a window needs 1 mismatch to be
+        taken; under the margin it needs only 2 with a clear runner-up,
+        and it then disagrees with the other copy, so an end that one
+        good copy used to resolve is lost, or a wrong index is taken.
+
+        Until then the rule was computed and then discarded by call_end,
+        so it never actually ran. When that was fixed (2026-10), a
+        96-well simulated plate scored against truth went the wrong way
+        on every count: correct ends 97.25% -> 96.11% (hac) and 91.80% ->
+        89.32% (fast), wrong sample calls on clean reads 3 -> 10 and
+        40 -> 79. Restricting the margin to the unshifted window was
+        neutral within noise. So tolerance-only matching is the default;
+        the rule is kept, and applied faithfully when asked for, for
+        anyone who wants to measure it on their own data.
         """
         if window in self.by_seq:
             return window
@@ -820,7 +840,7 @@ def code_fingerprint(read_files, **settings) -> str:
 
 
 def _build_sets(samplesheet: str, run_id: str, max_mismatch: int,
-                margin: int = 2, margin_max_dist: int = 2):
+                margin: int = 0, margin_max_dist: int = 2):
     """Rebuild the index sets from files. Workers get paths, not objects:
     what the workers agree on is then the input, not a pickled snapshot of
     one process's interpretation of it."""
@@ -852,7 +872,7 @@ def demux_one_file(job: dict) -> dict:
     cfg = load_assay(job["assay"])
     _samples, i5_set, i7_set, pair_to_sample = _build_sets(
         job["samplesheet"], job["run_id"], job["max_mismatch"],
-        job.get("barcode_margin", 2), job.get("barcode_margin_max_dist", 2))
+        job.get("barcode_margin", 0), job.get("barcode_margin_max_dist", 2))
 
     junction_anchors: tuple[str, ...] = ()
     if job["chimera_check"]:
@@ -1045,13 +1065,13 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--threads", type=int, default=0,
                     help="worker processes; 0 picks min(8, cores). Work\n                         is divided by input file and resumes per file")
-    ap.add_argument("--barcode-margin", type=int, default=2,
+    ap.add_argument("--barcode-margin", type=int, default=0,
                     help="accept a barcode beyond max_mismatch when the "
                          "runner-up is at least this much further away. "
-                         "The set's spacing caps the tolerance; the "
-                         "margin is a property of the individual read, so "
-                         "it adds no misassignment the geometry would "
-                         "have prevented. 0 disables it")
+                         "Off (0) by default: combined with the +/-3bp "
+                         "slack search it took rotated windows and lost "
+                         "more ends than it recovered on simulated plates "
+                         "(see BarcodeSet.match). Measure before enabling")
     ap.add_argument("--barcode-margin-max-dist", type=int, default=2,
                     help="the furthest a barcode may be and still be "
                          "accepted under the margin rule")

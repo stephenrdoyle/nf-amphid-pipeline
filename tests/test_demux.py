@@ -1164,20 +1164,12 @@ def test_barcode_diagnostic_discriminates() -> None:
                 w.writerow(["D1", "nanopore", f"S{i}", i7s[i], i5s[i],
                             "unknown"])
 
-        # Both copies carrying the same insertion, and a 4bp positional
+        # Both copies carrying the same deletion, and a 4bp positional
         # shift. 4 is chosen because a shift that is a multiple of the
         # index length lands on the OTHER copy and is silently
         # rescued - which is what the tandem duplication is for, and
         # why an injected shift of 5 did not fail at all.
-        #
-        # An insertion, not a deletion. A 1bp deletion in both copies
-        # used to fail here, but only because call_end discarded margin
-        # matches; with the margin rule live, slack plus margin recovers
-        # every 1bp deletion to the right well. A mid-index insertion
-        # still defeats Hamming matching at every shift, and is 1 indel
-        # from its index with no competitor, so it remains the class an
-        # indel-aware matcher would add.
-        gone = i5s[2][:4] + "T" + i5s[2][4:]
+        gone = i5s[2][:4] + i5s[2][5:]
         recs = []
         for _ in range(100):
             recs.append(("bothindel", cfg["p5_tail"] + gone + gone
@@ -1268,7 +1260,9 @@ def test_barcode_margin_rule() -> None:
     """
     print("\nbarcode margin rule")
     seqs = {"AAAACCCC", "AAAAGGGG", "TTTTCCCC", "TTTTGGGG"}
-    bs = dx.BarcodeSet.build(seqs, 1)
+    # Switched on explicitly: the rule is off by default (see the end of
+    # this test), and what is tested here is that it works when asked for.
+    bs = dx.BarcodeSet.build(seqs, 1, margin=2)
     check("the set's own spacing caps tolerance at 1",
           bs.max_mismatch == 1, str(bs.max_mismatch))
 
@@ -1314,6 +1308,21 @@ def test_barcode_margin_rule() -> None:
     check("and with margin 0 call_end declines it, as before",
           off_end.barcode is None and off_end.reason == "no_copy_matched",
           f"{off_end.barcode} {off_end.reason}")
+
+    # Off by default, everywhere a set is built. Applied for the first
+    # time (it had been computed and then discarded by call_end), the
+    # rule made a simulated 96-well plate worse on every count - shifted
+    # windows are rotations of the index, and the margin took them - so
+    # tolerance-only matching is the default. See BarcodeSet.match.
+    import inspect
+    check("the margin rule is off by default in a BarcodeSet",
+          dx.BarcodeSet.build(seqs, 1).margin == 0)
+    check("and in the sets the demultiplexer builds",
+          inspect.signature(dx._build_sets).parameters["margin"].default == 0)
+    default_end = dx.call_end(read, anchor, dx.BarcodeSet.build(seqs, 1),
+                              2, len(read), False)
+    check("so by default a 2-mismatch window is declined",
+          default_end.barcode is None, str(default_end.barcode))
 
 
 def test_combination_check() -> None:
