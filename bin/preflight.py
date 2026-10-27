@@ -135,7 +135,9 @@ def load_assay(path: str | None, diag: Diagnostics) -> Assay:
         diag.error(f"assay config: file not found: {path}")
         return Assay()
     try:
-        with open(path, encoding="utf-8") as fh:
+        # utf-8-sig for the same reason as read_table: json.load refuses
+        # a byte-order mark outright, and some Windows editors add one.
+        with open(path, encoding="utf-8-sig") as fh:
             data = json.load(fh)
     except json.JSONDecodeError as exc:
         diag.error(f"assay config: {path} is not valid JSON - {exc}")
@@ -316,7 +318,15 @@ def read_table(path: str, diag: Diagnostics, label: str) -> list[dict[str, str]]
         return []
 
     delim = delimiter_for(path)
-    with open(path, newline="", encoding="utf-8") as fh:
+    # utf-8-sig, not utf-8. Excel's "CSV UTF-8" export - the option a
+    # careful person picks precisely so that accents survive - writes a
+    # byte-order mark first, and read as plain utf-8 that mark becomes
+    # part of the first column's name. The header then visibly says
+    # run_id and the check reports "missing required column(s): run_id",
+    # which sends the reader looking for a problem they can see is not
+    # there. utf-8-sig drops a leading BOM and is otherwise identical,
+    # so a file without one reads exactly as before.
+    with open(path, newline="", encoding="utf-8-sig") as fh:
         lines = [ln for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
 
     if not lines:
@@ -429,8 +439,24 @@ def parse_reference(path: str, diag: Diagnostics) -> list[RefEntry]:
                 sequence=row.get("sequence", "").upper().replace(" ", ""),
             )
         )
-        if not entries[-1].seq_id:
+        sid = entries[-1].seq_id
+        if not sid:
             diag.error(f"reference line {i}: seq_id is empty")
+        elif sanitise_id(sid) != sid:
+            # A seq_id becomes a FASTA header, and an aligner keeps only
+            # the header up to the first whitespace - so 'Ascaris
+            # lumbricoides' and 'Ascaris suum' were both written as
+            # '>Ascaris', and every count for either landed on one name.
+            # Other characters do the same damage later, as file names.
+            # The template already asks for letters, digits, . _ -; this
+            # enforces it. Put the readable name in `taxon`.
+            diag.error(
+                f"reference line {i}: seq_id '{sid}' contains characters "
+                "other than letters, digits, '.', '_' and '-'. It is used "
+                "as a FASTA id and in file names, where whitespace "
+                "truncates it. Use e.g. "
+                f"'{sanitise_id(sid)}' and put the readable name in taxon"
+            )
     return entries
 
 
@@ -1528,6 +1554,14 @@ def parse_mocks(path: str, diag: Diagnostics) -> dict[str, list[dict]]:
     for r in rows:
         sid = r.get("sample_id", "")
         if not sid:
+            # Skipped rather than refused - a half-filled template row is
+            # common - but not silently: a mock component that never
+            # reaches calibration because its sample_id cell was left
+            # blank is otherwise invisible.
+            diag.warn(
+                f"mocks: a row for seq_id '{r.get('seq_id', '')}' has no "
+                "sample_id and was ignored"
+            )
             continue
         try:
             amount = float(r["amount"])
@@ -1808,6 +1842,18 @@ def parse_index_map(path: str, diag: Diagnostics) -> IndexMap:
         seq = row["sequence"].upper()
         name = row["name"]
         pos = row["position"]
+        # A sequence listed twice under one role is two wells claiming
+        # the same index, and the map is keyed on sequence - so the
+        # second row used to overwrite the first and every sample using
+        # it was placed in whichever well happened to come last.
+        table = im.i7 if role == "i7" else im.i5 if role == "i5" else None
+        if table is not None and seq in table:
+            diag.error(
+                f"index map: {role} sequence {seq} is listed twice, as "
+                f"'{table[seq][0]}' and '{name}'. One index cannot mark two "
+                "positions; the second row would silently replace the first"
+            )
+            continue
         if role == "i7":
             try:
                 im.i7[seq] = (name, int(pos))
@@ -1820,6 +1866,29 @@ def parse_index_map(path: str, diag: Diagnostics) -> IndexMap:
                 im.i5[seq] = (name, pos)
         else:
             diag.error(f"index map: unknown role '{role}' (expected i5 or i7)")
+
+    # One length per role. The nanopore demultiplexer reads a window as
+    # long as the LONGEST index in the set (demux_ont.BarcodeSet.build)
+    # and compares it to each index, so a shorter index can never match
+    # and its samples come out empty with no error. The Hamming
+    # characterisation below is also undefined between unequal lengths.
+    # A mix is nearly always a typo (a dropped or doubled base) or a
+    # second kit pasted in, and either way the offenders are what the
+    # reader needs, so name the entries that differ from the usual length.
+    for role, table in (("i7", im.i7), ("i5", im.i5)):
+        lengths = Counter(len(q) for q in table)
+        if len(lengths) > 1:
+            usual = lengths.most_common(1)[0][0]
+            odd = [f"{table[q][0]} {q} ({len(q)}bp)" for q in table
+                   if len(q) != usual]
+            diag.error(
+                f"index map: {role} indices are not all one length - most "
+                f"are {usual}bp, but {len(odd)} differ: "
+                + ", ".join(odd[:10])
+                + (f", and {len(odd) - 10} more" if len(odd) > 10 else "")
+                + ". Demultiplexing reads one window length per set, so "
+                "an index of another length can never match"
+            )
     return im
 
 
@@ -1834,8 +1903,13 @@ def index_set_report(im: IndexMap, diag: Diagnostics,
         if len(seqs) < 2:
             return {}
         pairs = [(a, b) for i, a in enumerate(seqs) for b in seqs[i + 1 :]]
-        mh = min(hamming(a, b) for a, b in pairs)
+        # Hamming only between equal lengths. A mixed-length set is
+        # already an error from parse_index_map; this keeps the report
+        # from dying with a traceback before that error can be printed.
+        # Edit distance is defined for any pair and stays the floor.
         ml = min(levenshtein(a, b) for a, b in pairs)
+        same = [hamming(a, b) for a, b in pairs if len(a) == len(b)]
+        mh = min(same) if same else ml
         # tolerance that still guarantees unique assignment
         safe_mm = (mh - 1) // 2
         safe_edit = (ml - 1) // 2
@@ -1930,7 +2004,7 @@ def index_set_report(im: IndexMap, diag: Diagnostics,
         for a in table:
             for r in rotations(a):
                 for b in table:
-                    if b == a:
+                    if b == a or len(b) != len(r):
                         continue
                     if hamming(r, b) <= 1:
                         rot.append(f"{label}: {table[a][0]} rotated is 1 mismatch from {table[b][0]}")
@@ -2167,6 +2241,18 @@ def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
         row["path"] = resolve_against(path, row["path"], PATH_BASE)
         if not os.path.exists(row["path"]):
             diag.error(f"run manifest '{rid}': path does not exist: {row['path']}")
+        elif platform == "illumina" and not os.path.isdir(row["path"]):
+            # An Illumina run is a directory of per-sample FASTQs; file
+            # resolution globs inside it. Pointed at a file - one FASTQ,
+            # or the samplesheet itself - the existence check above is
+            # satisfied, the resolver skips it as "not a directory", and
+            # the run used to pass pre-flight with nothing resolved for
+            # any sample. Say so here, where the path is known to be wrong.
+            diag.error(
+                f"run manifest '{rid}': path is a file, not a directory: "
+                f"{row['path']}. An Illumina run's path is the directory "
+                "holding its per-sample FASTQ files"
+            )
 
         dna = row.get("dna_input_ng", "")
         if dna:
@@ -2410,9 +2496,22 @@ def parse_samplesheet(
                 )
             table = im.i7 if label == "index_i7" else im.i5
             if table and seq not in table:
+                # i5 is written in two orientations depending on the
+                # instrument's chemistry (forward-strand vs reverse-
+                # complement workflows), and sample sheets prepared for
+                # one are routinely reused on the other. When the
+                # reverse complement IS in the map that is almost
+                # certainly what happened, and saying so saves a search.
+                hint = ""
+                if label == "index_i5" and revcomp(seq) in table:
+                    hint = (
+                        f". Its reverse complement {revcomp(seq)} IS in the "
+                        f"map (as '{table[revcomp(seq)][0]}') - the samplesheet "
+                        "probably uses the other i5 orientation"
+                    )
                 diag.error(
                     f"samplesheet '{s.sample_id}': {label} '{seq}' is not in the "
-                    "index map, so its plate position cannot be derived"
+                    "index map, so its plate position cannot be derived" + hint
                 )
 
         s.well = im.well(s.index_i7, s.index_i5)
@@ -2528,21 +2627,61 @@ def resolve_illumina_files(
     between samplesheet names and filenames is the commonest way this class
     of pipeline wastes a day, so zero matches and ambiguous matches both
     hard-fail rather than warn."""
+    # Every prefix declared per run, so a hit can be checked against the
+    # OTHER samples' names as well as its own (see claimed_by_longer).
+    prefixes: dict[str, set[str]] = defaultdict(set)
+    for s in samples:
+        prefixes[s.run_id].add(s.file_prefix or s.sample_id)
+
+    def claimed_by_longer(base: str, prefix: str, run_id: str) -> bool:
+        """True if a LONGER declared prefix also owns this file.
+
+        The delimiter rule below stops S1 matching S10's files, but not
+        'ctrl' matching 'ctrl_rep2_R1.fastq.gz' under the fallback
+        pattern, because '_' is both the boundary and an ordinary
+        character in sample ids. When both are declared, the file
+        belongs to the longest prefix it starts with.
+        """
+        return any(
+            len(other) > len(prefix) and other.startswith(prefix)
+            and base.startswith(other + "_")
+            for other in prefixes[run_id]
+        )
+
     for s in samples:
         run = runs.get(s.run_id)
         if not run or run.platform != "illumina":
             continue
         if not os.path.isdir(run.path):
-            continue  # already reported by the manifest check
+            continue  # reported by parse_runs: missing, or a file
 
         prefix = s.file_prefix or s.sample_id
+        # glob.escape: a sample id is data, not a pattern. 'A[1]' would
+        # otherwise match 'A1_...', and '*' or '?' in an id would match
+        # other samples' files outright.
+        esc = glob.escape(prefix)
+        lanes_by_read: dict[str, tuple[int, set[str]]] = {}
         for read in ("R1", "R2"):
-            pattern = os.path.join(run.path, f"{prefix}_S*_L*_{read}_*.fastq.gz")
+            # The prefix must be followed by '_', Illumina's own
+            # delimiter (<sample>_S<n>_L00<n>_R1_001). The fallback used
+            # to be '{prefix}*_R1*', so a sample S1 whose files were
+            # missing quietly took S10's - one hit each for R1 and R2,
+            # so the ambiguity check below had nothing to fire on, and
+            # the run went ahead with another sample's reads under S1's
+            # name.
+            pattern = os.path.join(run.path, f"{esc}_S*_L*_{read}_*.fastq.gz")
             hits = sorted(glob.glob(pattern))
             if not hits:
-                # try the simpler naming some centres use
-                alt = os.path.join(run.path, f"{prefix}*_{read}*.fastq.gz")
-                hits = sorted(glob.glob(alt))
+                # the simpler naming some centres use: <sample>_R1.fastq.gz
+                # or <sample>_<anything>_R1<anything>.fastq.gz
+                alts = (
+                    os.path.join(run.path, f"{esc}_{read}*.fastq.gz"),
+                    os.path.join(run.path, f"{esc}_*_{read}*.fastq.gz"),
+                )
+                hits = sorted({h for a in alts for h in glob.glob(a)})
+            hits = [h for h in hits
+                    if not claimed_by_longer(os.path.basename(h), prefix,
+                                             s.run_id)]
             if not hits:
                 diag.error(
                     f"samplesheet '{s.sample_id}': no {read} file matched under "
@@ -2553,6 +2692,7 @@ def resolve_illumina_files(
                 s.files.extend(hits)
                 lanes = {re.search(r"_L(\d+)_", os.path.basename(h)) for h in hits}
                 lanes = {m.group(1) for m in lanes if m}
+                lanes_by_read[read] = (len(hits), lanes)
                 if len(hits) > 1 and len(lanes) < len(hits):
                     diag.error(
                         f"samplesheet '{s.sample_id}': {read} matched {len(hits)} "
@@ -2560,9 +2700,55 @@ def resolve_illumina_files(
                         f"{[os.path.basename(h) for h in hits]}. An ambiguous match "
                         "is as dangerous as no match"
                     )
+        # R1 and R2 must describe the same lanes. A lane missing from one
+        # read only would pair the wrong files downstream - or be read as
+        # single-end for that lane - and both are silent.
+        if len(lanes_by_read) == 2 and lanes_by_read["R1"] != lanes_by_read["R2"]:
+            (n1, l1), (n2, l2) = lanes_by_read["R1"], lanes_by_read["R2"]
+            diag.error(
+                f"samplesheet '{s.sample_id}': R1 and R2 do not cover the "
+                f"same lanes - R1 has {n1} file(s), lanes {sorted(l1)}; R2 "
+                f"has {n2} file(s), lanes {sorted(l2)}. A lane present for "
+                "one read only cannot be paired"
+            )
 
 
-def write_runs_resolved(runs: dict, outdir: str) -> None:
+def run_index_lengths(samples: list, diag: "Diagnostics") -> dict[str, int]:
+    """The one index length each run uses, for the concatemer splitter.
+
+    The splitter cuts at a fixed distance past each adapter junction - the
+    tandem index span - and never sees the samplesheet, so it assumed 8bp.
+    With 10bp indices every cut then landed 4bp off. The length is known
+    here, from the indices the run actually declares, and is handed on
+    through runs_resolved.tsv. A run whose i5 and i7 lengths differ has no
+    single span to give, so that is an error: the splitter could only cut
+    one end correctly.
+    """
+    lengths: dict[str, set[int]] = defaultdict(set)
+    for s in samples:
+        # Only nanopore reads are split; an Illumina run with i5 and i7 of
+        # different lengths is unremarkable and must not be refused here.
+        if s.platform != "nanopore":
+            continue
+        for idx in (s.index_i7, s.index_i5):
+            if idx:
+                lengths[s.run_id].add(len(idx))
+    out: dict[str, int] = {}
+    for rid, ls in lengths.items():
+        if len(ls) == 1:
+            out[rid] = ls.pop()
+        else:
+            diag.error(
+                f"run '{rid}': indices of more than one length "
+                f"({', '.join(str(n) for n in sorted(ls))}bp). Concatemer "
+                "splitting cuts at one fixed index span per run, so it "
+                "cannot place both ends correctly"
+            )
+    return out
+
+
+def write_runs_resolved(runs: dict, outdir: str,
+                        index_lengths: dict[str, int] | None = None) -> None:
     """The run manifest as pre-flight understands it, paths resolved.
 
     Pre-flight already turns every relative `path` into an absolute one
@@ -2579,14 +2765,17 @@ def write_runs_resolved(runs: dict, outdir: str) -> None:
     path the rest of the pipeline sees.
     """
     path = os.path.join(outdir, "runs_resolved.tsv")
-    cols = ["run_id", "platform", "path", "barcode_repeats", "dna_input_ng"]
+    cols = ["run_id", "platform", "path", "barcode_repeats", "dna_input_ng",
+            "index_length"]
+    index_lengths = index_lengths or {}
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(cols)
         for rid in sorted(runs):
             r = runs[rid]
             w.writerow([r.run_id, r.platform, os.path.abspath(r.path),
-                        r.barcode_repeats, r.dna_input_ng])
+                        r.barcode_repeats, r.dna_input_ng,
+                        index_lengths.get(rid, "")])
 
 
 def write_file_resolution(samples: list[Sample], outdir: str) -> None:
@@ -2755,11 +2944,24 @@ def main(argv: list[str] | None = None) -> int:
                 if args.barcode_repeats is not None
                 else default_reps
             )
+            # Made absolute HERE, before it is written into a manifest.
+            # A path in a manifest is read relative to the manifest, and
+            # this manifest lives in --outdir - so a relative --input-dir
+            # written as given resolved to <outdir>/<input_dir>, a
+            # directory that does not exist, and the run failed with a
+            # "path does not exist" naming a path nobody typed. On the
+            # command line a relative path means relative to where you
+            # are, or to --path-base when the workflow supplies one
+            # (under Nextflow the cwd is a work/ scratch directory, so
+            # main.nf passes the launch directory).
+            input_dir = os.path.abspath(
+                os.path.join(PATH_BASE or os.getcwd(), args.input_dir)
+            )
             manifest = os.path.join(args.outdir, "runs.derived.tsv")
             with open(manifest, "w", encoding="utf-8") as fh:
                 fh.write("run_id\tplatform\tpath\tbarcode_repeats\n")
                 fh.write(
-                    f"{args.run_id}\t{args.platform}\t{args.input_dir}\t{reps}\n"
+                    f"{args.run_id}\t{args.platform}\t{input_dir}\t{reps}\n"
                 )
             runs = parse_runs(manifest, diag)
     else:
@@ -2796,9 +2998,10 @@ def main(argv: list[str] | None = None) -> int:
     elif entries and primers.get("fwd") and primers.get("rev"):
         # Primers were given and located nowhere, so there is no trimmed
         # panel. (A primers file missing fwd or rev rows has already been
-        # reported by parse_primers.) Under Nextflow that output is what ASSIGN competes reads
-        # against: without it every sample skips assignment and the run
-        # still prints Complete. Fail here, where the cause is nameable.
+        # reported by parse_primers.) Under Nextflow that output is what
+        # ASSIGN competes reads against: without it every sample skips
+        # assignment and the run still prints Complete. Fail here, where
+        # the cause is nameable.
         diag.error(
             "no reference entry has both a forward and a reverse primer "
             "located in it, so no primer-trimmed panel "
@@ -2835,7 +3038,8 @@ def main(argv: list[str] | None = None) -> int:
         plates = plate_report(samples, im, diag)
         resolve_illumina_files(samples, runs, diag)
         write_file_resolution(samples, args.outdir)
-    write_runs_resolved(runs, args.outdir)
+    write_runs_resolved(runs, args.outdir,
+                        run_index_lengths(samples, diag) if samples else {})
 
     # -- mock communities -------------------------------------------------
     # Checked against the panel and the samplesheet, so a design that

@@ -46,10 +46,20 @@ process PREFLIGHT {
     // the file is in a scratch directory and any relative reads path in
     // it would resolve there. The original directory is known here and
     // nowhere else, so it is passed explicitly.
-    def base_arg = params.runs ? "--path-base ${file(params.runs).parent}" : ''
+    // A relative --input_dir means relative to where the pipeline was
+    // launched, but this script runs in a work/ scratch directory, so the
+    // launch directory is passed as --path-base and preflight.py makes the
+    // path absolute against it before writing it into runs.derived.tsv.
+    // (Without it the path ended up resolved against <work>/preflight/.)
+    // The resolution itself stays in Python, where it is tested; Groovy
+    // only says where "here" was. Paths are single-quoted because a
+    // directory name with a space would otherwise split into two arguments.
+    def base_arg = params.runs
+        ? "--path-base '${file(params.runs).parent}'"
+        : (params.input_dir ? "--path-base '${workflow.launchDir}'" : '')
     def manifest_arg = !runs.name.startsWith('NO_')
         ? "--runs ${runs}"
-        : "--input-dir ${params.input_dir} --run-id ${params.run_id} " +
+        : "--input-dir '${params.input_dir}' --run-id '${params.run_id}' " +
           "--platform ${params.platform}"
     // Overrides are omitted entirely when unset, so the assay config decides.
     // An explicitly empty expected_tag means "skip the cross-check", which is
@@ -99,10 +109,13 @@ process PREFLIGHT {
     // touches no reads and finishes in about a second. It is the one
     // process in this pipeline whose real execution is cheaper than a
     // convincing fake of it.
-    def base_arg = params.runs ? "--path-base ${file(params.runs).parent}" : ''
+    // Same --path-base / quoting rule as the script block above.
+    def base_arg = params.runs
+        ? "--path-base '${file(params.runs).parent}'"
+        : (params.input_dir ? "--path-base '${workflow.launchDir}'" : '')
     def manifest_arg = !runs.name.startsWith('NO_')
         ? "--runs ${runs}"
-        : "--input-dir ${params.input_dir} --run-id ${params.run_id} " +
+        : "--input-dir '${params.input_dir}' --run-id '${params.run_id}' " +
           "--platform ${params.platform}"
     def tag_edits = params.tag_max_edits != null ? "--tag-max-edits ${params.tag_max_edits}" : ''
     def exp_tag   = params.expected_tag  != null ? "--expected-tag '${params.expected_tag}'" : ''

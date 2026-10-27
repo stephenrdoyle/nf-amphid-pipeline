@@ -1826,6 +1826,303 @@ def test_one_run_per_invocation() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_relative_input_dir() -> None:
+    """--input-dir is a command-line path and means "relative to here".
+
+    It used to be written verbatim into <outdir>/runs.derived.tsv, and a
+    manifest's relative paths resolve against the manifest - so 'run01'
+    became <outdir>/run01, which does not exist.
+    """
+    print("\nrelative --input-dir")
+    tmp = tempfile.mkdtemp()
+    here = os.getcwd()
+    try:
+        ref, ss, _ = build_case(tmp)
+        common = ["--reference", ref, "--samplesheet", ss,
+                  "--index-map", INDEX_MAP, "--platform", "illumina",
+                  "--run-id", "RUN01"]
+        try:
+            os.chdir(tmp)
+            code = pf.main(common + ["--input-dir", "run01",
+                                     "--outdir", os.path.join(tmp, "out_a")])
+        finally:
+            os.chdir(here)
+        check("a relative --input-dir resolves against the working "
+              "directory, not the output directory", code == 0,
+              f"exit {code}")
+        rows = list(csv.DictReader(
+            open(os.path.join(tmp, "out_a", "runs.derived.tsv"),
+                 encoding="utf-8"), delimiter="\t"))
+        check("and is written into the derived manifest as absolute",
+              rows and os.path.isabs(rows[0]["path"]),
+              str([r["path"] for r in rows]))
+
+        # Under Nextflow the cwd is a scratch directory; the workflow
+        # passes the launch directory as --path-base.
+        other = tempfile.mkdtemp()
+        try:
+            os.chdir(other)
+            code = pf.main(common + ["--input-dir", "run01",
+                                     "--path-base", tmp,
+                                     "--outdir", os.path.join(tmp, "out_b")])
+        finally:
+            os.chdir(here)
+            shutil.rmtree(other, ignore_errors=True)
+        check("and against --path-base when one is given", code == 0,
+              f"exit {code}")
+    finally:
+        os.chdir(here)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_excel_bom() -> None:
+    """Excel's "CSV UTF-8" writes a byte-order mark. Read as plain utf-8
+    it glues itself to the first column name, and a file that visibly
+    has run_id is reported as missing it."""
+    print("\nbyte-order mark")
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, ss, runs = build_case(tmp)
+        for path in (runs, ss):
+            with open(path, encoding="utf-8") as fh:
+                body = fh.read()
+            with open(path, "w", encoding="utf-8-sig") as fh:
+                fh.write(body)
+        code, diag = run_preflight(tmp, ref, ss, runs)
+        check("a manifest and samplesheet saved with a BOM still pass",
+              code == 0, str(diag.errors[:3]))
+        rows = pf.read_table(runs, pf.Diagnostics(), "run manifest")
+        check("and the first column name carries no BOM",
+              rows and "run_id" in rows[0], str(list(rows[0])[:2]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_illumina_file_matching() -> None:
+    print("\nIllumina file matching")
+
+    # S1's files are missing; S10's are present. The old fallback
+    # 'S1*_R1*' took S10's reads for S1 - one hit each, so nothing fired.
+    def s1_and_s10(ss):
+        ss[0]["sample_id"] = "S1"
+        ss[1]["sample_id"] = "S10"
+        return ss
+
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, ss, runs = build_case(tmp, mutate_ss=s1_and_s10)
+        run_dir = os.path.join(tmp, "run01")
+        for f in os.listdir(run_dir):
+            if f.startswith("S1_"):
+                os.remove(os.path.join(run_dir, f))
+        code, diag = run_preflight(tmp, ref, ss, runs)
+        check("a missing S1 does not resolve to S10's files",
+              code == 1 and any("'S1'" in e and "no R1 file matched" in e
+                                for e in diag.errors),
+              str(diag.errors[:3]))
+        res = list(csv.DictReader(
+            open(os.path.join(tmp, "out", "file_resolution.tsv"),
+                 encoding="utf-8"), delimiter="\t"))
+        s1 = [r for r in res if r["sample_id"] == "S1"]
+        check("and S1 is recorded with no files, not S10's",
+              s1 and "S10" not in s1[0]["files"], str(s1))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Simple naming, two samples where one id extends the other: 'ctrl'
+    # must not also take 'ctrl_rep2_R1.fastq.gz'.
+    def ctrl_pair(ss):
+        ss[0]["sample_id"] = "ctrl"
+        ss[1]["sample_id"] = "ctrl_rep2"
+        return ss
+
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, ss, runs = build_case(tmp, mutate_ss=ctrl_pair)
+        run_dir = os.path.join(tmp, "run01")
+        for f in os.listdir(run_dir):
+            if f.startswith("ctrl"):
+                os.remove(os.path.join(run_dir, f))
+        for sid in ("ctrl", "ctrl_rep2"):
+            for read in ("R1", "R2"):
+                open(os.path.join(run_dir, f"{sid}_{read}.fastq.gz"),
+                     "wb").close()
+        code, diag = run_preflight(tmp, ref, ss, runs)
+        check("simple <sample>_R1 naming still resolves", code == 0,
+              str(diag.errors[:3]))
+        res = {r["sample_id"]: r for r in csv.DictReader(
+            open(os.path.join(tmp, "out", "file_resolution.tsv"),
+                 encoding="utf-8"), delimiter="\t")}
+        check("and 'ctrl' does not also claim 'ctrl_rep2's files",
+              res.get("ctrl", {}).get("n_files") == "2"
+              and "rep2" not in res["ctrl"]["files"],
+              str(res.get("ctrl")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # A second lane for R1 only cannot be paired.
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, ss, runs = build_case(tmp)
+        run_dir = os.path.join(tmp, "run01")
+        r1 = sorted(f for f in os.listdir(run_dir) if "_R1_" in f)[0]
+        open(os.path.join(run_dir, r1.replace("_L001_", "_L002_")),
+             "wb").close()
+        code, diag = run_preflight(tmp, ref, ss, runs)
+        check("R1 and R2 covering different lanes is an error",
+              code == 1 and any("same lanes" in e for e in diag.errors),
+              str(diag.errors[:3]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # An Illumina path that is a file passed the existence check and was
+    # then skipped by the resolver as "already reported". It was not.
+    def path_is_file(runs_path):
+        with open(runs_path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        head, row = lines[0].split("\t"), lines[1].split("\t")
+        col = head.index("path")
+        target = os.path.join(os.path.dirname(runs_path), "not_a_dir.txt")
+        open(target, "w").close()
+        row[col] = target
+        with open(runs_path, "w", encoding="utf-8") as fh:
+            fh.write("\t".join(head) + "\n" + "\t".join(row) + "\n")
+
+    expect_error("an Illumina run path that is a file is an error",
+                 "path is a file, not a directory", mutate_runs=path_is_file)
+
+
+def test_seq_id_must_be_id_safe() -> None:
+    print("\nreference seq_id safety")
+
+    def spaced(ref):
+        ref[0]["seq_id"] = "Ascaris lumbricoides"
+        return ref
+
+    expect_error("a seq_id with whitespace is refused",
+                 "contains characters other than", mutate_ref=spaced)
+
+
+def test_index_map_shape() -> None:
+    print("\nindex map shape")
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(INDEX_MAP, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        head_i = next(i for i, ln in enumerate(lines)
+                      if ln and not ln.startswith("#"))
+        cols = lines[head_i].split("\t")
+        si, ri, ni = cols.index("sequence"), cols.index("role"), cols.index("name")
+        data = [ln.split("\t") for ln in lines[head_i + 1:] if ln.strip()]
+
+        # one i7 with two extra bases: used to raise ValueError from
+        # hamming() inside index_set_report
+        mixed = [list(r) for r in data]
+        odd = next(r for r in mixed if r[ri] == "i7")
+        odd[si] = odd[si] + "AC"
+        path = os.path.join(tmp, "mixed.tsv")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(["\t".join(cols)]
+                               + ["\t".join(r) for r in mixed]) + "\n")
+        diag = pf.Diagnostics()
+        im = pf.parse_index_map(path, diag)
+        check("mixed i7 lengths are an error naming the entry",
+              any("not all one length" in e and odd[ni] in e
+                  for e in diag.errors), str(diag.errors))
+        try:
+            pf.index_set_report(im, pf.Diagnostics(), {"nanopore"})
+            ok, err = True, ""
+        except ValueError as exc:
+            ok, err = False, str(exc)
+        check("and the index-set report does not crash on them", ok, err)
+
+        # the same sequence twice under one role
+        dup = [list(r) for r in data]
+        extra = list(next(r for r in dup if r[ri] == "i5"))
+        extra[ni] = extra[ni] + "_copy"
+        dup.append(extra)
+        path = os.path.join(tmp, "dup.tsv")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(["\t".join(cols)]
+                               + ["\t".join(r) for r in dup]) + "\n")
+        diag = pf.Diagnostics()
+        pf.parse_index_map(path, diag)
+        check("a sequence listed twice in the index map is an error",
+              any("listed twice" in e for e in diag.errors), str(diag.errors))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # an i5 written in the other orientation gets a hint
+    def rc_i5(ss):
+        ss[0]["index_i5"] = pf.revcomp(ss[0]["index_i5"])
+        return ss
+
+    expect_error("a reverse-complemented i5 is named as such",
+                 "other i5 orientation", mutate_ss=rc_i5)
+
+
+def test_mock_row_without_sample() -> None:
+    print("\nmocks with an empty sample_id")
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "mocks.tsv")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("sample_id\tseq_id\tamount\tamount_units\tmix\n")
+            fh.write("\tAsc_ITS2\t10\tng\tA\n")
+        diag = pf.Diagnostics()
+        pf.parse_mocks(path, diag)
+        check("a mock row with no sample_id is warned about, not dropped "
+              "silently", any("no sample_id" in w for w in diag.warnings),
+              str(diag.warnings))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_index_length_reaches_the_splitter() -> None:
+    """Each nanopore run's index length is recorded for the splitter.
+
+    split_concatemers cuts at a fixed index span past each junction and
+    never sees the samplesheet, so it assumed 8bp; a 10bp index set put
+    every cut 4bp off. Pre-flight now writes the run's length into
+    runs_resolved.tsv, which is where the workflow reads it from.
+    """
+    print("\nindex length reaches the splitter")
+    from types import SimpleNamespace as NS
+    import csv as _csv
+
+    def smp(rid, plat, i7, i5):
+        return NS(run_id=rid, platform=plat, index_i7=i7, index_i5=i5)
+
+    diag = pf.Diagnostics()
+    lens = pf.run_index_lengths(
+        [smp("N10", "nanopore", "A" * 10, "C" * 10),
+         smp("N8", "nanopore", "A" * 8, "C" * 8),
+         smp("IL", "illumina", "A" * 10, "C" * 8)], diag)
+    check("a 10bp nanopore run records 10", lens.get("N10") == 10, str(lens))
+    check("an 8bp nanopore run records 8", lens.get("N8") == 8, str(lens))
+    check("an Illumina run with unequal i5/i7 is not refused",
+          diag.ok and "IL" not in lens, str(diag.errors))
+
+    diag = pf.Diagnostics()
+    pf.run_index_lengths([smp("NX", "nanopore", "A" * 10, "C" * 8)], diag)
+    check("a nanopore run mixing lengths is refused",
+          any("more than one length" in e for e in diag.errors),
+          str(diag.errors))
+
+    tmp = tempfile.mkdtemp()
+    try:
+        runs = {"N10": NS(run_id="N10", platform="nanopore", path=tmp,
+                          barcode_repeats=2, dna_input_ng="")}
+        pf.write_runs_resolved(runs, tmp, {"N10": 10})
+        rows = list(_csv.DictReader(
+            open(os.path.join(tmp, "runs_resolved.tsv"), encoding="utf-8"),
+            delimiter="\t"))
+        check("runs_resolved.tsv carries the index length",
+              rows and rows[0].get("index_length") == "10", str(rows))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_swapped_index_columns()
@@ -1850,6 +2147,13 @@ def main() -> int:
     test_index_edit_distance_gate()
     test_subject_metadata()
     test_one_run_per_invocation()
+    test_index_length_reaches_the_splitter()
+    test_relative_input_dir()
+    test_excel_bom()
+    test_illumina_file_matching()
+    test_seq_id_must_be_id_safe()
+    test_index_map_shape()
+    test_mock_row_without_sample()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
