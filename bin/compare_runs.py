@@ -186,14 +186,37 @@ def compare(
     }
 
 
+def side_labels(rows_a: list[dict], rows_b: list[dict], label_a: str,
+                label_b: str) -> tuple[str, str]:
+    """Names for the two sides: as given, else each file's own run_id.
+
+    They must differ. Every per-side key - call_<label>, <label>_deeper -
+    is built from them, so two sides sharing a name (a run compared with
+    a re-run of itself, both RUN01) would silently overwrite each other.
+    """
+    def own(rows: list[dict], fallback: str) -> str:
+        ids = {r.get("run_id", "") for r in rows} - {""}
+        return ids.pop() if len(ids) == 1 else fallback
+
+    a = label_a or own(rows_a, "A")
+    b = label_b or own(rows_b, "B")
+    if a == b:
+        a, b = f"{a}_A", f"{b}_B"
+    return a, b
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--a", nargs="+", required=True,
                     help="calls.tsv for the first run (or runs)")
     ap.add_argument("--b", nargs="+", required=True,
                     help="calls.tsv for the second")
-    ap.add_argument("--label-a", default="A")
-    ap.add_argument("--label-b", default="B")
+    ap.add_argument("--label-a", default="",
+                    help="name for the first side; defaults to the run_id "
+                         "its calls.tsv records, else 'A'")
+    ap.add_argument("--label-b", default="",
+                    help="name for the second side; defaults as --label-a, "
+                         "else 'B'")
     ap.add_argument("--strip", default="",
                     help="regex removed from sample_id to recover the "
                          "subject, e.g. '-r[0-9]+$' for replicates")
@@ -205,6 +228,8 @@ def main(argv=None) -> int:
     rows_b = load_calls(args.b)
     if not rows_a or not rows_b:
         raise SystemExit("one side has no calls to compare")
+    args.label_a, args.label_b = side_labels(
+        rows_a, rows_b, args.label_a, args.label_b)
 
     res = compare(rows_a, rows_b, args.strip or None,
                   args.label_a, args.label_b)
@@ -253,6 +278,12 @@ def main(argv=None) -> int:
         if res["ambiguous_pairings"]:
             print(f"    {res['ambiguous_pairings']} skipped as ambiguous "
                   "(a subject measured more than once on one side)")
+        if not res["paired_observations"]:
+            print("    NOTHING PAIRED: no sample_id and seq_id is present in "
+                  "both runs, so there is no agreement to measure. Check "
+                  "that the ids match, or set --strip (replicate_suffix) "
+                  "to remove a replicate suffix")
+            return 0
         print(f"    agreement {res['agreement']:.3f}", end="")
         print(f"   kappa {res['cohen_kappa']:.3f}"
               if res["cohen_kappa"] is not None

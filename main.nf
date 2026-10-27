@@ -19,6 +19,7 @@ include { NANOPORE_PATH  } from './subworkflows/local/nanopore'
 include { ASSIGN         } from './modules/local/assign'
 include { SYNTHESISE     } from './modules/local/synthesise'
 include { CALIBRATE_MOCKS} from './modules/local/calibrate_mocks'
+include { COMPARE_RUNS   } from './modules/local/compare_runs'
 include { REPORT         } from './modules/local/report'
 
 def helpMessage() {
@@ -263,16 +264,38 @@ workflow {
         )
     }
 
+    // Cross-run comparison. --comparison is a previous run's calls.tsv,
+    // and report.py reads the comparison.json that compare_runs.py makes
+    // from it - so it is compared here, not handed to the report raw.
+    // Passing the TSV straight through, as this once did, gave the report
+    // a file it could not parse. The previous run's label is left empty
+    // so compare_runs.py takes it from that file's own run_id column.
+    ch_comparison = ch_no_file
+    if (params.comparison) {
+        COMPARE_RUNS(
+            SYNTHESISE.out.calls
+                .combine(ch_run_id)
+                .combine(Channel.fromPath(params.comparison, checkIfExists: true))
+                .map { calls, rid, previous -> [ rid, calls, '', previous ] }
+        )
+        ch_comparison = COMPARE_RUNS.out.json.first()
+    }
+
+    // Every synthesis output report.py reads must be staged here - the
+    // report renders a section only when its file exists, so a missing
+    // one drops the section without a word. group_summary.tsv was missed
+    // that way. It is optional, and mix() of an empty channel adds
+    // nothing, so a run with no grouping still reports.
+    // tests/test_nextflow.py::test_report_gets_what_it_reads holds this.
     REPORT(
         ch_run_id,
         SYNTHESISE.out.calls
             .mix(SYNTHESISE.out.calibration,
                  SYNTHESISE.out.fates,
-                 SYNTHESISE.out.qc)
+                 SYNTHESISE.out.qc,
+                 SYNTHESISE.out.groups)
             .collect(),
-        params.comparison
-            ? Channel.fromPath(params.comparison, checkIfExists: true).first()
-            : ch_no_file,
+        ch_comparison,
     )
 }
 

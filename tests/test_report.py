@@ -119,6 +119,46 @@ def test_pairing() -> None:
     check("without stripping, nothing pairs",
           res["paired_observations"] == 0, str(res["paired_observations"]))
 
+    # Labels default to each file's own run_id, and must differ: every
+    # per-side key is built from them, so a run compared with a re-run
+    # under the same id would overwrite one side with the other.
+    ra = [dict(r, run_id="RUN01") for r in a]
+    rb = [dict(r, run_id="RUN07") for r in b]
+    check("labels default to each side's run_id",
+          C.side_labels(ra, rb, "", "") == ("RUN01", "RUN07"),
+          str(C.side_labels(ra, rb, "", "")))
+    check("an explicit label wins",
+          C.side_labels(ra, rb, "illumina", "") == ("illumina", "RUN07"))
+    same = C.side_labels(ra, ra, "", "")
+    check("two sides with one run_id are still told apart",
+          same[0] != same[1], str(same))
+    check("and with no run_id the fallback is A and B",
+          C.side_labels(a, b, "", "") == ("A", "B"))
+
+    # The CLI on a pairing that matches nothing: it must say so, not crash
+    # formatting an agreement that does not exist.
+    tmp = tempfile.mkdtemp()
+    try:
+        for name, rows in (("a.tsv", a), ("b.tsv", b)):
+            with open(os.path.join(tmp, name), "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(rows[0]),
+                                   delimiter="\t", lineterminator="\n")
+                w.writeheader()
+                w.writerows(rows)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                code = C.main(["--a", os.path.join(tmp, "a.tsv"),
+                               "--b", os.path.join(tmp, "b.tsv"),
+                               "--outdir", os.path.join(tmp, "cmp")])
+        except Exception as e:                      # noqa: BLE001
+            code = f"raised {type(e).__name__}: {e}"
+        check("compare_runs completes when nothing pairs", code == 0, str(code))
+        check("and says nothing paired", "NOTHING PAIRED" in buf.getvalue(),
+              buf.getvalue()[-200:])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     # a subject measured twice on one side is ambiguous, not a pairing
     a2 = a + [row("S1-r3", "T1", "not_detected", 0)]
     res = C.compare(a2, b, r"-r[0-9]+$", "A", "B")
@@ -429,6 +469,31 @@ def test_report() -> None:
               "0.925" in doc2 and "0.831" in doc2)
         check("the section is absent when there is no paired run",
               "Agreement with the paired run" not in doc)
+
+        # Nothing paired. compare_runs writes agreement as None, and the
+        # report formatted it with :.3f and crashed - so a comparison that
+        # measured nothing took the whole report down with it.
+        res = C.compare([row("S1-r1", "T1", "detected", 100)],
+                        [row("S1-r2", "T1", "detected", 90)], None, "A", "B")
+        check("an unpaired comparison records agreement as undefined",
+              res["paired_observations"] == 0 and res["agreement"] is None,
+              str(res["agreement"]))
+        empty = os.path.join(tmp, "comparison_empty.json")
+        with open(empty, "w") as fh:
+            json.dump(res, fh)
+        out3 = os.path.join(tmp, "report3.html")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = R.main(["--synthesis-dir", synth, "--comparison", empty,
+                               "--out", out3, "--quiet"])
+        except Exception as e:                      # noqa: BLE001
+            code = f"raised {type(e).__name__}: {e}"
+        check("the report renders when nothing paired", code in (0, None),
+              str(code))
+        doc3 = open(out3, encoding="utf-8").read() if os.path.exists(out3) else ""
+        check("and says nothing paired rather than showing a number",
+              "No observation was present in both runs" in doc3
+              and "raw agreement" not in doc3)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

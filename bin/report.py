@@ -1180,7 +1180,17 @@ def build(args) -> str:
         parts.append("</tbody></table>")
 
     # ---- cross-run ------------------------------------------------------
-    if comparison:
+    if comparison and not comparison.get("paired_observations"):
+        # Nothing paired: agreement is undefined, not zero, and saying so
+        # matters more than any number - a comparison that measured
+        # nothing must not read as one that agreed.
+        parts.append("<h2>Agreement with the paired run</h2>")
+        parts.append(
+            '<p class="note">No observation was present in both runs, so '
+            "there is no agreement to report. Usually the sample ids differ "
+            "between the runs - a replicate suffix such as <code>-r1</code> "
+            "can be removed with <code>--replicate_suffix</code>.</p>")
+    elif comparison:
         parts.append("<h2>Agreement with the paired run</h2>")
         k = comparison.get("cohen_kappa")
         parts.append('<div class="cards">')

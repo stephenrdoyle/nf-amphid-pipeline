@@ -958,6 +958,45 @@ def test_ids_not_cut_at_a_dot() -> None:
           re.search(r"\bid\s*:\s*row\.sanitised_id\b", main_text) is not None)
 
 
+def test_report_gets_what_it_reads() -> None:
+    """REPORT must be handed every synthesis file report.py reads.
+
+    report.py renders a section only when its file exists, so a file
+    that is never staged drops its section silently. group_summary.tsv
+    went missing that way: synthesis wrote it, the report knew how to
+    draw it, and main.nf never passed it on. And --comparison was handed
+    over as the raw calls.tsv when report.py reads the comparison.json
+    that COMPARE_RUNS makes from it.
+    """
+    print("\nthe report is given what it reads")
+    with open(os.path.join(ROOT, "bin", "report.py"), encoding="utf-8") as fh:
+        reads = set(re.findall(r'synthesis_dir,\s*"([^"]+)"', fh.read()))
+    with open(os.path.join(ROOT, "modules", "local", "synthesise.nf"),
+              encoding="utf-8") as fh:
+        emits = dict(re.findall(
+            r'path\s+"synthesis/([^"]+)"\s*,\s*emit:\s*(\w+)', fh.read()))
+    with open(os.path.join(ROOT, "main.nf"), encoding="utf-8") as fh:
+        main_text = strip_comments(fh.read())
+    call = main_text[main_text.find("REPORT("):]
+    call = call[: call.find("\n    )") + 1]
+
+    check("report.py's synthesis inputs were found", len(reads) >= 4,
+          str(sorted(reads)))
+    unknown = sorted(f for f in reads if f not in emits)
+    check("every file the report reads is a SYNTHESISE output",
+          not unknown, str(unknown))
+    missing = sorted(f for f in reads
+                     if f in emits and f"SYNTHESISE.out.{emits[f]}" not in call)
+    check("and every one of them is passed to REPORT", not missing,
+          ", ".join(f"{f} (SYNTHESISE.out.{emits[f]})" for f in missing))
+
+    check("--comparison goes through COMPARE_RUNS, not straight to REPORT",
+          "COMPARE_RUNS(" in main_text
+          and "COMPARE_RUNS.out.json" in main_text
+          and "params.comparison" not in call,
+          "params.comparison is passed to REPORT directly")
+
+
 def main() -> int:
     test_includes_resolve()
     test_params_declared()
@@ -975,6 +1014,7 @@ def main() -> int:
     test_outputs_are_written()
     test_stubs_present()
     test_ids_not_cut_at_a_dot()
+    test_report_gets_what_it_reads()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

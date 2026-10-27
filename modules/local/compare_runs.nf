@@ -6,7 +6,9 @@ process COMPARE_RUNS {
         'docker://python:3.11-slim' : 'python:3.11-slim' }"
 
     input:
-    tuple val(label_a), path(calls_a), val(label_b), path(calls_b)
+    // Each side staged into its own directory: both are calls.tsv, and
+    // two inputs of one name collide when Nextflow stages them.
+    tuple val(label_a), path(calls_a, stageAs: 'a/*'), val(label_b), path(calls_b, stageAs: 'b/*')
 
     output:
     path "comparison/comparison.json" , emit: json
@@ -15,12 +17,15 @@ process COMPARE_RUNS {
 
     script:
     def strip = params.replicate_suffix ? "--strip '${params.replicate_suffix}'" : ''
+    // An empty label is left off, so the tool takes it from the run_id
+    // column of that side's calls.tsv.
+    def lab_a = label_a ? "--label-a '${label_a}'" : ''
+    def lab_b = label_b ? "--label-b '${label_b}'" : ''
     """
     compare_runs.py \\
         --a ${calls_a} \\
         --b ${calls_b} \\
-        --label-a ${label_a} \\
-        --label-b ${label_b} \\
+        ${lab_a} ${lab_b} \\
         ${strip} \\
         --outdir comparison
 
