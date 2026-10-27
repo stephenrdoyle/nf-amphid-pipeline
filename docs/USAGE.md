@@ -1,8 +1,9 @@
 # nf-helminth-amplicon — usage
 
 Targeted amplicon panel analysis for Illumina and nanopore. One
-invocation handles either platform, or both at once: the `platform`
-column of your inputs decides which branch each run takes.
+invocation handles one sequencing run on either platform: the `platform`
+column of your inputs decides which branch it takes. To analyse several
+runs, invoke the pipeline once per run (see §2.3).
 
 Every column list and default below was read out of `bin/preflight.py`
 and `nextflow.config` rather than written from memory. If the two ever
@@ -109,6 +110,13 @@ measuring it to be zero. Pre-flight warns when this happens.
 
 Where the reads are. On nanopore the reads belong to the *run*, not to
 any one sample, which is why this file exists separately.
+
+**One run per invocation.** Pre-flight refuses a manifest with more
+than one row. Synthesis, detection limits, plate QC and the report are
+not yet separated by run, so several runs would be pooled into one
+result - blanks from one plate setting limits on another - and named
+after the first. Split the manifest, run each separately, and pair the
+results afterwards with `--comparison`.
 
 | column | required | meaning |
 |---|---|---|

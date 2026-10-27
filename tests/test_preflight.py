@@ -1778,6 +1778,37 @@ def test_index_edit_distance_gate() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_one_run_per_invocation() -> None:
+    """A manifest naming more than one run is refused at pre-flight.
+
+    Synthesis is not yet separated by run: the workflow gives it every
+    run's counts under the first run's id, so blanks and plate QC pool
+    across plates and the result is named after one of them. Until that
+    is keyed per run, the honest behaviour is to refuse up front.
+    """
+    print("\none run per invocation")
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, ss, runs = build_case(tmp)
+        code, diag = run_preflight(tmp, ref, ss, runs)
+        check("a single-run manifest passes (the control)", code == 0,
+              str(diag.errors))
+
+        with open(runs, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        with open(runs, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines + [lines[1].replace("RUN01", "RUN02", 1)])
+                     + "\n")
+        code, diag = run_preflight(tmp, ref, ss, runs)
+        check("a two-run manifest is refused", code != 0, str(diag.errors))
+        check("and the error says why and names both runs",
+              any("one run per invocation" in e and "RUN01" in e
+                  and "RUN02" in e for e in diag.errors),
+              str([e[:80] for e in diag.errors]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_swapped_index_columns()
@@ -1801,6 +1832,7 @@ def main() -> int:
     test_manifest_paths_are_portable()
     test_index_edit_distance_gate()
     test_subject_metadata()
+    test_one_run_per_invocation()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

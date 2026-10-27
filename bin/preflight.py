@@ -2747,6 +2747,24 @@ def main(argv: list[str] | None = None) -> int:
         diag.error("one of --runs or --input-dir is required")
         runs = {}
 
+    # One run per invocation, enforced rather than assumed. Everything up
+    # to assignment is per sample or per run, but synthesis is not: the
+    # workflow hands it every run's counts under the first run's id, so
+    # blanks, plate QC and the cohort check would pool across plates and
+    # name the result after one of them. With distinct sample ids that
+    # completes and looks like a single run; with shared ids, or more than
+    # one nanopore run, it dies later on a file name collision that does
+    # not name the cause. Until synthesis is keyed per run, refuse here.
+    if len(runs) > 1:
+        diag.error(
+            f"run manifest: {len(runs)} runs ({', '.join(sorted(runs))}), "
+            "but the pipeline analyses one run per invocation. Synthesis, "
+            "detection limits, plate QC and the report are not yet "
+            "separated by run, so several runs would be pooled into one "
+            "result named after the first. Split the manifest and run each "
+            "separately; compare them afterwards with --comparison"
+        )
+
     # -- reference panel --------------------------------------------------
     entries = parse_reference(args.reference, diag)
     validate_reference(entries, diag, assay)
