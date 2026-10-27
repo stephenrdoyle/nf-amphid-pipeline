@@ -30,6 +30,14 @@ outside the window" from "the anchor is not in these reads at all". Those
 two look identical in the tier counts and have nothing in common as
 problems.
 
+An anchor absent from the read entirely is then split by cause: the read
+is too short to carry both ends; the anchor is there but damaged past the
+budget (3-4 edits, set against the same search on the reversed window so
+chance hits are subtracted rather than believed); this end was lost while
+the other survived; or there is no adapter at either end. Only the
+damaged anchors are a tuning question - the rest is the molecule - and
+the report says how many reads a looser anchor could recover at most.
+
 Read-only: it writes a report and touches no pipeline output.
 
     bin/diagnose_demux.py --reads <minknow dir|fastq> \
@@ -320,6 +328,23 @@ def main(argv=None) -> int:
     # different extent, is the only comparison that isolates position.
     elsewhere = {"i5": 0, "i7": 0}
     absent = {"i5": 0, "i7": 0}
+    # Why an anchor is absent, which the tier counts cannot say and which
+    # decides whether anything can be done about it. In order of test:
+    #   too_short   the read is shorter than the smallest molecule that
+    #               could carry both ends - nothing to search
+    #   degraded    the anchor is in the window at 3-4 edits: present but
+    #               damaged past the budget. Compared against the same
+    #               search on the REVERSED window, which keeps the base
+    #               composition and destroys the anchor, so chance hits at
+    #               that looser budget are counted rather than believed
+    #   end_lost    no anchor here, but the other end's anchor was found:
+    #               this end was truncated or never had its adapter
+    #   no_adapter  neither end's anchor in the read: not this assay's
+    #               product (dimer, contaminant, foreign DNA)
+    # Only the second is a tuning question. The rest are the molecule.
+    absent_why = {"i5": Counter(), "i7": Counter()}
+    degraded_chance = {"i5": 0, "i7": 0}
+    DEGRADED_EDITS = 4
     examples: list[dict] = []
     leaders: list[str] = []
     unexpected = {"i5": Counter(), "i7": Counter()}
@@ -455,6 +480,23 @@ def main(argv=None) -> int:
                 hit = find_anchor_cost(s, anchor, args.anchor_max_edits)
                 if hit is None:
                     absent[tag] += 1
+                    win = sub[:args.search_window]
+                    other = three if tag == "i5" else five
+                    loose = find_anchor_cost(win, anchor, DEGRADED_EDITS)
+                    # The control is counted over the same reads the
+                    # degraded test can reach - not the too-short ones -
+                    # so the two can be subtracted.
+                    if len(s) >= floor and find_anchor_cost(
+                            win[::-1], anchor, DEGRADED_EDITS) is not None:
+                        degraded_chance[tag] += 1
+                    if len(s) < floor:
+                        absent_why[tag]["too_short"] += 1
+                    elif loose is not None:
+                        absent_why[tag]["degraded"] += 1
+                    elif other.anchor_pos >= 0:
+                        absent_why[tag]["end_lost"] += 1
+                    else:
+                        absent_why[tag]["no_adapter"] += 1
                 else:
                     elsewhere[tag] += 1
                     if len(examples) < args.examples:
@@ -506,6 +548,25 @@ def main(argv=None) -> int:
                   f"{absent[tag]:>6,}  {pct(absent[tag], n)}")
             print(f"    anchor present but outside the window "
                   f"{elsewhere[tag]:>5,}  {pct(elsewhere[tag], n)}")
+        if absent[tag]:
+            aw = absent_why[tag]
+            print(f"    why the anchor is absent:")
+            print(f"      read too short to carry both ends   "
+                  f"{aw['too_short']:>7,}  {pct(aw['too_short'], n)}")
+            print(f"      anchor damaged (3-{DEGRADED_EDITS} edits)        "
+                  f"{aw['degraded']:>7,}  {pct(aw['degraded'], n)}"
+                  f"   chance alone: {degraded_chance[tag]:,} "
+                  f"({pct(degraded_chance[tag], absent[tag]).strip()} "
+                  "of absent ends)")
+            print(f"      this end lost, other end present   "
+                  f"{aw['end_lost']:>7,}  {pct(aw['end_lost'], n)}")
+            print(f"      no adapter at either end            "
+                  f"{aw['no_adapter']:>7,}  {pct(aw['no_adapter'], n)}")
+            real = max(0, aw["degraded"] - degraded_chance[tag])
+            print(f"    -> recoverable by a looser anchor at most ~{real:,} "
+                  f"({pct(real, n).strip()} of reads): damaged anchors in "
+                  "excess of the chance rate. The rest is the molecule, "
+                  "not the search.")
         if anchor_edits[tag]:
             tot = sum(anchor_edits[tag].values())
             dist = "  ".join(
@@ -737,6 +798,9 @@ def main(argv=None) -> int:
             tag: {
                 "reasons": dict(reasons[tag]),
                 "anchor_absent_from_read": absent[tag],
+                "anchor_absent_why": dict(absent_why[tag]),
+                "anchor_degraded_chance_hits": degraded_chance[tag],
+                "anchor_degraded_max_edits": DEGRADED_EDITS,
                 "anchor_outside_window": elsewhere[tag],
                 "anchor_edit_distance": dict(anchor_edits[tag]),
                 "undeclared_indices": dict(unexpected[tag].most_common(20)),

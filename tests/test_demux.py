@@ -1487,11 +1487,84 @@ def test_sample_ids_survive_the_filename() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_anchor_absence_is_explained() -> None:
+    """diagnose_demux says WHY an end's anchor is absent, read by read.
+
+    On the reference run the largest loss was ends with no anchor at
+    all, and the tier counts cannot say whether that is a search that is
+    too strict or molecules that never carried an adapter - two problems
+    with nothing in common. One read is built for each cause, and each
+    must land in its own category: too short to carry both ends, anchor
+    damaged past the budget, this end lost while the other survives, and
+    no adapter anywhere.
+    """
+    print("\nwhy an anchor is absent")
+    import contextlib
+    import io
+    import random as _r
+    tmp = tempfile.mkdtemp()
+    try:
+        cfg = dx.load_assay(ASSAY)
+        i7map, i5map = mf.load_index_map(INDEX_MAP)
+        i5, i7 = i5map[0][0], i7map[0][0]
+        rc = dx.revcomp
+        rng = _r.Random(11)
+
+        def rand(n):
+            return "".join(rng.choice("ACGT") for _ in range(n))
+
+        good = (cfg["p5_tail"] + i5 * 2 + cfg["pcr1_overhang_fwd"]
+                + rand(300) + rc(cfg["pcr1_overhang_rev"]) + i7 * 2
+                + rc(cfg["p7_tail"]))
+        a5 = cfg["i5_inner_anchor"]
+        k = good.find(a5)
+        bad = list(a5)
+        for j in (2, 6, 10):                     # three substitutions
+            bad[j] = "A" if bad[j] != "A" else "C"
+        degraded = good[:k] + "".join(bad) + good[k + len(a5):]
+        end_lost = good[k + len(a5) + 10:]       # i5 end chopped off
+        reads = {"short": rand(90), "degraded": degraded,
+                 "end_lost": end_lost, "no_adapter": rand(600),
+                 "good": good}
+        fq = os.path.join(tmp, "reads.fastq")
+        with open(fq, "w") as fh:
+            for name, seq in reads.items():
+                fh.write(f"@{name}\n{seq}\n+\n{'I' * len(seq)}\n")
+        ss = os.path.join(tmp, "samplesheet.csv")
+        with open(ss, "w") as fh:
+            fh.write("run_id,platform,sample_id,index_i7,index_i5,sample_type\n")
+            fh.write(f"R1,nanopore,S1,{i7},{i5},unknown\n")
+        out = os.path.join(tmp, "diag.json")
+        dd = _load("diagnose_demux", "bin/diagnose_demux.py")
+        with contextlib.redirect_stdout(io.StringIO()):
+            dd.main(["--reads", fq, "--samplesheet", ss, "--run-id", "R1",
+                     "--assay", ASSAY, "--no-sweep", "--out", out])
+        rep = json.load(open(out))
+        ends = rep["per_end"]
+        why5 = (ends.get("i5") or {}).get("anchor_absent_why", {})
+        why7 = (ends.get("i7") or {}).get("anchor_absent_why", {})
+        check("a read too short for both ends is called too_short",
+              why5.get("too_short") == 1 and why7.get("too_short") == 1,
+              f"i5 {why5} / i7 {why7}")
+        check("an anchor with three substitutions is called degraded",
+              why5.get("degraded") == 1, str(why5))
+        check("an end chopped off while the other survives is end_lost",
+              why5.get("end_lost") == 1, str(why5))
+        check("a read with no adapter anywhere is no_adapter",
+              why5.get("no_adapter") == 1 and why7.get("no_adapter") == 1,
+              f"i5 {why5} / i7 {why7}")
+        check("and the intact read is not counted as absent at all",
+              sum(why5.values()) == 4, str(why5))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_parallel_matches_serial()
     test_end_reasons_discriminate()
     test_barcode_margin_rule()
     test_sample_ids_survive_the_filename()
+    test_anchor_absence_is_explained()
     test_combination_check()
     test_stats_only()
     test_barcode_diagnostic_discriminates()
