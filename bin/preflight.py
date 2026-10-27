@@ -26,8 +26,10 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    delimiter_for, find_anchor_cost, sanitise_id,
+    LOOKALIKE_MAX_EDITS, delimiter_for, find_anchor_cost,
+    find_anchor_lookalikes, sanitise_id,
 )
+from ampseqlib import load_assay as library_config  # noqa: E402
 from itertools import product
 from math import comb
 
@@ -1780,6 +1782,55 @@ def write_insert_fasta(
     return path
 
 
+def check_anchor_lookalikes(entries: list, assay_path: str | None,
+                            outdir: str, diag: Diagnostics) -> list[dict]:
+    """Find adapter-anchor look-alikes inside the panel's amplicons.
+
+    The nanopore splitter cuts at every anchor it finds and the chimera
+    check quarantines any read with one in its interior, both assuming an
+    insert contains no adapter. An amplicon that carries a near-copy of an
+    anchor therefore has its reads cut in two or set aside - every one of
+    them, so the target is under-counted with no error anywhere. It
+    happened: a Trichuris incognita amplicon carried the i5 anchor at two
+    edits.
+
+    Every look-alike is written to anchor_lookalikes.tsv, which the
+    splitter and the demultiplexer read to recognise these sites and leave
+    them alone. Those within the two edits the splitter searches at are
+    also warned about by name; looser ones go in the file silently, since
+    a sequencing error can still bring them inside the tolerance.
+    """
+    cfg = library_config(assay_path)
+    anchors = {"i5_inner_anchor": cfg.get("i5_inner_anchor", ""),
+               "i7_inner_anchor": cfg.get("i7_inner_anchor", "")}
+    rows = find_anchor_lookalikes(
+        ((e.seq_id, e.sequence) for e in entries if e.sequence),
+        anchors, LOOKALIKE_MAX_EDITS)
+    path = os.path.join(outdir, "anchor_lookalikes.tsv")
+    cols = ["seq_id", "anchor", "strand", "position", "edits", "context"]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols, delimiter="\t",
+                           lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+    close = defaultdict(list)
+    for r in rows:
+        if r["edits"] <= 2:
+            close[r["seq_id"]].append(
+                f"{r['anchor'].split('_')[0]} at {r['position']} "
+                f"({r['strand']} strand, {r['edits']} edits)")
+    for sid, where in sorted(close.items()):
+        diag.warn(
+            f"reference '{sid}': its sequence contains a near-copy of an "
+            f"adapter anchor - {'; '.join(where)}. On nanopore, its reads "
+            "would be cut at that point by the splitter and quarantined as "
+            "chimeras; they are protected by preflight/anchor_lookalikes.tsv, "
+            "which the splitter and demultiplexer read. Illumina is "
+            "unaffected"
+        )
+    return rows
+
+
 def write_combined_fasta(entries: list[RefEntry], outdir: str) -> str:
     """One index for everything. The point of competitive mapping is that a
     read chooses between targets, decoys, quants and vector."""
@@ -3045,6 +3096,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if entries:
         write_combined_fasta(entries, args.outdir)
+    check_anchor_lookalikes(entries, args.assay, args.outdir, diag)
     primers = parse_primers(args.primers, diag) if args.primers else {}
     extent = check_reference_extent(entries, primers, diag) if primers else []
     if entries and extent:

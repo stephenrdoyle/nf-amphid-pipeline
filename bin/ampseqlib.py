@@ -364,6 +364,109 @@ def writer(fh, fieldnames=None, delimiter: str = "\t"):
                           lineterminator="\n")
 
 
+# --------------------------------------------------------------------------
+# anchor look-alikes inside the panel's own amplicons
+# --------------------------------------------------------------------------
+
+# Sequence kept either side of a look-alike to recognise it again in a
+# read. 24 + a 14-15bp anchor stays inside the 64bp the bit-parallel
+# matcher handles, and is long enough that no adapter junction resembles
+# it: a junction's flanks are index and Nextera overhang, not insert.
+LOOKALIKE_FLANK = 24
+
+# Found at one edit looser than the splitter and demultiplexer search at,
+# so a look-alike that a sequencing error carries inside their tolerance
+# is still in the mask. Masking a site that never triggers costs nothing:
+# it is insert either way.
+LOOKALIKE_MAX_EDITS = 3
+
+
+def find_anchor_lookalikes(entries, anchors: dict, max_edits: int,
+                           flank: int = LOOKALIKE_FLANK) -> list[dict]:
+    """Every place an adapter anchor is nearly spelled out inside an amplicon.
+
+    The splitter cuts a read wherever it finds an anchor, and the chimera
+    check quarantines a read with an anchor in its interior - both on the
+    assumption that an amplicon's insert contains no adapter. A panel
+    entry whose insert happens to contain a near-copy of an anchor breaks
+    that assumption for every one of its reads: each is cut in two, or set
+    aside as a chimera, and the target is quietly under-counted. Found on
+    a real panel, where a Trichuris incognita amplicon carried the i5
+    anchor at two edits and lost most of its reads.
+
+    entries: (seq_id, sequence) pairs; anchors: name -> sequence. Both
+    strands are searched, since reads arrive in either orientation.
+    """
+    rows = []
+    for seq_id, seq in entries:
+        seq = (seq or "").upper()
+        for name, anchor in anchors.items():
+            if not anchor:
+                continue
+            for strand, s in (("+", seq), ("-", revcomp(seq))):
+                off = 0
+                while off < len(s):
+                    h = find_anchor_leftmost(s[off:], anchor, max_edits)
+                    if h is None:
+                        break
+                    st, en, cost = h[0] + off, h[1] + off, h[2]
+                    rows.append({
+                        "seq_id": seq_id, "anchor": name, "strand": strand,
+                        "position": st, "edits": cost,
+                        "context": s[max(0, st - flank):en + flank],
+                    })
+                    off = max(en, st + 1)
+    return rows
+
+
+class LookalikeMask:
+    """Recognise a panel look-alike in a read, so it is not taken for an
+    adapter.
+
+    Built from pre-flight's anchor_lookalikes.tsv. An anchor hit in a read
+    is a look-alike when the sequence around it matches a known
+    look-alike's surroundings - insert on both sides - rather than the
+    index and overhang that flank a real junction. Only those hits are
+    ignored; every other anchor is treated exactly as before, so a real
+    junction, including one with no index, is still cut and still
+    quarantined.
+    """
+
+    def __init__(self, contexts=()):
+        self.contexts: list[str] = []
+        for c in contexts:
+            c = (c or "").upper()
+            if c and c not in self.contexts:
+                self.contexts.append(c)
+                rc = revcomp(c)
+                if rc not in self.contexts:
+                    self.contexts.append(rc)
+
+    @classmethod
+    def load(cls, path: str | None) -> "LookalikeMask":
+        if not path or not os.path.exists(path):
+            return cls()
+        return cls(r.get("context", "") for r in read_table(path))
+
+    def __bool__(self) -> bool:
+        return bool(self.contexts)
+
+    def covers(self, read: str, start: int, end: int) -> bool:
+        """Does a known look-alike's context sit over read[start:end]?
+
+        The context is sought in a stretch of read around the hit, at a
+        nanopore-sized error budget (one edit in eight); a match counts
+        when it overlaps the hit.
+        """
+        for ctx in self.contexts:
+            lo = max(0, start - len(ctx))
+            hi = min(len(read), end + len(ctx))
+            h = find_anchor_cost(read[lo:hi], ctx, max(4, len(ctx) // 8))
+            if h is not None and lo + h[0] < end and lo + h[1] > start:
+                return True
+        return False
+
+
 # ASCII only, deliberately. str.isalnum() also accepts letters such as
 # 'é', and demultiplexing once named its files that way while pre-flight
 # recorded '_' in their place - so the sanitised id in file_resolution.tsv

@@ -231,7 +231,8 @@ workflow {
 
     // -- the two read paths ----------------------------------------------
     ILLUMINA_PATH(ch_illumina, ch_primers, ch_assay)
-    NANOPORE_PATH(ch_nanopore_runs, ch_samplesheet, ch_assay)
+    NANOPORE_PATH(ch_nanopore_runs, ch_samplesheet, ch_assay,
+                  PREFLIGHT.out.lookalikes)
 
     // -- they converge on one assignment ---------------------------------
     // A run in which no sample reaches assignment must fail, not

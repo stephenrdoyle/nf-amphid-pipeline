@@ -820,6 +820,107 @@ def test_split_accounting() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_panel_lookalikes_are_not_junctions() -> None:
+    """An anchor spelled out inside an amplicon is insert, not an adapter.
+
+    Found on a real panel: a Trichuris incognita amplicon carries the i5
+    anchor at two edits, 353bp in (the context below is its own). The
+    splitter cut every one of its reads there and the chimera check
+    quarantined any that got through, so the species was under-counted
+    with no error anywhere. Pre-flight now lists such look-alikes and both
+    stages leave them alone - and only them: a real junction, including
+    one beside a look-alike, is still cut and still quarantined.
+    """
+    print("\npanel anchor look-alikes are not junctions")
+    import ampseqlib as al
+    cfg = sc.load_assay(ASSAY)
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+    reps, span = 2, 16
+    head_len = {"5+": span + len(cfg["p5_tail"]), "7-": span + len(cfg["p7_tail"])}
+    tail_len = {"7+": span + len(cfg["p7_tail"]), "5-": span + len(cfg["p5_tail"])}
+    rng = random.Random(353)
+
+    def rand(n):
+        return "".join(rng.choice("ACGT") for _ in range(n))
+
+    site = "GCCCCCTAGATCGACGGCAGCGGCAGTCGACTAG"   # T. incognita, as found
+    insert = rand(320) + site + rand(120)
+    other = rand(420)
+    lk = al.find_anchor_lookalikes(
+        [("T_incognita", insert), ("clean", other)],
+        {"i5_inner_anchor": a5, "i7_inner_anchor": a7},
+        al.LOOKALIKE_MAX_EDITS)
+    check("the look-alike in the insert is found",
+          any(r["seq_id"] == "T_incognita" and r["anchor"] == "i5_inner_anchor"
+              and r["edits"] <= 2 for r in lk), str(lk))
+    mask = al.LookalikeMask(r["context"] for r in lk)
+
+    mol = sim.build_molecule(insert, "GGGGTTTT", "AAAACCCC", reps, cfg)
+    clean = sim.build_molecule(other, "CCCCAAAA", "TTTTGGGG", reps, cfg)
+    rc = dx.revcomp
+
+    def split(seq, m=None):
+        return sc.split_read(seq, "I" * len(seq), a5, a7, 2, head_len,
+                             tail_len, m)
+
+    check("without the mask the amplicon is cut in two (the bug)",
+          len(split(mol)) == 2, str(len(split(mol))))
+    check("with the mask it comes through whole",
+          len(split(mol, mask)) == 1 and split(mol, mask)[0][0] == mol)
+    check("and in the other orientation too",
+          len(split(rc(mol), mask)) == 1)
+
+    # A sequencing error or two near the site must not undo the mask.
+    noisy = list(mol)
+    k = mol.find(site)
+    for j in (k + 3, k + 30):
+        noisy[j] = "A" if noisy[j] != "A" else "C"
+    check("the mask survives sequencing errors near the site",
+          len(split("".join(noisy), mask)) == 1)
+
+    # Real junctions are untouched, including one beside a look-alike.
+    for name, seq in (("a clean concatemer", clean + clean),
+                      ("a junction beside the look-alike", mol + clean)):
+        got = split(seq, mask)
+        check(f"{name} is still cut", len(got) == 2, str(len(got)))
+
+    # The chimera check: the same distinction, one stage later.
+    junction = (a5, a7, rc(a5), rc(a7))
+    ins_start = len(cfg["p5_tail"]) + span + len(cfg["pcr1_overhang_fwd"])
+    ins_end = len(mol) - (len(cfg["pcr1_overhang_rev"]) + span
+                          + len(cfg["p7_tail"]))
+    check("without the mask the chimera check quarantines it (the bug)",
+          dx.has_internal_adapter(mol, ins_start, ins_end, junction, 2))
+    check("with the mask it does not",
+          not dx.has_internal_adapter(mol, ins_start, ins_end, junction, 2,
+                                      mask))
+    both = mol + clean
+    check("a real internal junction is still caught, even after a "
+          "masked look-alike",
+          dx.has_internal_adapter(both, ins_start, len(both) - 40,
+                                  junction, 2, mask))
+
+    # End to end through the demultiplexer: assigned, not set aside.
+    # build_molecule takes (amplicon, i7, i5, ...): mol carries i7
+    # GGGGTTTT and i5 AAAACCCC.
+    samples = [{"run_id": "R", "sample_id": "S1", "index_i5": "AAAACCCC",
+                "index_i7": "GGGGTTTT"},
+               {"run_id": "R", "sample_id": "S2", "index_i5": "TTTTGGGG",
+                "index_i7": "CCCCAAAA"}]
+    s5 = dx.BarcodeSet.build({x["index_i5"] for x in samples}, 1)
+    s7 = dx.BarcodeSet.build({x["index_i7"] for x in samples}, 1)
+    pairs = {(x["index_i5"], x["index_i7"]): x["sample_id"] for x in samples}
+    call = dx.assign_read("r", mol, cfg, s5, s7, pairs, reps, 120, False,
+                          junction_anchors=junction, lookalikes=mask)
+    check("the read is assigned to its sample in tier A",
+          call.tier == "A" and call.sample_id == "S1",
+          f"{call.tier} {call.sample_id}")
+    call0 = dx.assign_read("r", mol, cfg, s5, s7, pairs, reps, 120, False,
+                           junction_anchors=junction)
+    check("where without the mask it was quarantined as tier E",
+          call0.tier == "E", call0.tier)
+
+
 def main() -> int:
     test_earlier_worse_anchor_is_not_skipped()
     test_split_accounting()
@@ -831,6 +932,7 @@ def main() -> int:
     test_clean_reads_untouched()
     test_sharded_matches_whole_run()
     test_cutting_preserves_indices()
+    test_panel_lookalikes_are_not_junctions()
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

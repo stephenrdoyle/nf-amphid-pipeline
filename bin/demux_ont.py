@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
     DEFAULTS,
+    LookalikeMask,
+    find_anchor_leftmost,
     sanitise_id,
     open_reads_many,
     resolve_read_files,
@@ -457,7 +459,8 @@ END_REASON_MEANING = {
 
 
 def has_internal_adapter(
-    s: str, start: int, end: int, anchors: tuple[str, ...], max_edits: int
+    s: str, start: int, end: int, anchors: tuple[str, ...], max_edits: int,
+    mask: LookalikeMask | None = None,
 ) -> bool:
     """Is there another molecule's end between this read's two ends?
 
@@ -475,11 +478,27 @@ def has_internal_adapter(
     cannot be trusted as a pair.
 
     Both strands are searched, because the join may be head to head.
+
+    Except where the panel itself spells an anchor out. An amplicon whose
+    insert carries a near-copy of an anchor would otherwise have every one
+    of its reads quarantined here. A hit the mask recognises as such a
+    look-alike is passed over, and the search carries on past it, so a
+    real junction later in the same read is still caught.
     """
     if start < 0 or end < 0 or end <= start:
         return False
     interior = s[start:end]
-    return any(find_anchor(interior, p, max_edits) is not None for p in anchors)
+    for p in anchors:
+        off = 0
+        while off < len(interior):
+            h = find_anchor_leftmost(interior[off:], p, max_edits)
+            if h is None:
+                break
+            hs, he = start + off + h[0], start + off + h[1]
+            if not (mask and mask.covers(s, hs, he)):
+                return True
+            off += max(h[1], h[0] + 1)
+    return False
 
 
 def assign_read(
@@ -494,6 +513,7 @@ def assign_read(
     accept_single_end: bool,
     junction_anchors: tuple[str, ...] = (),
     anchor_max_edits: int = 2,
+    lookalikes: LookalikeMask | None = None,
 ) -> ReadCall:
     """Try both orientations; keep the one that resolves more ends.
 
@@ -533,7 +553,8 @@ def assign_read(
         # already failed has nothing to protect.
         if junction_anchors and call.tier == "A":
             if has_internal_adapter(s, call.insert_start, call.insert_end,
-                                    junction_anchors, anchor_max_edits):
+                                    junction_anchors, anchor_max_edits,
+                                    lookalikes):
                 call.tier = "E"
                 call.sample_id = None
 
@@ -874,6 +895,7 @@ def demux_one_file(job: dict) -> dict:
         job["samplesheet"], job["run_id"], job["max_mismatch"],
         job.get("barcode_margin", 0), job.get("barcode_margin_max_dist", 2))
 
+    lookalikes = LookalikeMask.load(job.get("lookalikes"))
     junction_anchors: tuple[str, ...] = ()
     if job["chimera_check"]:
         a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
@@ -911,6 +933,7 @@ def demux_one_file(job: dict) -> dict:
                 job["accept_single_end"],
                 junction_anchors=junction_anchors,
                 anchor_max_edits=job["anchor_max_edits"],
+                lookalikes=lookalikes,
             )
             total += 1
             tiers[call.tier] += 1
@@ -1043,6 +1066,11 @@ def main(argv=None) -> int:
         default=120,
         help="how far from each read end to look for the anchor",
     )
+    ap.add_argument("--lookalikes",
+                    help="pre-flight's anchor_lookalikes.tsv: anchor "
+                         "near-copies inside the panel's own amplicons, "
+                         "which the chimera check must not take for a "
+                         "junction")
     ap.add_argument("--accept-single-end", action="store_true",
                     help="fold tier B into the output; measure the cost first")
     ap.add_argument(
@@ -1146,6 +1174,10 @@ def main(argv=None) -> int:
     parts_dir = os.path.join(args.outdir, "parts")
     os.makedirs(parts_dir, exist_ok=True)
 
+    mask_digest = ""
+    if args.lookalikes and os.path.exists(args.lookalikes):
+        with open(args.lookalikes, "rb") as fh:
+            mask_digest = hashlib.sha256(fh.read()).hexdigest()[:16]
     fingerprint = code_fingerprint(
         read_files,
         barcode_repeats=args.barcode_repeats, max_mismatch=args.max_mismatch,
@@ -1165,6 +1197,8 @@ def main(argv=None) -> int:
         # different margin must not be mixed with these.
         barcode_margin=args.barcode_margin,
         barcode_margin_max_dist=args.barcode_margin_max_dist,
+        # Which reads the chimera check quarantines depends on it.
+        lookalikes=mask_digest,
         assay=args.assay or "")
 
     jobs, results, part_dirs, tsvs, stale = [], [], [], [], 0
@@ -1196,6 +1230,7 @@ def main(argv=None) -> int:
             "barcode_margin": args.barcode_margin,
             "barcode_margin_max_dist": args.barcode_margin_max_dist,
             "stats_only": args.stats_only,
+            "lookalikes": args.lookalikes,
             "code": fingerprint,
         })
 

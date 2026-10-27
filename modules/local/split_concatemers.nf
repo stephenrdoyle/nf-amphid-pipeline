@@ -8,6 +8,7 @@ process SPLIT_CONCATEMERS {
     input:
     tuple val(meta), val(index), path(reads)
     path assay
+    path lookalikes
 
     output:
     // One output FASTQ per input FASTQ, which is why there is no merge
@@ -35,6 +36,7 @@ process SPLIT_CONCATEMERS {
         --reads ${reads} \\
         --assay ${assay} \\
         --part-index ${index} \\
+        --lookalikes ${lookalikes} \\
         ${repeats} ${idx_len} \\
         --anchor-max-edits ${params.anchor_max_edits} \\
         --min-length ${params.min_unit_length} \\

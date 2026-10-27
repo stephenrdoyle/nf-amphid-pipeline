@@ -2200,6 +2200,59 @@ def test_spiked_needs_standards() -> None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_anchor_lookalikes_in_the_panel() -> None:
+    """Pre-flight finds adapter-anchor look-alikes in the panel's amplicons.
+
+    On nanopore, an amplicon carrying a near-copy of an anchor has every
+    read cut by the splitter and quarantined by the chimera check. That
+    happened to a Trichuris incognita amplicon (the i5 anchor at two
+    edits). Pre-flight lists every look-alike for those stages to leave
+    alone, and warns by name about the ones inside their tolerance.
+    """
+    print("\nanchor look-alikes in the panel")
+    import csv as _csv
+    site = "GCCCCCTAGATCGACGGCAGCGGCAGTCGACTAG"   # T. incognita, as found
+
+    def plant(ref):
+        for r in ref:
+            if r["type"] == "target":
+                seq = r["sequence"]
+                mid = len(seq) // 2
+                r["sequence"] = seq[:mid] + site + seq[mid + len(site):]
+                return ref
+        return ref
+
+    # Compared against the unplanted panel rather than assumed clean: the
+    # fixture's synthetic vector backbone happens to carry an i5
+    # look-alike of its own, which is exactly what this check is for.
+    found = {}
+    for label, mut in (("as built", None), ("planted", plant)):
+        tmp = tempfile.mkdtemp()
+        try:
+            ref, ss, runs = build_case(tmp, mutate_ref=mut)
+            code, diag = run_preflight(tmp, ref, ss, runs)
+            path = os.path.join(tmp, "out", "anchor_lookalikes.tsv")
+            rows = (list(_csv.DictReader(open(path, encoding="utf-8"),
+                                         delimiter="\t"))
+                    if os.path.exists(path) else None)
+            warned = {w for w in diag.warnings
+                      if "near-copy of an adapter anchor" in w}
+            found[label] = (code, rows, warned)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    code0, rows0, warned0 = found["as built"]
+    code1, rows1, warned1 = found["planted"]
+    check("the look-alike file is written for every panel",
+          rows0 is not None and rows1 is not None)
+    new = warned1 - warned0
+    check("planting one look-alike adds exactly one warning, naming it",
+          len(new) == 1 and "i5 at" in next(iter(new)), str(new))
+    check("the planted site is listed with its context",
+          any(site[8:20] in r["context"] and int(r["edits"]) <= 2
+              for r in rows1), str(len(rows1)))
+    check("and it warns without blocking the run", code1 == 0, str(code1))
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_swapped_index_columns()
@@ -2226,6 +2279,7 @@ def main() -> int:
     test_one_run_per_invocation()
     test_index_length_reaches_the_splitter()
     test_spiked_needs_standards()
+    test_anchor_lookalikes_in_the_panel()
     test_relative_input_dir()
     test_excel_bom()
     test_illumina_file_matching()

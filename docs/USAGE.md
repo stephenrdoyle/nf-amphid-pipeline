@@ -460,6 +460,9 @@ reproducibility choice, not a dependency.
     runs_resolved.tsv           the run manifest with absolute paths
     reference.fasta             the panel
     reference.insert.fasta      the panel, primers trimmed
+    anchor_lookalikes.tsv       adapter-anchor near-copies inside panel
+                                sequences; the nanopore splitter and
+                                chimera check leave these sites alone
     tag_report.tsv / .txt       control tag derivation
     preflight_summary.json
   split/                        nanopore only

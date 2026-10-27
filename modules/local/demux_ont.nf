@@ -9,6 +9,7 @@ process DEMUX_ONT {
     tuple val(meta), path(reads)
     path samplesheet
     path assay
+    path lookalikes
 
     output:
     // One FASTQ per sample. The run is demultiplexed once, so this is a
@@ -32,6 +33,7 @@ process DEMUX_ONT {
         --samplesheet ${samplesheet} \\
         --run-id ${meta.run_id} \\
         --assay ${assay} \\
+        --lookalikes ${lookalikes} \\
         ${repeats} ${failed} \\
         --max-mismatch ${params.max_mismatch} \\
         --threads ${task.cpus} \\

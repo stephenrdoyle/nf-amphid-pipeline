@@ -25,6 +25,11 @@ process PREFLIGHT {
     // main.nf now requires --primers, and preflight.py fails when the
     // primers locate nowhere, so its absence here is a bug worth a stop.
     path "preflight/reference.insert.fasta"   , emit: insert_fasta
+    // Adapter-anchor near-copies inside the panel's own amplicons. The
+    // splitter and demultiplexer read it so those reads are not cut in
+    // two or quarantined as chimeras. Always written, header-only when
+    // the panel has none.
+    path "preflight/anchor_lookalikes.tsv"    , emit: lookalikes
     path "preflight/tag_report.tsv"           , emit: tag_report
     path "preflight/tag_report.txt"           , emit: tag_report_txt
     path "preflight/runs_resolved.tsv" , emit: runs_resolved

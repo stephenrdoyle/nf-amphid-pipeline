@@ -53,6 +53,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
+    LookalikeMask,
     find_anchor_leftmost,
     load_assay,
     open_reads,
@@ -122,12 +123,20 @@ def scan_all(text: str, pattern: str, max_edits: int, limit: int = 24):
     return hits
 
 
-def scan_hits(seq: str, a5: str, a7: str, edits: int):
-    """All four anchor orientations, in read order."""
+def scan_hits(seq: str, a5: str, a7: str, edits: int,
+              mask: LookalikeMask | None = None):
+    """All four anchor orientations, in read order.
+
+    A hit the mask recognises as a panel look-alike - an anchor nearly
+    spelled out inside an amplicon's own insert - is not an adapter and
+    is dropped. Cutting there split every read of that amplicon in two.
+    """
     hits = []
     for kind, pat in (("5+", a5), ("7+", a7),
                       ("5-", revcomp(a5)), ("7-", revcomp(a7))):
         for s, e in scan_all(seq, pat, edits):
+            if mask and mask.covers(seq, s, e):
+                continue
             hits.append((s, e, kind))
     hits.sort()
     # Two anchors cannot occupy the same bases. If they overlap, the
@@ -191,8 +200,9 @@ def cut_positions(seq: str, hits, head_len: dict, tail_len: dict) -> list[int]:
 
 
 def split_read(seq: str, qual: str, a5: str, a7: str, edits: int,
-               head_len: dict, tail_len: dict) -> list[tuple[str, str]]:
-    hits = scan_hits(seq, a5, a7, edits)
+               head_len: dict, tail_len: dict,
+               mask: LookalikeMask | None = None) -> list[tuple[str, str]]:
+    hits = scan_hits(seq, a5, a7, edits, mask)
     cuts = cut_positions(seq, hits, head_len, tail_len)
     if not cuts:
         return [(seq, qual)]
@@ -236,6 +246,7 @@ def split_one_file(job: dict) -> dict:
     a5, a7, edits = job["a5"], job["a7"], job["edits"]
     head_len, tail_len = job["head_len"], job["tail_len"]
     min_length = job["min_length"]
+    mask = LookalikeMask.load(job.get("lookalikes"))
 
     n_reads = n_pieces = n_dropped = n_cut = n_none = 0
     bases_in = bases_out = 0
@@ -252,7 +263,8 @@ def split_one_file(job: dict) -> dict:
         for read_id, seq, qual in open_reads(src):
             n_reads += 1
             bases_in += len(seq)
-            pieces = split_read(seq, qual, a5, a7, edits, head_len, tail_len)
+            pieces = split_read(seq, qual, a5, a7, edits, head_len, tail_len,
+                                mask)
             kept = [p for p in pieces if len(p[0]) >= min_length]
             n_dropped += len(pieces) - len(kept)
             if len(pieces) > 1:
@@ -415,6 +427,10 @@ def main(argv=None) -> int:
     # matching demux_ont's own flag.
     ap.add_argument("--barcode-repeats", type=int, default=2)
     ap.add_argument("--index-length", type=int, default=8)
+    ap.add_argument("--lookalikes",
+                    help="pre-flight's anchor_lookalikes.tsv: anchor "
+                         "near-copies inside the panel's own amplicons, "
+                         "which are insert and must not be cut at")
     ap.add_argument("--min-length", type=int, default=100,
                     help="drop pieces shorter than this. A fragment with no "
                          "room for an insert cannot be assigned and cannot "
@@ -490,10 +506,16 @@ def main(argv=None) -> int:
     os.makedirs(reads_dir, exist_ok=True)
     os.makedirs(stats_dir, exist_ok=True)
 
+    # The look-alike mask changes where cuts fall, so its content is part
+    # of what produced a part: a resume must not keep parts cut without it.
+    mask_digest = ""
+    if args.lookalikes and os.path.exists(args.lookalikes):
+        with open(args.lookalikes, "rb") as fh:
+            mask_digest = hashlib.sha256(fh.read()).hexdigest()[:16]
     fingerprint = code_fingerprint(
         anchor_max_edits=args.anchor_max_edits, min_length=args.min_length,
         barcode_repeats=args.barcode_repeats, index_length=args.index_length,
-        assay=args.assay or "")
+        assay=args.assay or "", lookalikes=mask_digest)
 
     if args.part_index is not None and len(read_files) != 1:
         raise SystemExit(
@@ -521,7 +543,8 @@ def main(argv=None) -> int:
                      "head_len": head_len, "tail_len": tail_len,
                      "min_length": args.min_length, "code": fingerprint,
                      "index_length": args.index_length,
-                     "barcode_repeats": args.barcode_repeats})
+                     "barcode_repeats": args.barcode_repeats,
+                     "lookalikes": args.lookalikes})
 
     threads = args.threads or min(8, os.cpu_count() or 1)
     if not args.quiet:

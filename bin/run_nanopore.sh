@@ -145,6 +145,7 @@ echo "   reads: $READS"
 # finished. THREADS sets the worker count.
 python3 "$HERE/split_concatemers.py" \
     --reads "$READS" --assay "$ASSAY" \
+    --lookalikes "$OUT/preflight/anchor_lookalikes.tsv" \
     ${REPEATS:+--barcode-repeats "$REPEATS"} \
     ${THREADS:+--threads "$THREADS"} \
     --outdir "$OUT/split"
@@ -156,6 +157,7 @@ echo "== demultiplex ($RUN_ID) ======================================="
 # has to be redone wholesale after a timeout.
 python3 "$HERE/demux_ont.py" \
     --reads "$OUT/split/reads" \
+    --lookalikes "$OUT/preflight/anchor_lookalikes.tsv" \
     --samplesheet "$SS" \
     --run-id "$RUN_ID" \
     --assay "$ASSAY" \

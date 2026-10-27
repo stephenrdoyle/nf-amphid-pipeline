@@ -8,6 +8,7 @@ workflow NANOPORE_PATH {
     runs         // [ meta, reads ] - one entry per run, not per sample
     samplesheet
     assay
+    lookalikes   // pre-flight's anchor_lookalikes.tsv
 
     main:
     // Cut first. Ligation joins amplicons into single reads, and an
@@ -37,7 +38,7 @@ workflow NANOPORE_PATH {
         .splitCsv(header: false, sep: '\t', elem: 1)
         .map { meta, row -> [ meta, row[0], file(row[1], checkIfExists: true) ] }
 
-    SPLIT_CONCATEMERS(ch_shards, assay)
+    SPLIT_CONCATEMERS(ch_shards, assay, lookalikes)
 
     // No merge of the reads themselves: the splitter writes one FASTQ
     // per input FASTQ and demultiplexing reads a directory, so
@@ -61,7 +62,7 @@ workflow NANOPORE_PATH {
     // sample out. Unlike splitting there is no per-file parallelism to
     // be had - a sample's reads are scattered across every batch file,
     // so the gather would be keyed by sample rather than by file.
-    DEMUX_ONT(ch_split_reads, samplesheet, assay)
+    DEMUX_ONT(ch_split_reads, samplesheet, assay, lookalikes)
 
     // Fan out to one channel item per sample, carrying the run's metadata
     // forward so assignment knows it is on the nanopore path.
