@@ -90,7 +90,11 @@ def write_primers(path: str) -> None:
     against the prep's own guesses.
     """
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh, delimiter="\t")
+        # lineterminator spelled out: csv.writer defaults to \r\n, which
+        # differs from the committed LF file in every line, so each
+        # regeneration of the fixture showed primers.tsv as modified and
+        # blocked the next git pull - with identical content.
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["name", "direction", "sequence"])
         for locus, (fwd, rev) in sorted(PRIMERS.items()):
             w.writerow([f"Sim_{locus}_F1", "fwd", fwd])
