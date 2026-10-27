@@ -81,6 +81,7 @@ process PREFLIGHT {
         ${manifest_arg} \\
         --index-map ${index_map} \\
         --assay ${assay} \\
+        ${params.spiked ? '--spiked' : ''} \\
         ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
         ${idx_edit} \\
         ${tag_edits} ${exp_tag} ${reps} \\
@@ -134,6 +135,7 @@ process PREFLIGHT {
         ${manifest_arg} \\
         --index-map ${index_map} \\
         --assay ${assay} \\
+        ${params.spiked ? '--spiked' : ''} \\
         ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
         ${idx_edit} \\
         ${tag_edits} ${exp_tag} ${reps} \\

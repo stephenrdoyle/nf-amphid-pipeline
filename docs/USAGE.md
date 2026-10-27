@@ -21,8 +21,13 @@ nextflow run $NF -resume -bg \
     --samplesheet samplesheet.tsv \
     --runs        runs.tsv \
     --primers     primers.tsv \
+    --spiked \
     --outdir      results
 ```
+
+**`--spiked` only if the quantification standards went into every
+sample.** Leave it off for an unspiked run: calls are then presence /
+absence with no copy numbers. See §3.8.
 
 **LSF is the default, not opt-in.** A bare `nextflow run` submits to the
 farm. `-profile local` is the explicit opt-out, for a laptop or the head
@@ -373,12 +378,31 @@ edit `nextflow.config` — where it is a real boolean — or use a
 
 | parameter | default | meaning |
 |---|---|---|
+| `--spiked` | `false` | a flag: the quantification standards were added to every sample. Off, the run is unspiked |
 | `--min_depth` | `100` | below this a well is `assay_failed`, not negative |
 | `--absolute_floor` | `2` | a detection needs **more** reads than this, however clean the blanks |
 | `--permutations` | `2000` | permutations for the calibration test |
 | `--slope_tolerance` | `0.15` | deviation from a slope of 1 that earns a well a note; outside 0.5–2 copy numbers are withheld regardless |
 | `--min_composition_reads` | `100` | minimum reads to report composition |
 | `--replicate_suffix` | `null` | regex stripped from `sample_id` to pair replicates across runs, e.g. `'-r[0-9]+$'` |
+
+**`--spiked` decides what the run can report.** Without it - the
+default - the run is unspiked: calls are presence/absence, no copy
+numbers are given, every negative is unverified, and any standard reads
+that turn up are reported as carryover rather than fitted. With it,
+every well is calibrated against its standards, copy numbers are given,
+and a well missing its standards has failed (`assay_failed`), however
+many wells that is. The report follows suit: an unspiked report states
+once that the run was not spiked and leaves out quantification.
+
+Whether the standards went in is declared, not inferred. Inferring it -
+spiked if a quarter of wells recovered a standard - fails both ways: a
+run whose spikes mostly failed reads as unspiked, so real failures pass
+as unverified negatives, and carryover across a quarter of the plate
+reads as a spike. That rule survives only as a cross-check: when the
+reads disagree with the declaration, run QC and the report say so.
+`--spiked` with no `quant` entries in the reference is refused at
+pre-flight. The shell drivers take `SPIKED=1` for the same thing.
 
 `--min_depth` is worth checking against your actual depths. A fixture or
 a shallow run with wells below it will come back entirely

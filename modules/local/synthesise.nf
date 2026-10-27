@@ -58,6 +58,7 @@ process SYNTHESISE {
         --sample-metadata ${preflight_dir}/sample_metadata.tsv \\
         ${prep_arg} ${demux_arg} ${split_arg} \\
         --run-id ${run_id} \\
+        ${params.spiked ? '--spiked' : ''} \\
         --min-depth ${params.min_depth} \\
         --absolute-floor ${params.absolute_floor} \\
         --slope-tolerance ${params.slope_tolerance} \\

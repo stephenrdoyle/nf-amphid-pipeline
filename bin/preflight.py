@@ -2869,6 +2869,11 @@ def main(argv: list[str] | None = None) -> int:
         "per run",
     )
     ap.add_argument(
+        "--spiked", action="store_true",
+        help="the quantification standards were added to every sample; "
+             "checked here against the panel, applied in synthesis",
+    )
+    ap.add_argument(
         "--tag-max-edits",
         type=int,
         help="override the assay config's control_tag.max_edits",
@@ -2989,6 +2994,16 @@ def main(argv: list[str] | None = None) -> int:
     # -- reference panel --------------------------------------------------
     entries = parse_reference(args.reference, diag)
     validate_reference(entries, diag, assay)
+    # A run declared spiked must have standards in the panel to find, or
+    # synthesis would mark every well spike_failed and every call
+    # assay_failed - a whole plate lost to a missing reference row.
+    if args.spiked and entries and not any(
+            e.type == "quant" for e in entries):
+        diag.error(
+            "--spiked, but the reference has no quant entries - there are "
+            "no standards to recover, so every well would fail its spike. "
+            "Add the standards to the panel, or drop --spiked"
+        )
     if entries:
         write_combined_fasta(entries, args.outdir)
     primers = parse_primers(args.primers, diag) if args.primers else {}

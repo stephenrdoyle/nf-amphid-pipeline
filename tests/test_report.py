@@ -634,6 +634,52 @@ def test_report() -> None:
               "0.925" in doc2 and "0.831" in doc2)
         check("the section is absent when there is no paired run",
               "Agreement with the paired run" not in doc)
+
+        # --spiked decides which report is written. Unspiked (the default)
+        # says so once, drops quantification and the per-well internal
+        # control column; spiked keeps both; a declaration the reads
+        # disagree with is raised as a concern either way.
+        qc_path = os.path.join(synth, "run_qc.json")
+        qc0 = json.load(open(qc_path))
+
+        def render(decl, ic):
+            json.dump(dict(qc0, spike_declaration=decl,
+                           internal_control_summary=ic), open(qc_path, "w"))
+            outs = os.path.join(tmp, "report_spiked.html")
+            with contextlib.redirect_stdout(io.StringIO()):
+                R.main(["--synthesis-dir", synth, "--out", outs, "--quiet"])
+            return open(outs, encoding="utf-8").read()
+
+        try:
+            un = render({"spiked": False}, {"unspiked": 12})
+            check("unspiked: the report says the run was not spiked, once",
+                  un.count("This run was not spiked") == 1
+                  and "wells have no recovered standard" not in un)
+            check("unspiked: the header says presence/absence only",
+                  "unspiked: presence/absence only" in un)
+            q = un[un.index("<h2>Quantification</h2>"):]
+            check("unspiked: quantification is declared unavailable, "
+                  "with no slope or copies panels",
+                  "Not available" in q.split("<h2>", 2)[1]
+                  and "median slope" not in un
+                  and "Copies per unit DNA" not in un)
+            check("unspiked: no per-well internal control column",
+                  "<th>Internal control</th>" not in un)
+
+            sp = render({"spiked": True}, {"spiked": 12})
+            check("spiked: quantification and the internal control "
+                  "column are present",
+                  "median slope" in sp and "<th>Internal control</th>" in sp
+                  and "This run was not spiked" not in sp
+                  and "spiked: copy numbers given" in sp)
+
+            dis = render({"spiked": True,
+                          "note": "declared spiked, but only 1 of 8 wells"},
+                         {"spiked": 1, "spike_failed": 7})
+            check("a declaration the reads disagree with is a concern",
+                  "disagree" in dis and "only 1 of 8 wells" in dis)
+        finally:
+            json.dump(qc0, open(qc_path, "w"))
         check("failed wells left out of agreement are counted",
               "6 paired observation(s) had an assay_failed well" in doc2)
         check("'most found by the deeper run' when it is so",

@@ -194,7 +194,8 @@ def test_calls() -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             S.main(["--assign-dir", adir, "--samplesheet", ss,
                     "--reference", ref, "--outdir", out,
-                    "--run-id", "RUN01", "--permutations", "20", "--quiet"])
+                    "--run-id", "RUN01", "--permutations", "20", "--quiet",
+                    "--spiked"])
         calls = {r["sample_id"]: r for r in csv.DictReader(
             open(os.path.join(out, "calls.tsv")), delimiter="\t")}
 
@@ -384,7 +385,8 @@ def test_implausible_slope_and_missing_blanks() -> None:
         with contextlib.redirect_stdout(io.StringIO()):
             S.main(["--assign-dir", adir, "--samplesheet", ss,
                     "--reference", ref, "--outdir", out,
-                    "--run-id", "RUN01", "--permutations", "20", "--quiet"])
+                    "--run-id", "RUN01", "--permutations", "20", "--quiet",
+                    "--spiked"])
         calls = {r["sample_id"]: r for r in csv.DictReader(
             open(os.path.join(out, "calls.tsv")), delimiter="\t")}
         qc = json.load(open(os.path.join(out, "run_qc.json")))
@@ -520,7 +522,7 @@ def synth(tmp: str, reference: str, out: str):
                 "--reference", reference,
                 "--preflight-dir", os.path.join(tmp, "preflight"),
                 "--outdir", out, "--run-id", "RUN01",
-                "--permutations", "200", "--quiet"])
+                "--permutations", "200", "--quiet", "--spiked"])
     return list(csv.DictReader(open(os.path.join(out, "calls.tsv")),
                                delimiter="\t"))
 
@@ -534,7 +536,8 @@ def synth_with(tmp: str, reference: str, out: str, extra):
                 "--reference", reference,
                 "--preflight-dir", os.path.join(tmp, "preflight"),
                 "--outdir", out, "--run-id", "RUN01",
-                "--permutations", "200", "--quiet"] + list(extra))
+                "--permutations", "200", "--quiet", "--spiked"]
+               + list(extra))
     with open(os.path.join(out, "calls.tsv"), encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))
     with open(os.path.join(out, "run_qc.json"), encoding="utf-8") as fh:
@@ -1309,6 +1312,110 @@ def test_cohort_completeness() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_spiked_is_declared() -> None:
+    """--spiked declares that the standards went in; nothing is inferred.
+
+    Unspiked is the default. The reads used to decide it - spiked if a
+    quarter of wells recovered a standard - and that guess fails both
+    ways, so both plates are built here: a spiked run whose spikes mostly
+    failed, and an unspiked run with carryover in a third of the wells.
+    The declaration decides each; the reads only raise a note when they
+    disagree with it.
+    """
+    print("\n--spiked: declared, not inferred")
+
+    def run(tmp, rows, spiked):
+        ref = os.path.join(tmp, "reference.tsv")
+        with open(ref, "w") as fh:
+            fh.write("seq_id\tlocus\ttype\tpurpose\ttaxon\tparent_id\t"
+                     "default_conc\tconc_units\tcorr_factor\tsequence\n")
+            fh.write("T1\tITS2\ttarget\tspeciation\tSpecies_a\t\t\t\t\tACGT\n")
+            fh.write("QUANT_hi\tITS2\tquant\t\t\t\t10000\tcopies_per_rxn\t1.0\tACGT\n")
+            fh.write("QUANT_lo\tITS2\tquant\t\t\t\t100\tcopies_per_rxn\t1.0\tACGT\n")
+        ss = os.path.join(tmp, "samplesheet.csv")
+        with open(ss, "w") as fh:
+            fh.write("run_id,platform,sample_id,index_i7,index_i5,sample_type\n")
+            for sid in rows:
+                fh.write(f"RUN01,illumina,{sid},A,B,unknown\n")
+        adir = os.path.join(tmp, "assign")
+        shutil.rmtree(adir, ignore_errors=True)
+        os.makedirs(adir)
+        for sid, counts in rows.items():
+            with open(os.path.join(adir, f"{sid}.counts.tsv"), "w") as fh:
+                fh.write("sample_id\tseq_id\tlocus\ttype\tpurpose\ttaxon\t"
+                         "reads\tunique_seqs\n")
+                for k, v in counts.items():
+                    fh.write(f"{sid}\t{k}\tITS2\t-\t-\t-\t{v}\t1\n")
+            with open(os.path.join(adir, f"{sid}.assign.json"), "w") as fh:
+                json.dump({"sample_id": sid, "sequences_in": 1000}, fh)
+        out = os.path.join(tmp, f"synth_{spiked}")
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(["--assign-dir", adir, "--samplesheet", ss,
+                    "--reference", ref, "--outdir", out,
+                    "--run-id", "RUN01", "--permutations", "20", "--quiet"]
+                   + (["--spiked"] if spiked else []))
+        calls = {r["sample_id"]: r for r in csv.DictReader(
+            open(os.path.join(out, "calls.tsv")), delimiter="\t")}
+        cal = {r["sample_id"]: r for r in csv.DictReader(
+            open(os.path.join(out, "calibration.tsv")), delimiter="\t")}
+        qc = json.load(open(os.path.join(out, "run_qc.json")))
+        return calls, cal, qc
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # A spiked plate where the spike survived in one well of eight.
+        mostly_failed = {"OK": {"T1": 400, "QUANT_hi": 1000, "QUANT_lo": 10}}
+        for i in range(7):
+            mostly_failed[f"W{i}"] = {"T1": 0, "QUANT_hi": 0, "QUANT_lo": 0}
+
+        calls, _, qc = run(tmp, mostly_failed, True)
+        check("--spiked makes a well without standards a failure, however "
+              "many there are",
+              calls["W0"]["call"] == "assay_failed"
+              and calls["W0"]["internal_control"] == "spike_failed",
+              f"{calls['W0']['call']} {calls['W0']['internal_control']}")
+        check("the well that kept its spike calibrates and gets copies",
+              calls["OK"]["internal_control"] == "spiked"
+              and calls["OK"]["copies_per_unit_dna"] != "")
+        check("and the reads' disagreement is noted, not obeyed",
+              qc["spike_declaration"]["spiked"] is True
+              and "most wells lost it" in qc["spike_declaration"].get("note", ""),
+              str(qc["spike_declaration"]))
+
+        # An unspiked plate with carryover in three wells of eight.
+        carry = {f"W{i}": {"T1": 400 if i == 0 else 0,
+                           "QUANT_hi": 50 if i < 3 else 0, "QUANT_lo": 0}
+                 for i in range(8)}
+
+        calls, cal, qc = run(tmp, carry, False)
+        check("without --spiked every well is unspiked",
+              {r["internal_control"] for r in calls.values()} == {"unspiked"},
+              str({r["internal_control"] for r in calls.values()}))
+        check("so a clean well is an unverified negative, not a failure",
+              calls["W5"]["call"] == "not_detected"
+              and "unverified" in calls["W5"]["basis"], calls["W5"]["basis"])
+        check("a detection still stands, with no copy number",
+              calls["W0"]["call"] == "detected"
+              and calls["W0"]["copies_per_unit_dna"] == "")
+        check("no copy number is fitted to carryover anywhere",
+              all(r["copies_per_unit_dna"] == "" for r in calls.values()))
+        check("the stray standard reads are named as carryover",
+              "carryover" in cal["W0"]["note"], cal["W0"]["note"])
+        check("and run QC records it, suggesting --spiked if it was spiked",
+              qc["spike_declaration"]["spiked"] is False
+              and qc["spike_declaration"]["wells_with_standard"] == 3
+              and "--spiked" in qc["spike_declaration"].get("note", ""),
+              str(qc["spike_declaration"]))
+
+        clean = {f"W{i}": {"T1": 0, "QUANT_hi": 0, "QUANT_lo": 0}
+                 for i in range(4)}
+        _, _, qc = run(tmp, clean, False)
+        check("an unspiked run with no standard reads raises no note",
+              "note" not in qc["spike_declaration"],
+              str(qc["spike_declaration"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 def main() -> int:
     test_calibration()
     test_read_funnel()
@@ -1316,6 +1423,7 @@ def main() -> int:
     test_detection_limit()
     test_calls()
     test_implausible_slope_and_missing_blanks()
+    test_spiked_is_declared()
     test_permutation_calibration()
     test_end_to_end()
     test_cohort_completeness()

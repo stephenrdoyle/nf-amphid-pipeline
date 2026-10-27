@@ -399,14 +399,14 @@ class Calibration:
 
 
 def run_was_spiked(samples: dict, quants: list, min_reads: int) -> bool:
-    """Was this run spiked at all?
+    """Do the reads LOOK like a spiked run - a quarter of wells or more
+    recovering a standard?
 
-    A single well cannot answer this. No standard reads means either the
-    spike was omitted or it failed, and those call for opposite
-    conclusions: the first makes a negative unverified, the second makes
-    the well unusable. The run can answer it - if most wells recovered
-    their standards, the few that did not have failed, whereas if none did,
-    the protocol simply did not include a spike.
+    Advisory only. This rule once decided whether a run was spiked, and it
+    misreads a run whose spikes mostly failed and a run with widespread
+    carryover. Whether the standards went in is now declared with
+    --spiked; this only checks the declaration against the reads (see
+    spike_declaration).
     """
     if not quants:
         return False
@@ -415,6 +415,66 @@ def run_was_spiked(samples: dict, quants: list, min_reads: int) -> bool:
         if any(s.counts.get(q["seq_id"], 0) >= min_reads for q in quants):
             hits += 1
     return hits >= max(1, 0.25 * len(samples))
+
+
+def spike_declaration(spiked: bool, samples: dict, quants: list,
+                      min_reads: int) -> dict:
+    """Record whether the run was spiked, and whether the reads agree.
+
+    Whether the standards went in is a fact of the protocol, so it is
+    declared with --spiked and never inferred. Inferring it from the
+    reads - spiked if a quarter of wells recovered a standard - was the
+    only route once, and it fails both ways: a run whose spikes mostly
+    failed reads as never spiked, so real failures pass as unverified
+    negatives, and carryover across a quarter of the plate reads as a
+    spike, so every clean well fails.
+
+    The same rule survives here only as a cross-check. It decides
+    nothing, but a declaration the reads disagree with is worth seeing:
+    few standards on a run declared spiked is a run-wide spike failure,
+    and many on a run declared unspiked is carryover - or a run that was
+    spiked and is missing --spiked.
+    """
+    with_std = sum(
+        1 for s in samples.values()
+        if any(s.counts.get(q["seq_id"], 0) >= min_reads for q in quants))
+    looks_spiked = run_was_spiked(samples, quants, min_reads)
+    decision = {
+        "spiked": spiked,
+        "source": "--spiked" if spiked else "default: --spiked not given",
+        "wells_with_standard": with_std,
+        "wells": len(samples),
+    }
+    if spiked and not looks_spiked:
+        decision["note"] = (
+            f"declared spiked, but only {with_std} of {len(samples)} wells "
+            "recovered a standard. If the spike really was added, most "
+            "wells lost it - and those wells are assay_failed."
+        )
+    elif not spiked and looks_spiked:
+        decision["note"] = (
+            f"not declared spiked, but {with_std} of {len(samples)} wells "
+            "carry standard reads. If the standards were added, rerun with "
+            "--spiked to get copy numbers and verified negatives; if not, "
+            "this is carryover."
+        )
+    return decision
+
+
+def undeclared_standards(s: Sample, quants: list,
+                         min_reads: int) -> "Calibration":
+    """A well on an unspiked run (no --spiked).
+
+    Never calibrated, whatever standard reads it holds. Fitting a curve to
+    standards that were not added would turn carryover into copy numbers,
+    so the reads are counted, named as contamination, and left alone.
+    """
+    stray = sum(s.counts.get(q["seq_id"], 0) for q in quants)
+    note = "run not spiked (no --spiked) - every negative is unverified"
+    if stray >= min_reads:
+        note += (f"; {stray} standard reads present anyway, treated as "
+                 "carryover rather than a calibration")
+    return Calibration(s.sample_id, state="unspiked", note=note)
 
 
 def calibrate(
@@ -454,9 +514,9 @@ def calibrate(
         if run_spiked:
             cal.state = "spike_failed"
             cal.note = (
-                "no standard recovered, on a run where most wells recovered "
-                "theirs - this well failed rather than going unspiked, so "
-                "nothing in it can be called negative"
+                "no standard recovered on a run declared spiked (--spiked) "
+                "- this well failed rather than going unspiked, so nothing "
+                "in it can be called negative"
             )
         else:
             cal.state = "unspiked"
@@ -1183,6 +1243,14 @@ def main(argv=None) -> int:
                          "from 1 before it is noted. Copy numbers are only "
                          "withheld outside the wider plausible band "
                          f"{SLOPE_PLAUSIBLE[0]:g}-{SLOPE_PLAUSIBLE[1]:g}")
+    ap.add_argument("--spiked", action="store_true",
+                    help="the quantification standards were added to every "
+                         "sample on this run. Calibrates each well against "
+                         "them, gives copy numbers, and treats a well "
+                         "missing its standards as FAILED (assay_failed). "
+                         "Without it the run is unspiked: no copy numbers, "
+                         "every negative unverified, and any standard reads "
+                         "are reported as carryover")
     ap.add_argument("--permutations", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument(
@@ -1267,10 +1335,16 @@ def main(argv=None) -> int:
     rng = random.Random(args.seed)
 
     # -- calibration ------------------------------------------------------
-    spiked_run = run_was_spiked(samples, quants, args.min_quant_reads)
-    cals = {sid: calibrate(s, quants, args.min_quant_reads,
-                           args.slope_tolerance, spiked_run)
-            for sid, s in samples.items()}
+    spiked_run = args.spiked
+    spike_decision = spike_declaration(
+        spiked_run, samples, quants, args.min_quant_reads)
+    if spiked_run:
+        cals = {sid: calibrate(s, quants, args.min_quant_reads,
+                               args.slope_tolerance, True)
+                for sid, s in samples.items()}
+    else:
+        cals = {sid: undeclared_standards(s, quants, args.min_quant_reads)
+                for sid, s in samples.items()}
 
     # -- detection limits -------------------------------------------------
     seq_ids = [r["seq_id"] for r in targets + controls]
@@ -1552,6 +1626,7 @@ def main(argv=None) -> int:
             ),
         },
         "run_was_spiked": spiked_run,
+        "spike_declaration": spike_decision,
         "internal_control_summary": dict(
             Counter(c.state for c in cals.values())),
         "internal_control_meaning": INTERNAL_MEANING,

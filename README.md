@@ -799,14 +799,20 @@ Shallow blanks still set the absolute floor.
 
 `not_detected` is a claim about the sample. It is only available when the
 well could have produced a positive, and the spike-ins are what establish
-that. A well whose standards are missing is `assay_failed`, never
-`not_detected`.
+that. On a spiked run, a well whose standards are missing is
+`assay_failed`, never `not_detected`.
 
-Distinguishing "the spike failed" from "there was no spike" is impossible
-within one well — both give zero standard reads — but easy across a run. If
-most wells recovered their standards, the few that did not have failed; if
-none did, the protocol did not include a spike and every negative on the
-run is reported as unverified.
+Not every run is spiked, and "the spike failed" and "there was no spike"
+look identical within one well - both give zero standard reads. So it is
+declared. Without `--spiked`, the default, the run is unspiked: calls are
+presence/absence, negatives are reported as unverified, there are no copy
+numbers, and the report leaves quantification out. With `--spiked`, every
+well is calibrated and a well missing its standards is a failure. Reads
+once decided this - spiked if a quarter of wells recovered a standard -
+and that was wrong in both directions at the margins: a run whose spikes
+mostly failed read as unspiked, and carryover across a quarter of the
+plate read as a spike. The rule now only raises a note when the reads
+disagree with what was declared.
 
 ## Plate-position QC, and what it is worth
 

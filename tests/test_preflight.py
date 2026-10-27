@@ -2123,6 +2123,39 @@ def test_index_length_reaches_the_splitter() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_spiked_needs_standards() -> None:
+    """--spiked is refused when the panel has no standards to find.
+
+    Synthesis would otherwise mark every well spike_failed and every call
+    assay_failed - a whole plate lost to a missing reference row.
+    """
+    print("\n--spiked needs standards in the panel")
+    import json
+
+    def no_quants(ref):
+        return [r for r in ref if r["type"] != "quant"]
+
+    for spiked, expect_ok, ref_mut, label in (
+            (True, False, no_quants, "--spiked without quants is refused"),
+            (False, True, no_quants, "an unspiked run without quants passes"),
+            (True, True, None, "--spiked with quants passes")):
+        tmp = tempfile.mkdtemp()
+        try:
+            ref, ss, runs = build_case(tmp, mutate_ref=ref_mut)
+            code = pf.main(["--reference", ref, "--samplesheet", ss,
+                            "--runs", runs, "--index-map", INDEX_MAP,
+                            *(["--spiked"] if spiked else []),
+                            "--outdir", os.path.join(tmp, "out")])
+            with open(os.path.join(tmp, "out", "preflight_summary.json"),
+                      encoding="utf-8") as fh:
+                errs = json.load(fh)["errors"]
+            hit = any("--spiked, but" in e for e in errs)
+            check(label, (code == 0 and not hit) if expect_ok
+                  else (code != 0 and hit), f"exit {code}, {errs[:2]}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_swapped_index_columns()
@@ -2148,6 +2181,7 @@ def main() -> int:
     test_subject_metadata()
     test_one_run_per_invocation()
     test_index_length_reaches_the_splitter()
+    test_spiked_needs_standards()
     test_relative_input_dir()
     test_excel_bom()
     test_illumina_file_matching()

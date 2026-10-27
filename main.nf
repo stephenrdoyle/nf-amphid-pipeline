@@ -48,6 +48,9 @@ def helpMessage() {
                          (default: assets/assay/ampseq_helminth.json)
       --index_map        Index primer map (default: assets/index_map.tsv)
       --barcode_repeats  Override the assay's tandem index count (1 or 2)
+      --spiked           The quantification standards were added to every
+                         sample: calibrate, give copy numbers, and fail
+                         wells missing them (default: unspiked)
       --tag_max_edits    Override the assay's tag matching tolerance
       --expected_tag     Override the assay's control tag sequence
       --outdir           Results directory (default: ./results)
@@ -80,6 +83,12 @@ workflow {
     }
     if (params.platform && !(params.platform in ['illumina', 'nanopore'])) {
         problems << "--platform must be illumina or nanopore"
+    }
+    // A flag, so its value must be a boolean. `--spiked yes` would arrive
+    // as the string 'yes' - truthy in Groovy, so it would quietly work,
+    // and `--spiked no` would quietly mean spiked.
+    if (!(params.spiked instanceof Boolean)) {
+        problems << "--spiked is a flag: give it with no value (got '${params.spiked}')"
     }
     if (problems) {
         log.error "Cannot start:\n  " + problems.join("\n  ")

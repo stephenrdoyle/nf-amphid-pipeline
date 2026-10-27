@@ -14,6 +14,13 @@
 #
 # adds the grouping file, which is what produces group_summary.tsv.
 # Without it the run is still grouped by subject_id.
+#
+#   SPIKED=1 bin/run_illumina.sh ...
+#
+# declares that the quantification standards were added, as --spiked
+# does for the workflow: wells are calibrated and given copy numbers,
+# and a well missing its standards has failed. Without it the run is
+# unspiked.
 
 set -euo pipefail
 
@@ -58,6 +65,7 @@ python3 "$HERE/preflight.py" \
     --reference "$REF" --samplesheet "$SS" --runs "$RUNS" \
     --primers "$PRIMERS" --index-map "$IDXMAP" --assay "$ASSAY" \
     ${METADATA:+--metadata "$METADATA"} \
+    ${SPIKED:+--spiked} \
     --outdir "$OUT/preflight"
 
 # Pre-flight resolves every sample to its files and checks they exist, so
@@ -104,6 +112,7 @@ python3 "$HERE/synthesise.py" \
     --samplesheet "$SS" --reference "$REF" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
     --sample-metadata "$OUT/preflight/sample_metadata.tsv" \
+    ${SPIKED:+--spiked} \
     ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
     ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
     --outdir "$OUT/synthesis"

@@ -19,6 +19,10 @@
 #   THREADS=16 bin/run_nanopore.sh ...
 #   METADATA=metadata.tsv bin/run_nanopore.sh ...
 #
+# SPIKED=1 declares that the quantification standards were added, as
+# --spiked does for the workflow; without it the run is unspiked. The
+# test_ont profile sets spiked, so compare against it with SPIKED=1.
+#
 # MIN_DEPTH and PERMUTATIONS pass through to synthesis. They exist here
 # because the driver otherwise hardcodes what Nextflow exposes as
 # params, and the two then cannot be compared like for like: run the
@@ -76,6 +80,7 @@ python3 "$HERE/preflight.py" \
     --reference "$REF" --samplesheet "$SS" --runs "$RUNS" \
     --primers "$PRIMERS" --index-map "$IDXMAP" --assay "$ASSAY" \
     ${METADATA:+--metadata "$METADATA"} \
+    ${SPIKED:+--spiked} \
     --outdir "$OUT/preflight"
 
 RES="$OUT/preflight/file_resolution.tsv"
@@ -232,6 +237,7 @@ python3 "$HERE/synthesise.py" \
     --samplesheet "$SS" --reference "$REF" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
     --sample-metadata "$OUT/preflight/sample_metadata.tsv" \
+    ${SPIKED:+--spiked} \
     ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
     ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
     ${MIN_DEPTH:+--min-depth "$MIN_DEPTH"} \
