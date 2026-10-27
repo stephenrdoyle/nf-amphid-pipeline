@@ -957,17 +957,19 @@ def build(args) -> str:
     # locus for variant calling would otherwise count a species twice, with
     # a denominator mixing loci at different copy numbers.
     #
-    # And only targets. With --controls-as-targets the control plasmids
-    # get calls rows too, and synthesis gives them the default purpose of
-    # speciation - so they passed the test above and their reads went into
-    # every sample's denominator, shrinking each species' share by however
-    # much plasmid the well held. Synthesis already keeps the two apart
+    # And only targets - except in a mock. Control plasmids get calls rows
+    # only in mock wells, which are built from them, and there they ARE
+    # the composition: a mock drawn without them would be an empty bar.
+    # Anywhere else plasmid is contamination and must stay out of the
+    # denominator, or every species' share shrinks by however much plasmid
+    # the well held; synthesis keeps the two apart the same way
     # (fraction_of_group is within targets or within controls, never
-    # across); the picture has to agree with the table. A calls.tsv from
-    # before reference_type existed has only targets, hence the default.
+    # across). A calls.tsv from before reference_type existed has only
+    # targets, hence the default.
     spec = [c for c in calls
             if "speciation" in (c.get("purpose") or "speciation")
-            and (c.get("reference_type") or "target") != "control"]
+            and ((c.get("reference_type") or "target") != "control"
+                 or c.get("sample_type") == "mock")]
     comp: dict = {}
     denom: dict = {}
     totals: Counter = Counter()
@@ -1133,27 +1135,38 @@ def build(args) -> str:
         share = pc["run_plasmid_share"]
         thr = pc.get("warn_above", 0.05)
         parts.append("<h2>Control plasmid</h2>")
-        mode = ("called as targets - the plasmids are the subject of this run"
-                if pc.get("controls_called_as_targets")
-                else "treated as contamination")
         parts.append(
             f"<p>{flag('warn' if share > thr else 'ok', f'{100*share:.2f}%')} "
-            "of panel amplicon reads across the run came from tagged control "
-            f"plasmid. They are {esc(mode)}.</p>")
+            "of panel amplicon reads in the run's non-mock wells came from "
+            "tagged control plasmid. There it is contamination, recognised "
+            "by its tag and never called as a finding. Mock wells are built "
+            "from these plasmids, so in them the plasmids are called like "
+            "targets and left out of this figure.</p>")
         n_over = pc.get("n_wells_above_threshold", 0)
         if n_over:
             parts.append(
                 f"<p>{flag('warn', str(n_over))} well(s) are above "
                 f"{100*thr:.0f}%. The worst:</p>")
+            worst = pc.get("wells_above_threshold", [])[:10]
+            # Copies exist only on a spiked run; the column is shown only
+            # when at least one well has them.
+            has_copies = any(w.get("plasmid_copies") is not None
+                             for w in worst)
             parts.append("<table><thead><tr><th>Well</th><th>Sample</th>"
                          "<th>Type</th><th class='num'>Plasmid share</th>"
-                         "</tr></thead><tbody>")
-            for w in pc.get("wells_above_threshold", [])[:10]:
+                         + ("<th class='num'>Plasmid copies</th>"
+                            if has_copies else "")
+                         + "</tr></thead><tbody>")
+            for w in worst:
+                pcp = w.get("plasmid_copies")
                 parts.append(
                     f"<tr><td>{esc(w.get('well') or '')}</td>"
                     f"<td>{esc(w['sample_id'])}</td>"
                     f"<td>{esc(w.get('sample_type') or '')}</td>"
-                    f"<td class='num'>{100*w['plasmid_share']:.1f}%</td></tr>")
+                    f"<td class='num'>{100*w['plasmid_share']:.1f}%</td>"
+                    + (f"<td class='num'>{'' if pcp is None else fmt(round(pcp))}</td>"
+                       if has_copies else "")
+                    + "</tr>")
             parts.append("</tbody></table>")
         else:
             parts.append(f'<p class="note">No well exceeds {100*thr:.0f}%.</p>')

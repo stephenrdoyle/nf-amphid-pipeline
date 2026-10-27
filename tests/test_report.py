@@ -280,9 +280,9 @@ def test_failed_wells_are_not_agreement() -> None:
 def test_controls_and_groups_in_the_report() -> None:
     """Three rendering faults, each reading one thing as another.
 
-    With --controls-as-targets the plasmid rows carry purpose speciation,
-    so they entered every sample's composition denominator and a well
-    that was all one species drew it at half. The group table headed
+    Plasmid rows carry purpose speciation, so they entered every
+    sample's composition denominator and a well that was all one species
+    drew it at half - outside a mock, where they are contamination. The group table headed
     n_analysed as "Libraries". And a well whose standard curve was
     implausible lost its copy numbers without the opening section saying.
     """
@@ -296,8 +296,8 @@ def test_controls_and_groups_in_the_report() -> None:
         for c in calls:
             c["reference_type"] = "target"
             if c["seq_id"] == "T1":
-                # a plasmid row exactly as synthesis writes one under
-                # --controls-as-targets: same purpose, its own type
+                # a plasmid row exactly as synthesis writes one in a
+                # mock well: same purpose, its own type
                 extra.append(dict(c, seq_id="CTRL1", taxon="Plasmid_X",
                                   reference_type="control",
                                   reads=c["reads"]))
@@ -335,6 +335,30 @@ def test_controls_and_groups_in_the_report() -> None:
               shares and max(shares) == 100.0, str(shares[:6]))
         check("the plasmid is not part of the target composition",
               "Plasmid_X" not in comp, "plasmid drawn in the composition")
+
+        # In a mock the plasmids ARE the composition: it is built from
+        # them, and without them its bar would be empty.
+        mock_sid = calls[0]["sample_id"]
+        typed = [dict(r, sample_type="mock") if r["sample_id"] == mock_sid
+                 else r for r in calls + extra]
+        with open(cpath, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(calls[0]),
+                               delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerows(typed)
+        out_m = os.path.join(tmp, "report_mock.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            R.main(["--synthesis-dir", synth, "--out", out_m, "--quiet"])
+        doc_m = open(out_m, encoding="utf-8").read()
+        comp_m = doc_m[doc_m.index("<h2>Composition</h2>"):]
+        comp_m = comp_m[:comp_m.index("<h2>", 10)]
+        check("in a mock well the plasmid is drawn in the composition",
+              "Plasmid_X" in comp_m, "mock composition omits its plasmid")
+        with open(cpath, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(calls[0]),
+                               delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerows(calls + extra)
 
         grp = doc[doc.index("<h2>By group</h2>"):]
         grp = grp[:grp.index("</table>")]

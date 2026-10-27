@@ -84,10 +84,12 @@ workflow {
     if (params.platform && !(params.platform in ['illumina', 'nanopore'])) {
         problems << "--platform must be illumina or nanopore"
     }
-    // A flag, so its value must be a boolean. `--spiked yes` would arrive
-    // as the string 'yes' - truthy in Groovy, so it would quietly work,
-    // and `--spiked no` would quietly mean spiked.
-    if (!(params.spiked instanceof Boolean)) {
+    // A flag. Compared as text, never by truthiness: from Nextflow 26.04
+    // every command-line parameter arrives as a string, so a bare
+    // --spiked may be 'true' rather than true, and --spiked false is the
+    // string 'false' - truthy in Groovy, so it would quietly mean spiked.
+    // Anything but true or false (e.g. --spiked yes) is refused.
+    if (!(params.spiked.toString().toLowerCase() in ['true', 'false'])) {
         problems << "--spiked is a flag: give it with no value (got '${params.spiked}')"
     }
     if (problems) {

@@ -326,53 +326,43 @@ On the real MinION run this affected 41.6% of reads.
 
 | parameter | default | meaning |
 |---|---|---|
-| `--controls_as_targets` | `false` | give control plasmids detection calls too |
-| `--plasmid_warn` | `0.05` | plasmid share above which a well is flagged |
+| `--plasmid_warn` | `0.05` | plasmid share above which a non-mock well is flagged |
 
-By default control plasmids are contamination and their share of each
-well is reported. Set `--controls_as_targets` on a run whose *subject* is
-the plasmids — a titration, or a mock-only pool. **The proportions are
-emitted either way**; the flag changes calling only, because a plasmid in
-a titration is the measurement and the same plasmid in a faecal sample is
-contamination.
+The tagged control plasmids are handled **per well, by `sample_type`**.
 
-**What the flag changes downstream, which is easy to miss.** `calls.tsv`
-contains one row per (sample, *called* reference), so the flag doubles
-its size on a panel with equal targets and controls — and every count
-built from it moves with that. On an 88-sample plate with 11 targets and
-11 controls:
+- **In a `mock` well they are the content.** A mock is assembled from
+  the plasmids, so it is processed like any sample and its plasmids are
+  called, counted and - on a `--spiked` run - quantified, exactly as
+  targets are. Its composition chart shows them. Its near-total plasmid
+  share is expected, so it is never flagged as contaminated.
+- **In every other well they are contamination**, recognised by the
+  tag. They are never called as a finding. Each well's `plasmid_share`
+  (plasmid reads over all panel amplicon reads) is in `calls.tsv`, and on
+  a spiked run so is `plasmid_copies` - the contaminating plasmid in
+  copies, on the same scale as the targets. Wells above `--plasmid_warn`
+  are listed in run QC and the report, which also give the run-wide
+  share across non-mock wells.
 
-| | rows in `calls.tsv` | `detected + not_detected` per 19-library arm |
-|---|---|---|
-| flag off | 968 | 209 |
-| flag on | 1,936 | 418 |
+A plasmid titration, or any plate whose subject is the plasmids, types
+those wells as `mock`. The run-wide switch this replaces could only get
+one of the two right on a plate holding both mocks and field samples: off, every mock came out empty and flagged;
+on, carryover in a field sample was called as a detection.
 
-So `detection_rate` is **not** comparable between a run with the flag and
-one without — the denominator is a different set of references. Compare
-the `detected` counts, or the per-reference rows in `calls.tsv`, not the
-headline rate.
+**What this means for counts built from `calls.tsv`.** It holds one row
+per (sample, *called* reference): targets in every well, plus the control
+plasmids in mock wells. `group_summary.tsv` counts everything in it,
+with no filter on `reference_type` - so a group containing mocks pools
+plasmid calls (the mock's content) with target calls. Split by
+`reference_type` or `sample_type` in `calls.tsv` when that matters.
 
-`group_summary.tsv` counts **everything** in `calls.tsv`, with no filter
-on `reference_type`. That is deliberate: the decision about what counts
-as a result is made once, here, by this flag. A version that re-filtered
-to `reference_type == "target"` shipped briefly and was wrong — on a
-plasmid plate it discarded every real call and reported a detection rate
-built from whichever genuine targets happened to be present.
-
-One consequence worth knowing when you read the result: with the flag on,
-`detection_rate` pools target and control calls into one number, and on a
-plasmid plate those mean opposite things — a plasmid detection is the
-measurement, a target detection is contamination. Split them by
-`reference_type` in `calls.tsv` when that distinction matters.
-
-**You cannot turn this off from the command line.** A bare
-`--controls_as_targets` sets it to `true`, which is what you want; but
-`--controls_as_targets false` sets the *string* `"false"`, which is
-truthy in Groovy and switches it **on**. This worsened in Nextflow
-26.04+, where every CLI parameter arrives as a string. To disable it,
-edit `nextflow.config` — where it is a real boolean — or use a
-`-params-file`, which preserves types. The same trap applies to
-`--include_failed` and `--allow_missing`.
+**Flags on the command line.** From Nextflow 26.04 every command-line
+parameter arrives as a string, so `--include_failed false` or
+`--allow_missing false` is the *string* `"false"` - truthy in Groovy,
+and it switches the option **on**. Give a flag bare to turn it on and
+leave it off to turn it off; to set one explicitly, use
+`nextflow.config` or a `-params-file`, which preserve types. `--spiked`
+is compared as text, so `--spiked false` does mean unspiked and
+`--spiked yes` is refused.
 
 ### 3.8 Calling and run QC
 
@@ -699,7 +689,7 @@ actual depths in `calls.tsv`.
 ran, rather than what you typed:
 
 ```bash
-grep -l "controls-as-targets" work/*/*/.command.sh
+grep -l -- "--spiked" work/*/*/.command.sh
 ```
 
 `.command.sh` is the rendered script for one task, so it settles whether
@@ -761,7 +751,7 @@ THREADS=16 bin/run_nanopore.sh results reference.tsv samplesheet.tsv runs.tsv pr
 Predate the Nextflow layer and are kept because every stage in them has
 been executed on real data. They are single-platform, take positional
 arguments, and reimplement in shell what `-resume` does properly. The
-nanopore driver takes `THREADS`, `CONTROLS_AS_TARGETS`, `PLASMID_WARN`,
+nanopore driver takes `THREADS`, `SPIKED`, `PLASMID_WARN`,
 `MIN_DEPTH`, `PERMUTATIONS`, `METADATA` and `RUN_ID` from the
 environment.
 

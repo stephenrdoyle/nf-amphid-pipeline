@@ -96,6 +96,11 @@ SLOPE_PLAUSIBLE = (0.5, 2.0)
 
 NEGATIVE_TYPES = {"neg_ntc", "neg_extraction", "blank", "negative"}
 
+# Wells whose content IS the tagged control plasmids. A mock is assembled
+# from them, so in a mock the plasmids are called and quantified like
+# targets; in every other well they are contamination.
+PLASMID_WELLS = {"mock"}
+
 # Amplification efficiency relative to the standards, when the panel does
 # not state one. Unity is the right default - it is what "no correction"
 # already meant arithmetically - but the output records that it was assumed
@@ -1019,10 +1024,10 @@ def group_summary(
     # Every row, with no filter on reference_type - and the absence of
     # that filter is the point.
     #
-    # calls.tsv is built by looping over `called`, which is targets, or
-    # targets plus controls when --controls-as-targets is set. So the
-    # decision about what counts as a result has already been made
-    # upstream, once, where it belongs. Re-applying it here looked like
+    # calls.tsv is built from the references called in each well - the
+    # targets, plus the control plasmids in a mock well, whose plasmids
+    # are its content. So the decision about what counts as a result has
+    # already been made upstream, once, where it belongs. Re-applying it here looked like
     # caution and was a bug: on a plate whose TEMPLATES are the control
     # plasmids, filtering to reference_type == "target" discards every
     # real call and reports a detection rate built from the handful of
@@ -1087,7 +1092,8 @@ def group_summary(
                 calls.update(detected_by.get(s, Counter()))
             states = Counter(cals[s].state for s in keep if s in cals)
             shares = [plasmid_share[s] for s in keep
-                      if plasmid_share.get(s) is not None]
+                      if plasmid_share.get(s) is not None
+                      and samples[s].sample_type not in PLASMID_WELLS]
 
             rows.append({
                 "run_id": run_id,
@@ -1253,15 +1259,6 @@ def main(argv=None) -> int:
                          "are reported as carryover")
     ap.add_argument("--permutations", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260919)
-    ap.add_argument(
-        "--controls-as-targets", action="store_true",
-        help="give the tagged control plasmids detection calls, as if they "
-             "were panel targets. For a run whose subject IS the plasmids - "
-             "a titration or a mock - they are the result, not "
-             "contamination. This changes CALLING only: the proportions "
-             "below are emitted either way, because what share of a well is "
-             "plasmid is worth knowing whichever kind of run it is",
-    )
     ap.add_argument("--plasmid-warn", type=float, default=0.05,
                     help="warn when this fraction of a well's amplicon reads "
                          "come from control plasmid")
@@ -1277,11 +1274,16 @@ def main(argv=None) -> int:
     quants = [r for r in refs if r.get("type") == "quant"]
     targets = [r for r in refs if r.get("type") == "target"]
     controls = [r for r in refs if r.get("type") == "control"]
-    # Calling is what the flag changes, and only that. A plasmid in a
-    # titration is the measurement; the same plasmid in a faecal sample is
-    # contamination. Nothing else about the arithmetic differs, so nothing
-    # else is made conditional on it.
-    called = targets + controls if args.controls_as_targets else targets
+    # What is called depends on the WELL, not the run. A mock is built
+    # from tagged control plasmids, so in a mock well the plasmids are the
+    # content: called, counted and quantified like targets. In any other
+    # well the same tagged reads are contamination - never called as a
+    # finding, measured instead as plasmid_share and plasmid_copies. A
+    # run-wide switch (--controls-as-targets, removed) could only get one
+    # of the two right on a plate that holds both.
+    def called_in(s_) -> list:
+        return targets + controls if s_.sample_type in PLASMID_WELLS \
+            else targets
 
     samples = load_counts(args.assign_dir)
     if not samples:
@@ -1367,13 +1369,33 @@ def main(argv=None) -> int:
         group_total[sid] = {"target": tsum, "control": csum}
         plasmid_share[sid] = (csum / (tsum + csum)) if (tsum + csum) else None
 
+    # Contaminating plasmid in copies, on the same scale as the targets -
+    # only where there is a scale (a calibrated well) and only where the
+    # plasmid IS contamination (not a mock). Summed per reference rather
+    # than inverted once from the pooled reads, because the curve is a
+    # power law and the inversion does not distribute over a sum.
+    plasmid_copies: dict[str, float | None] = {}
+    for sid, s_ in samples.items():
+        if s_.sample_type in PLASMID_WELLS or cals[sid].state != "spiked":
+            plasmid_copies[sid] = None
+            continue
+        tot = 0.0
+        for c in controls:
+            n = s_.counts.get(c["seq_id"], 0)
+            raw = cals[sid].copies(n) if n > 0 else None
+            if raw is not None:
+                cf = float((c.get("corr_factor") or "").strip()
+                           or DEFAULT_CORR_FACTOR)
+                tot += raw / cf
+        plasmid_copies[sid] = tot
+
     # -- calls ------------------------------------------------------------
     rows = []
     summary_calls: Counter = Counter()
     for sid in sorted(samples):
         s = samples[sid]
         cal = cals[sid]
-        for t in called:
+        for t in called_in(s):
             tid = t["seq_id"]
             kind = t.get("type") or "target"
             n = s.counts.get(tid, 0)
@@ -1435,6 +1457,11 @@ def main(argv=None) -> int:
                 # a sample: what share of its amplicons are plasmid.
                 "plasmid_share": ("" if plasmid_share[sid] is None
                                   else f"{plasmid_share[sid]:.4f}"),
+                # The same contamination in copies, on a spiked run. Empty
+                # in a mock, where the plasmids are the content and each
+                # has its own copies on its own row.
+                "plasmid_copies": ("" if plasmid_copies[sid] is None
+                                   else f"{plasmid_copies[sid]:.3f}"),
                 "detection_limit": limit,
                 "call": call,
                 "internal_control": cal.state,
@@ -1555,18 +1582,26 @@ def main(argv=None) -> int:
     funnel = read_funnel(samples, prep, demux, fate_totals, split)
 
     # -- QC ---------------------------------------------------------------
+    # Mock wells are left out of every contamination figure: plasmid is
+    # what they are made of, and counting it would flag every mock and
+    # inflate the run's share with the experiment itself.
+    contam = [sid for sid in samples
+              if samples[sid].sample_type not in PLASMID_WELLS]
     flagged = sorted(
         ({"sample_id": sid,
           "well": well_of(samples[sid].plate_row, samples[sid].plate_col),
           "sample_type": samples[sid].sample_type,
-          "plasmid_share": round(v, 4)}
-         for sid, v in plasmid_share.items()
-         if v is not None and v > args.plasmid_warn),
+          "plasmid_share": round(plasmid_share[sid], 4),
+          "plasmid_copies": (None if plasmid_copies[sid] is None
+                             else round(plasmid_copies[sid], 3))}
+         for sid in contam
+         if plasmid_share[sid] is not None
+         and plasmid_share[sid] > args.plasmid_warn),
         key=lambda d: -d["plasmid_share"])
-    all_t = sum(g["target"] for g in group_total.values())
-    all_c = sum(g["control"] for g in group_total.values())
+    all_t = sum(group_total[sid]["target"] for sid in contam)
+    all_c = sum(group_total[sid]["control"] for sid in contam)
     plasmid_qc = {
-        "controls_called_as_targets": args.controls_as_targets,
+        "controls_called_in": sorted(PLASMID_WELLS),
         "warn_above": args.plasmid_warn,
         "run_plasmid_share": (round(all_c / (all_t + all_c), 4)
                               if (all_t + all_c) else None),
@@ -1574,10 +1609,12 @@ def main(argv=None) -> int:
         "wells_above_threshold": flagged[:20],
         "note": (
             "Share of a well's panel amplicons coming from tagged control "
-            "plasmid. Reported whether or not the plasmids are being "
-            "called as targets, because the two are different questions: "
-            "one is what the plasmids show, the other is how much plasmid "
-            "is there at all."
+            "plasmid, in every well that is not a mock - there the plasmid "
+            "is contamination, recognised by its tag, and never called as "
+            "a finding. On a spiked run it is also given in copies "
+            "(plasmid_copies in calls.tsv). Mock wells are left out: they "
+            "are built from the plasmids, which are called in them like "
+            "targets."
         ),
     }
     taxa_for_qc = [t["seq_id"] for t in targets][:6]

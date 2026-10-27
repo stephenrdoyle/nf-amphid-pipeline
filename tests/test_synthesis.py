@@ -579,9 +579,12 @@ def test_end_to_end() -> None:
         check("and are unbiased overall", abs(med(errs)) < 0.10,
               f"median log10 ratio {med(errs):+.3f}")
 
-        # specificity: nothing in a blank or a mock
+        # specificity: no TARGET in a blank or a mock. The fixture's
+        # mocks are built from the control plasmids, which are called in
+        # them by design - those detections are the mock's content.
         bad = [c for c in calls
                if c["sample_type"] in ("neg_ntc", "neg_extraction", "mock")
+               and c["reference_type"] == "target"
                and c["call"] == "detected"]
         check("no target is detected in a blank or a mock", not bad,
               "; ".join(f"{c['sample_id']}/{c['seq_id']}" for c in bad[:3]))
@@ -619,8 +622,11 @@ def test_end_to_end() -> None:
                 un_by_ref[c["seq_id"]].append(
                     math.log10(float(c["copies_per_unit_dna"]) / t))
 
+        # Targets only: the mock plasmids' rows carry their own factors,
+        # and the fixture's panel gives the plasmids none.
+        calls_t = [c for c in calls if c["reference_type"] == "target"]
         check("the output records the factor it used and where it came from",
-              {c["corr_factor_source"] for c in calls} == {"panel"}
+              {c["corr_factor_source"] for c in calls_t} == {"panel"}
               and {c["corr_factor_source"] for c in un} == {"default"},
               f"{sorted({c['corr_factor_source'] for c in calls})} vs "
               f"{sorted({c['corr_factor_source'] for c in un})}")
@@ -784,50 +790,89 @@ def test_read_funnel() -> None:
 
 
 def test_control_plasmid_reporting() -> None:
-    """Plasmids are contamination or subject, and the flag decides only calls.
+    """Plasmids are a mock's content and everyone else's contamination.
 
-    A tagged control plasmid means two different things depending on the
-    run. In a faecal sample it is contamination, and the number that
-    matters is what share of the well it took. In a titration the
-    plasmids ARE the experiment and each needs a call of its own.
+    A mock is assembled from the tagged control plasmids, so in a mock
+    well they are the result: called, counted and quantified like
+    targets. In any other well the same tagged reads are contamination -
+    never called as a finding, measured as plasmid_share and, on a spiked
+    run, plasmid_copies. The choice is per WELL, by sample_type. A
+    run-wide switch did it before and could only get one of the two
+    right on a plate holding both.
 
-    What must NOT depend on the flag is arithmetic. Both proportions are
-    emitted either way - within a reference's own group, and plasmid as a
-    share of all panel amplicons - because a column whose denominator
-    changes with a command-line switch is a column that will be misread.
+    What must NOT change is anything about the other wells: typing one
+    well as a mock alters that well's rows and nothing else, and both
+    proportions keep their denominators.
     """
     print("\ncontrol plasmid reporting")
     tmp = tempfile.mkdtemp()
     try:
         build_run(tmp)
         ref = os.path.join(tmp, "reference.tsv")
-        off, qoff = synth_with(tmp, ref, os.path.join(tmp, "s_off"), [])
-        on, qon = synth_with(tmp, ref, os.path.join(tmp, "s_on"),
-                             ["--controls-as-targets"])
+        plain, qplain = synth_with(tmp, ref, os.path.join(tmp, "s_plain"), [])
 
-        check("by default only targets are called",
-              {r["reference_type"] for r in off} == {"target"},
-              str({r["reference_type"] for r in off}))
-        check("with the flag, controls are called too",
-              {r["reference_type"] for r in on} == {"target", "control"},
-              str({r["reference_type"] for r in on}))
-        check("and every target row is byte-identical either way",
-              [r for r in on if r["reference_type"] == "target"] == off,
-              "the flag altered target rows, which it must not")
+        # The same plate with one field well re-typed as a mock.
+        ss = os.path.join(tmp, "samplesheet.csv")
+        rows_ss = list(csv.DictReader(open(ss)))
+        mock_id = next(r["sample_id"] for r in rows_ss
+                       if r["sample_type"] == "unknown")
+        for r in rows_ss:
+            if r["sample_id"] == mock_id:
+                r["sample_type"] = "mock"
+        with open(ss, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows_ss[0]))
+            w.writeheader()
+            w.writerows(rows_ss)
+        mocked, qmock = synth_with(tmp, ref, os.path.join(tmp, "s_mock"), [])
 
-        poff = qoff["plasmid_contamination"]
-        pon = qon["plasmid_contamination"]
-        check("the contamination measure does not depend on the flag",
-              poff["run_plasmid_share"] == pon["run_plasmid_share"],
-              f"{poff['run_plasmid_share']} vs {pon['run_plasmid_share']}")
-        check("it is reported even when plasmids are the subject",
-              pon["run_plasmid_share"] is not None)
-        check("and the flag is recorded in the output, not merely applied",
-              poff["controls_called_as_targets"] is False
-              and pon["controls_called_as_targets"] is True)
+        # The fixture already carries mock wells; plasmids are called in
+        # exactly those.
+        check("plasmids are called in mock wells and nowhere else",
+              {r["sample_type"] for r in plain
+               if r["reference_type"] == "control"} == {"mock"},
+              str({r["sample_type"] for r in plain
+                   if r["reference_type"] == "control"}))
+        in_mock = {r["reference_type"] for r in mocked
+                   if r["sample_id"] == mock_id}
+        elsewhere = {r["reference_type"] for r in mocked
+                     if r["sample_type"] != "mock"}
+        check("in the mock well the plasmids are called too",
+              in_mock == {"target", "control"}, str(in_mock))
+        check("and a newly typed mock gains them, while no non-mock well "
+              "has them", elsewhere == {"target"}, str(elsewhere))
+        check("and every other well's rows are byte-identical",
+              [r for r in mocked if r["sample_id"] != mock_id]
+              == [r for r in plain if r["sample_id"] != mock_id],
+              "typing one well as a mock altered other wells' rows")
+
+        pc = qmock["plasmid_contamination"]
+        check("the mock is left out of the contamination flags",
+              all(w["sample_id"] != mock_id
+                  for w in pc["wells_above_threshold"]),
+              str([w["sample_id"] for w in pc["wells_above_threshold"]]))
+        check("and the rule is recorded in run QC",
+              pc.get("controls_called_in") == ["mock"], str(pc))
+        check("the run's contamination share is still reported",
+              pc["run_plasmid_share"] is not None)
+
+        # Contamination in copies: present on this spiked run for field
+        # wells that carry plasmid, absent in the mock (its plasmids have
+        # their own rows with their own copies).
+        mock_rows = [r for r in mocked if r["sample_type"] == "mock"]
+        check("a mock carries no plasmid_copies contamination figure",
+              all(r["plasmid_copies"] == "" for r in mock_rows))
+        field = [r for r in mocked if r["sample_type"] != "mock"
+                 and r["internal_control"] == "spiked"
+                 and float(r["plasmid_share"] or 0) > 0]
+        check("a calibrated field well with plasmid reads has copies of it",
+              bool(field) and all(r["plasmid_copies"] != "" and
+                                  float(r["plasmid_copies"]) > 0
+                                  for r in field),
+              f"{len(field)} wells; e.g. "
+              f"{[r['plasmid_copies'] for r in field[:3]]}")
 
         # A denominator error shows up here and almost nowhere else.
-        for tag, rows in (("off", off), ("on", on)):
+        for tag, rows in (("plain", plain), ("mock", mocked)):
             by: dict = {}
             for r in rows:
                 if r["fraction_of_group"]:
@@ -838,7 +883,6 @@ def test_control_plasmid_reporting() -> None:
                   not bad, f"{len(bad)} groups off, e.g. {bad[:2]}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def test_group_summary() -> None:
     """Consolidation by metadata group, and what it must refuse to hide.
@@ -897,8 +941,8 @@ def test_group_summary() -> None:
         {"sample_id": "S2b", "reference_type": "target",
          "call": "not_detected"},
         # A control-plasmid row. It MUST count. calls.tsv only contains
-        # references synthesis chose to call - targets, or targets plus
-        # controls under --controls-as-targets - so the decision about
+        # references synthesis chose to call - targets, plus the
+        # control plasmids in mock wells - so the decision about
         # what is a result has already been made, and re-filtering here
         # discards real calls on any plate whose templates ARE the
         # plasmids. The first version of this test asserted the

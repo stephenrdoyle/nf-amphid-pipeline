@@ -2431,8 +2431,9 @@ def parse_samplesheet(
             )
         if "mock" not in types:
             diag.warn(
-                f"run '{rid}': no mock sample - discrimination accuracy cannot be "
-                "measured for this run"
+                f"run '{rid}': no mock sample - no well of known plasmid "
+                "composition, so nothing on this run shows how the assay "
+                "recovers a mixture it was given"
             )
 
     # -- indices ----------------------------------------------------------

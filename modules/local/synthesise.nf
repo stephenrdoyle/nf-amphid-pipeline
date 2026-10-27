@@ -58,12 +58,11 @@ process SYNTHESISE {
         --sample-metadata ${preflight_dir}/sample_metadata.tsv \\
         ${prep_arg} ${demux_arg} ${split_arg} \\
         --run-id ${run_id} \\
-        ${params.spiked ? '--spiked' : ''} \\
+        ${params.spiked.toString().toLowerCase() == 'true' ? '--spiked' : ''} \\
         --min-depth ${params.min_depth} \\
         --absolute-floor ${params.absolute_floor} \\
         --slope-tolerance ${params.slope_tolerance} \\
         --permutations ${params.permutations} \\
-        ${params.controls_as_targets ? '--controls-as-targets' : ''} \\
         --plasmid-warn ${params.plasmid_warn} \\
         --outdir synthesis
 

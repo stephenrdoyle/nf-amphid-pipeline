@@ -113,7 +113,6 @@ python3 "$HERE/synthesise.py" \
     --preflight-dir "$OUT/preflight" --run-id "$RUN_ID" \
     --sample-metadata "$OUT/preflight/sample_metadata.tsv" \
     ${SPIKED:+--spiked} \
-    ${CONTROLS_AS_TARGETS:+--controls-as-targets} \
     ${PLASMID_WARN:+--plasmid-warn "$PLASMID_WARN"} \
     --outdir "$OUT/synthesis"
 
