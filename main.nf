@@ -92,6 +92,33 @@ workflow {
     if (!(params.spiked.toString().toLowerCase() in ['true', 'false'])) {
         problems << "--spiked is a flag: give it with no value (got '${params.spiked}')"
     }
+    // The test profiles run on simulated reads, which are generated rather
+    // than committed - so a fresh clone has none. Without this check the
+    // first run on a new machine dies inside pre-flight on "path does not
+    // exist", and then the empty-branch guard adds a second, misleading
+    // error about platforms. Each entry is the reads directory a profile's
+    // runs.tsv points at, and the command that creates it.
+    def fixtures = [
+        'test'    : [ "${projectDir}/tests/data/sim/RUN01",
+                      "python3 bin/simulate.py --reference tests/data/reference.tsv " +
+                      "--samplesheet tests/data/samplesheet.tsv --runs tests/data/runs.tsv " +
+                      "--assay assets/assay/ampseq_helminth.json --outdir tests/data/sim " +
+                      "--reads-per-sample 300" ],
+        'test_ont': [ "${projectDir}/tests/data/ont/run",
+                      "python3 tests/make_ont_fixture.py" ],
+    ]
+    (workflow.profile ?: '').tokenize(',').each { prof ->
+        def fx = fixtures[prof.trim()]
+        if (fx) {
+            def reads = file(fx[0])
+            if (!reads.isDirectory() || !reads.list()) {
+                problems << "-profile ${prof.trim()}: the fixture reads have not been " +
+                            "generated (${fx[0]} is missing or empty).\n" +
+                            "  They are simulated, not committed. From ${projectDir}, run:\n" +
+                            "    ${fx[1]}"
+            }
+        }
+    }
     if (problems) {
         log.error "Cannot start:\n  " + problems.join("\n  ")
         exit 1

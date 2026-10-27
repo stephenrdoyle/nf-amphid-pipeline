@@ -122,8 +122,13 @@ anything expensive depends on it.
 ## Quick start
 
 ```bash
-# generate test fixtures (real index sets, real control tag)
-python3 tests/make_fixtures.py --outdir tests/data
+# simulate the Illumina fixture's reads. The tables in tests/data are
+# committed; the reads are not, so a fresh clone needs this once.
+# (-profile test stops with this same command if they are missing.)
+python3 bin/simulate.py --reference tests/data/reference.tsv \
+    --samplesheet tests/data/samplesheet.tsv --runs tests/data/runs.tsv \
+    --assay assets/assay/ampseq_helminth.json --outdir tests/data/sim \
+    --reads-per-sample 300
 
 # run pre-flight directly - no Nextflow needed
 python3 bin/preflight.py \

@@ -997,6 +997,67 @@ def test_report_gets_what_it_reads() -> None:
           "params.comparison is passed to REPORT directly")
 
 
+def test_fixture_reads_are_checked() -> None:
+    """Every test profile checks its fixture reads exist before starting.
+
+    The reads are simulated, not committed, so a fresh clone has none,
+    and the first run on a new machine died inside pre-flight with "path
+    does not exist" - followed by a second, misleading error about
+    platforms. main.nf now refuses to start and prints the command that
+    makes them. This keeps that guard honest: one entry per test
+    profile, pointing where the profile's runs.tsv points, with a command
+    that names a real script and real flags.
+    """
+    print("\nfixture reads are checked before a test run")
+    import csv
+    with open(os.path.join(ROOT, "main.nf"), encoding="utf-8") as fh:
+        main_text = fh.read()
+    with open(os.path.join(ROOT, "nextflow.config"), encoding="utf-8") as fh:
+        cfg = fh.read()
+
+    guard = dict(re.findall(
+        r"'(\w+)'\s*:\s*\[\s*\"\$\{projectDir\}/([^\"]+)\"", main_text))
+    profiles = {}
+    for m in re.finditer(r"\n    (test\w*)\s*\{(.*?)\n    \}", cfg, re.S):
+        runs = re.search(r'params\.runs\s*=\s*"\$\{projectDir\}/([^"]+)"',
+                         m.group(2))
+        if runs:
+            profiles[m.group(1)] = runs.group(1)
+    check("test profiles were found in the config", len(profiles) >= 2,
+          str(profiles))
+    missing = sorted(set(profiles) - set(guard))
+    check("every test profile has a fixture-reads check", not missing,
+          str(missing))
+
+    wrong = []
+    for prof, runs_rel in profiles.items():
+        if prof not in guard:
+            continue
+        with open(os.path.join(ROOT, runs_rel), encoding="utf-8") as fh:
+            row = list(csv.DictReader(fh, delimiter="\t"))[0]
+        expect = os.path.normpath(
+            os.path.join(os.path.dirname(runs_rel), row["path"]))
+        if os.path.normpath(guard[prof]) != expect:
+            wrong.append(f"{prof}: checks {guard[prof]}, runs.tsv gives {expect}")
+    check("each check looks where the profile's runs.tsv points", not wrong,
+          "; ".join(wrong))
+
+    cmds = re.findall(r"python3 (\S+\.py)((?:[^\"\]]|\"\s*\+\s*\")*)",
+                      main_text)
+    bad = []
+    for script, rest in cmds:
+        path = os.path.join(ROOT, script)
+        if not os.path.exists(path):
+            bad.append(f"{script} does not exist")
+            continue
+        src = open(path, encoding="utf-8").read()
+        for flag in re.findall(r"(--[\w-]+)", rest):
+            if f'"{flag}"' not in src:
+                bad.append(f"{script} has no {flag}")
+    check("the suggested commands name real scripts and real flags",
+          cmds and not bad, "; ".join(bad) or "no commands found")
+
+
 def main() -> int:
     test_includes_resolve()
     test_params_declared()
@@ -1015,6 +1076,7 @@ def main() -> int:
     test_stubs_present()
     test_ids_not_cut_at_a_dot()
     test_report_gets_what_it_reads()
+    test_fixture_reads_are_checked()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
