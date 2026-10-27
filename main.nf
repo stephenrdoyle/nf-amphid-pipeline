@@ -36,6 +36,7 @@ def helpMessage() {
                          sequence)
       --samplesheet      Samplesheet CSV (run_id, platform, sample_id,
                          index_i7, index_i5, sample_type [, file_prefix])
+      --primers          PCR1 primers TSV (name, direction, sequence)
 
     One of:
       --runs             Run manifest TSV (run_id, platform, path, ...)
@@ -64,6 +65,12 @@ workflow {
     def problems = []
     if (!params.reference)   problems << "--reference is required"
     if (!params.samplesheet) problems << "--samplesheet is required"
+    // Not optional, whatever the placeholder machinery suggests. The
+    // primer-trimmed panel is what ASSIGN competes reads against, and
+    // pre-flight only builds it from primers - without them ASSIGN never
+    // runs, synthesis and the report are skipped with it, and Nextflow
+    // prints Complete having analysed nothing.
+    if (!params.primers)     problems << "--primers is required (the primer-trimmed panel is built from it)"
     if (!params.runs && !params.input_dir) {
         problems << "one of --runs or --input_dir is required"
     }
@@ -105,9 +112,7 @@ workflow {
         ? Channel.fromPath(params.runs, checkIfExists: true)
         : Channel.fromPath("${projectDir}/assets/NO_RUNS", checkIfExists: true) ).first()
 
-    ch_primers = ( params.primers
-        ? Channel.fromPath(params.primers, checkIfExists: true)
-        : Channel.fromPath("${projectDir}/assets/NO_PRIMERS", checkIfExists: true) ).first()
+    ch_primers     = Channel.fromPath(params.primers,     checkIfExists: true).first()
     // Subject metadata is optional and kept OUT of the samplesheet: a
     // samplesheet row is a library and is frozen at prep, a metadata row
     // is a subject and keeps changing, and one subject is several

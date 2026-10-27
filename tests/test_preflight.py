@@ -872,6 +872,30 @@ def test_primer_extent() -> None:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # primers from some other panel: located nowhere, so there is no
+    # trimmed panel and nothing downstream could be assigned. That has
+    # to stop pre-flight, not pass with warnings and leave the workflow
+    # to skip ASSIGN and print Complete.
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = random.Random(20260918)
+        ref = mf.build_reference(rng)
+        ref_p = os.path.join(tmp, "reference.tsv")
+        mf.write_reference(ref, ref_p)
+        pp = write_primers(tmp, ["ACGTTGCAACGTTGCAACGT"],
+                           ["TTGCAACGTTGCAACGTTGC"])
+        code, diag, _ = run(tmp, ref_p, pp)
+        check("primers located nowhere block pre-flight", code != 0,
+              str(diag.errors))
+        check("and the error names the missing trimmed panel",
+              any("reference.insert.fasta" in e for e in diag.errors),
+              str([e[:70] for e in diag.errors]))
+        check("and no trimmed panel is written",
+              not os.path.exists(os.path.join(tmp, "out",
+                                               "reference.insert.fasta")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def test_assay_config() -> None:
     """The assay definition must be swappable, override-able, forward

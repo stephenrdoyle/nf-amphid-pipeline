@@ -211,9 +211,9 @@ def call_sequence(
     """Assign one (dereplicated) sequence.
 
     `second` is the reverse mate of an unmerged pair. Both mates are scored
-    against the same reference and their distances summed, so a pair only
-    counts for a reference that explains both ends. One end can be wrong;
-    both ends being wrong in the same direction is rare.
+    against the same reference, each must fit it within max_d on its own,
+    and their distances are then summed to rank the references - so a pair
+    only counts for a reference that explains both ends.
     """
     # Both mates are searched. A control differs from its target only by the
     # tag, so testing one mate and calling the other's silence evidence is
@@ -226,18 +226,27 @@ def call_sequence(
         )
     )
 
+    # Even an exact hit needs its runner-up, so it is NOT returned early.
+    # It used to be, as a lone candidate - which meant the margin rule
+    # never saw a competitor: with haplotypes one base apart and a margin
+    # of 2, an error-free read was `assigned` while the same read with one
+    # error elsewhere was `taxon_only`, so calls tracked read quality
+    # rather than evidence. Two entries with identical inserts never tied
+    # either; every read went to whichever came first. The exact lookup
+    # now only guarantees that the matching reference is among the
+    # candidates and spares it the alignment.
     exact = panel.exact.get(q) if second is None else None
-    if exact is not None:
-        r = panel.refs[exact]
-        # Even an exact hit needs its runner-up: a target and its control
-        # differ by an insertion, so an exact hit on one is not by itself
-        # evidence against the other.
-        return _finish(panel, [(0, exact)], has_tag, min_margin, q, tag)
 
     max_d = max(2, int(len(q) * max_frac))
     scored: list[tuple[int, int]] = []
-    for i in panel.candidates(q):
+    cands = panel.candidates(q)
+    if exact is not None and exact not in cands:
+        cands.append(exact)
+    for i in cands:
         ref = panel.refs[i]
+        if i == exact:
+            scored.append((0, i))
+            continue
         if second is None:
             d = bounded_edit(q, ref.sequence, max_d)
         else:
@@ -252,6 +261,13 @@ def call_sequence(
                 revcomp(second)[::-1], ref.sequence[::-1], max_d,
                 free_b_suffix=True,
             )
+            # Checked on its own, not only through the sum. bounded_edit
+            # caps a failure at max_d + 1, so a mate that does not fit at
+            # all costs just one edit more than one that barely fits, and
+            # under the summed budget an exact R1 would carry an R2 from
+            # anything - another species, a chimera, junk.
+            if d2 > max_d:
+                continue
             d = d1 + d2
         if d <= max_d * (2 if second is not None else 1):
             scored.append((d, i))

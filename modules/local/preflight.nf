@@ -19,9 +19,12 @@ process PREFLIGHT {
     path "preflight"                          , emit: dir
     path "preflight/reference.fasta"          , emit: fasta
     // The primer-trimmed panel: reads arrive with their primers removed,
-    // so this is what assignment competes them against. Optional because
-    // it needs --primers, and a panel can be validated without them.
-    path "preflight/reference.insert.fasta"   , emit: insert_fasta, optional: true
+    // so this is what assignment competes them against. NOT optional.
+    // It used to be, and a missing one left ASSIGN with an empty input,
+    // so every sample skipped assignment and the run printed Complete.
+    // main.nf now requires --primers, and preflight.py fails when the
+    // primers locate nowhere, so its absence here is a bug worth a stop.
+    path "preflight/reference.insert.fasta"   , emit: insert_fasta
     path "preflight/tag_report.tsv"           , emit: tag_report
     path "preflight/tag_report.txt"           , emit: tag_report_txt
     path "preflight/runs_resolved.tsv" , emit: runs_resolved

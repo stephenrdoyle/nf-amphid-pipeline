@@ -1,5 +1,9 @@
 # nf-helminth-amplicon
 
+<p align="center">
+  <img src="docs/images/metro_map.svg" alt="Metro map: pre-flight feeds an Illumina line (merge pairs, trim primers, max-EE filter, dereplicate) and a nanopore line (list batch files, split concatemers per file, sum split summaries, demultiplex); both converge on competitive assignment, synthesis and the HTML report, with optional mock calibration and cross-run comparison." width="100%">
+</p>
+
 Targeted amplicon panel analysis for Illumina and nanopore, built around
 competitive mapping against a defined reference panel with spiked
 quantification standards and tagged control plasmids.

@@ -2756,6 +2756,19 @@ def main(argv: list[str] | None = None) -> int:
     extent = check_reference_extent(entries, primers, diag) if primers else []
     if entries and extent:
         write_insert_fasta(entries, extent, args.outdir, diag)
+    elif entries and primers.get("fwd") and primers.get("rev"):
+        # Primers were given and located nowhere, so there is no trimmed
+        # panel. (A primers file missing fwd or rev rows has already been
+        # reported by parse_primers.) Under Nextflow that output is what ASSIGN competes reads
+        # against: without it every sample skips assignment and the run
+        # still prints Complete. Fail here, where the cause is nameable.
+        diag.error(
+            "no reference entry has both a forward and a reverse primer "
+            "located in it, so no primer-trimmed panel "
+            "(reference.insert.fasta) can be built and no read can be "
+            "assigned. Check that --primers belongs to this panel, and "
+            "that it has both fwd and rev rows"
+        )
     tags = analyse_tags(entries, diag, tag_max_edits, expected_tag, assay)
     write_tag_report(tags, args.outdir, tag_max_edits, assay)
     if tags:

@@ -135,7 +135,7 @@ demultiplexer whose barcode tolerances were set for passing reads. The
 exclusion is counted and reported rather than hidden. `--include_failed`
 overrides this.
 
-### 2.4 `--primers` — PCR1 primers (TSV, optional but effectively required)
+### 2.4 `--primers` — PCR1 primers (TSV, required)
 
 | column | required | meaning |
 |---|---|---|
@@ -144,8 +144,11 @@ overrides this.
 | `sequence` | yes | primer sequence, IUPAC allowed |
 
 Used to trim primer sequence off the panel, producing
-`preflight/reference.insert.fasta`. The nanopore path **requires** this:
-without it there is no primer-trimmed panel and the run stops.
+`preflight/reference.insert.fasta`, which is what every read is
+assigned against on both platforms. The workflow refuses to start
+without `--primers`, and pre-flight fails if the primers are located in
+no reference entry - in both cases there would be no trimmed panel, and
+the run would otherwise skip assignment for every sample.
 
 ### 2.5 `--metadata` — grouping metadata (TSV, optional)
 
@@ -245,7 +248,7 @@ both Nextflow and `preflight.py`, so the values are defined once.
 | `--input_dir` | — | single-run shortcut; requires `--platform` |
 | `--platform` | — | `illumina` or `nanopore`; only with `--input_dir` |
 | `--run_id` | `RUN01` | run id when using `--input_dir` |
-| `--primers` | — | PCR1 primers TSV |
+| `--primers` | — | PCR1 primers TSV; **required** |
 | `--metadata` | — | grouping metadata TSV, keyed on `subject_id` **or** `sample_id` |
 | `--mocks` | — | mock composition TSV |
 | `--comparison` | — | a previous run's `calls.tsv`, to pair against this one |

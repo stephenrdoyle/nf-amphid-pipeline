@@ -315,6 +315,81 @@ def test_tag_unobservable() -> None:
           str(c))
 
 
+def test_exact_hits_face_the_margin() -> None:
+    """An exact match is held to the same margin rule as any other read.
+
+    Exact hits used to return early with no runner-up, so the margin was
+    never applied to them: the call depended on whether the read carried
+    an error, not on whether the panel could separate the references.
+    """
+    print("\nexact hits still need a margin")
+    rng = random.Random(3)
+    core = "".join(rng.choice("ACGT") for _ in range(360))
+    snp = list(core)
+    snp[200] = "A" if snp[200] != "A" else "G"
+    snp = "".join(snp)
+    panel = A.Panel([
+        A.Ref("Sp_a_h1", core, "ITS2", "target", "Species_a"),
+        A.Ref("Sp_a_h2", snp, "ITS2", "target", "Species_a"),
+    ])
+
+    exact = A.call_sequence(core, panel, TAG, 0.10, 2, 3)
+    check("an exact read on haplotypes 1bp apart is not assigned (margin 2)",
+          exact.outcome == "taxon_only"
+          and set(exact.tied) == {"Sp_a_h1", "Sp_a_h2"}, str(exact))
+
+    noisy = list(core)
+    noisy[50] = "A" if noisy[50] != "A" else "G"
+    noisy = A.call_sequence("".join(noisy), panel, TAG, 0.10, 2, 3)
+    check("and an error elsewhere in the read gives the same call",
+          noisy.outcome == exact.outcome, f"{noisy.outcome} vs {exact.outcome}")
+
+    check("a margin of 1 does separate them",
+          A.call_sequence(core, panel, TAG, 0.10, 1, 3).seq_id == "Sp_a_h1")
+
+    # identical inserts in two taxa: the read cannot choose, and must say so
+    twin = A.Panel([
+        A.Ref("Sp_a", core, "ITS2", "target", "Species_a"),
+        A.Ref("Sp_z", core, "ITS2", "target", "Species_z"),
+    ])
+    c = A.call_sequence(core, twin, TAG, 0.10, 2, 3)
+    check("identical references in different taxa are ambiguous, "
+          "not whichever is listed first",
+          c.outcome == "ambiguous", f"{c.outcome} {c.seq_id}")
+
+
+def test_both_mates_must_fit() -> None:
+    """An unmerged pair is evidence only if BOTH mates fit the reference.
+
+    bounded_edit caps a failure at max_d + 1, so under a summed budget of
+    2 * max_d an exact R1 used to carry an R2 of anything at all: the
+    junk mate cost one edit more than a mate that barely fitted. The pair
+    was then assigned confidently on R1 alone.
+    """
+    print("\nboth mates of an unmerged pair must fit")
+    panel, by_id = toy_panel()
+    h1 = by_id["Sp_a_h1"].sequence
+    r1 = h1[:150]
+
+    c = A.call_sequence(r1, panel, TAG, 0.10, 2, 3, second=revcomp(h1[-150:]))
+    check("a clean pair is assigned (the control for the case below)",
+          c.outcome == "assigned" and c.seq_id == "Sp_a_h1", str(c))
+
+    junk = "".join(random.Random(91).choice("ACGT") for _ in range(150))
+    c = A.call_sequence(r1, panel, TAG, 0.10, 2, 3, second=junk)
+    check("an exact R1 with a junk R2 is not assigned",
+          c.outcome == "unmatched", f"{c.outcome} {c.seq_id} d={c.distance}")
+
+    # R2 from a different reference entirely: a chimera across the pair
+    other = next(r.sequence for r in by_id.values()
+                 if r.taxon != by_id["Sp_a_h1"].taxon)
+    c = A.call_sequence(r1, panel, TAG, 0.10, 2, 3,
+                        second=revcomp(other[-150:]))
+    check("an R2 from another species does not ride on a clean R1",
+          not (c.outcome == "assigned" and c.seq_id == "Sp_a_h1"),
+          f"{c.outcome} {c.seq_id} d={c.distance}")
+
+
 def test_preflight_catches_it() -> None:
     print("\npre-flight refuses a panel with an unreadable tag")
     tmp = tempfile.mkdtemp()
@@ -665,6 +740,8 @@ def main() -> int:
     test_calls()
     test_chimera_is_assigned_not_ambiguous()
     test_tag_unobservable()
+    test_exact_hits_face_the_margin()
+    test_both_mates_must_fit()
     test_preflight_catches_it()
     test_tag_under_a_primer()
     test_outputs()
