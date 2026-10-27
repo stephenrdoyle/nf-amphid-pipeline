@@ -27,6 +27,7 @@ import gzip
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1343,10 +1344,61 @@ def test_combination_check() -> None:
           bs.candidates("AAAA") == ((), -1))
 
 
+def test_sample_ids_survive_the_filename() -> None:
+    """A declared sample id must come back intact after being a filename.
+
+    Demultiplexing names each sample's FASTQ, the workflow takes the id
+    back off that name, and synthesis restores the declared id through
+    file_resolution.tsv. Two things broke that chain: nanopore.nf used
+    simpleName, which stops at the first dot, so S1.rep1 came back as S1
+    and S1.a and S1.b merged; and demux named files with str.isalnum(),
+    which keeps 'é', while pre-flight recorded '_', so the restore missed.
+    This walks the whole chain for ids that exercise both.
+    """
+    print("\nsample ids survive being a filename")
+    sys.path.insert(0, os.path.join(ROOT, "bin"))
+    import ampseqlib
+    pf = _load("preflight", "bin/preflight.py")
+
+    declared = ["S1.rep1", "S1.rep2", "ampure_F1=400.r1", "Sé-01", "iCCH 001"]
+    tmp = tempfile.mkdtemp()
+    try:
+        w = dx.SampleWriter(os.path.join(tmp, "reads"), flush_records=1)
+        for sid in declared:
+            w.add(sid, f"{sid}-r0", "ACGT", "IIII")
+        w.close()
+
+        # Exactly what subworkflows/local/nanopore.nf does with each file.
+        arrived = sorted(
+            re.sub(r"\.fastq\.gz$", "", f)
+            for f in os.listdir(os.path.join(tmp, "reads")))
+        check("every sample keeps its own file - dotted ids do not merge",
+              len(arrived) == len(declared), str(arrived))
+        check("the filename-derived id is pre-flight's sanitised id",
+              arrived == sorted(pf.sanitise_id(s) for s in declared),
+              str(arrived))
+
+        # file_resolution.tsv as pre-flight writes it, then the restore.
+        pre = os.path.join(tmp, "preflight")
+        os.makedirs(pre)
+        with open(os.path.join(pre, "file_resolution.tsv"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("run_id\tsample_id\tsanitised_id\n")
+            for sid in declared:
+                fh.write(f"R1\t{sid}\t{pf.sanitise_id(sid)}\n")
+        keyed = {a: object() for a in arrived}
+        ampseqlib.restore_declared_ids(keyed, pre, "R1")
+        check("and every declared id is restored downstream",
+              sorted(keyed) == sorted(declared), str(sorted(keyed)))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_parallel_matches_serial()
     test_end_reasons_discriminate()
     test_barcode_margin_rule()
+    test_sample_ids_survive_the_filename()
     test_combination_check()
     test_stats_only()
     test_barcode_diagnostic_discriminates()

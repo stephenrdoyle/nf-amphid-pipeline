@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
     DEFAULTS,
+    sanitise_id,
     open_reads_many,
     resolve_read_files,
     find_anchor,
@@ -714,11 +715,6 @@ def write_index_matrix(grid, samples, path: str) -> dict:
     }
 
 
-def safe_name(x: str) -> str:
-    """A sample id is free text; a filename is not."""
-    return "".join(c if c.isalnum() or c in "._-" else "_" for c in x)
-
-
 class SampleWriter:
     """Per-sample FASTQ output that holds neither the run nor 384 handles.
 
@@ -762,7 +758,7 @@ class SampleWriter:
         self.written = 0
 
     def path_for(self, sample_id: str) -> str:
-        return os.path.join(self.dir, f"{safe_name(sample_id)}.fastq.gz")
+        return os.path.join(self.dir, f"{sanitise_id(sample_id)}.fastq.gz")
 
     def add(self, sample_id: str, read_id: str, seq: str, qual: str) -> None:
         self.counts[sample_id] += 1

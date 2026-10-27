@@ -65,10 +65,17 @@ workflow NANOPORE_PATH {
 
     // Fan out to one channel item per sample, carrying the run's metadata
     // forward so assignment knows it is on the nanopore path.
+    //
+    // The id is the whole filename less its suffix, NOT simpleName.
+    // simpleName stops at the FIRST dot, and dots are legal in sample ids
+    // and survive sanitisation, so S1.rep1 became S1 - and S1.a and S1.b
+    // became the same sample. The module's output glob guarantees the
+    // suffix, so stripping exactly it is all that is needed.
     seqs = DEMUX_ONT.out.reads
         .transpose()
         .map { meta, fastq ->
-            [ meta + [ id: fastq.simpleName, platform: 'nanopore' ], fastq ]
+            [ meta + [ id: fastq.name.replaceFirst(/\.fastq\.gz$/, ''),
+                       platform: 'nanopore' ], fastq ]
         }
 
     emit:

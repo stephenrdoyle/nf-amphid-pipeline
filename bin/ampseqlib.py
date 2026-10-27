@@ -18,6 +18,7 @@ import glob
 import gzip
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 # --------------------------------------------------------------------------
@@ -284,6 +285,25 @@ def writer(fh, fieldnames=None, delimiter: str = "\t"):
         return csv.writer(fh, delimiter=delimiter, lineterminator="\n")
     return csv.DictWriter(fh, fieldnames=fieldnames, delimiter=delimiter,
                           lineterminator="\n")
+
+
+# ASCII only, deliberately. str.isalnum() also accepts letters such as
+# 'é', and demultiplexing once named its files that way while pre-flight
+# recorded '_' in their place - so the sanitised id in file_resolution.tsv
+# and the filename that reached assignment disagreed, and the restore
+# below matched nothing.
+ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def sanitise_id(value: str) -> str:
+    """Path-safe form of an identifier. The original is always what gets
+    reported; this is only what appears in directory and file names.
+
+    The ONE implementation. Pre-flight records it in file_resolution.tsv
+    and demultiplexing names its per-sample files with it, and the two
+    must agree character for character for restore_declared_ids to find
+    the declared id again."""
+    return ID_SAFE.sub("_", value.strip())
 
 
 def restore_declared_ids(keyed: dict, preflight_dir: str | None,

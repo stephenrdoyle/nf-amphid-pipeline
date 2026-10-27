@@ -25,7 +25,9 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampseqlib import delimiter_for, find_anchor_cost  # noqa: E402
+from ampseqlib import (  # noqa: E402
+    delimiter_for, find_anchor_cost, sanitise_id,
+)
 from itertools import product
 from math import comb
 
@@ -59,7 +61,6 @@ SAMPLE_TYPES = {"unknown", "neg_extraction", "neg_ntc", "mock", "pos_control"}
 PLATFORMS = {"illumina", "nanopore"}
 
 IUPAC = set("ACGTRYSWKMBDHVN")
-ID_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 # --------------------------------------------------------------------------
@@ -299,12 +300,6 @@ def detection_probability(length: int, error_rate: float, max_errors: int) -> fl
         comb(length, k) * error_rate**k * (1 - error_rate) ** (length - k)
         for k in range(max_errors + 1)
     )
-
-
-def sanitise_id(value: str) -> str:
-    """Path-safe form of an identifier. The original is always what gets
-    reported; this is only what appears in directory and file names."""
-    return ID_SAFE.sub("_", value.strip())
 
 
 # --------------------------------------------------------------------------

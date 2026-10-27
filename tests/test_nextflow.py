@@ -916,6 +916,32 @@ def test_stubs_present() -> None:
     check("every process emits its versions", not no_ver, ", ".join(no_ver))
 
 
+def test_ids_not_cut_at_a_dot() -> None:
+    """No sample id may be taken from a file with simpleName or baseName.
+
+    simpleName stops at the FIRST dot and baseName at the last, and dots
+    are legal in sample ids and survive sanitisation. nanopore.nf took
+    the id with simpleName, so S1.rep1 arrived as S1 and S1.a and S1.b
+    became one sample. Strip the known suffix instead.
+    """
+    print("\nsample ids are not cut at a dot")
+    bad = []
+    for path in nf_files():
+        with open(path, encoding="utf-8") as fh:
+            text = strip_comments(fh.read())
+        for m in re.finditer(r"\bid\s*:\s*[^,\]\n]*\.(simpleName|baseName)\b",
+                             text):
+            bad.append(f"{os.path.relpath(path, ROOT)}: {m.group(0).strip()}")
+    check("no id is derived with simpleName or baseName", not bad,
+          "; ".join(bad))
+
+    # Liveness: the pattern must catch the line that shipped.
+    probe = "[ meta + [ id: fastq.simpleName, platform: 'nanopore' ], fastq ]"
+    check("and it catches the original form",
+          re.search(r"\bid\s*:\s*[^,\]\n]*\.(simpleName|baseName)\b", probe)
+          is not None)
+
+
 def main() -> int:
     test_includes_resolve()
     test_params_declared()
@@ -932,6 +958,7 @@ def main() -> int:
     test_emits_resolve()
     test_outputs_are_written()
     test_stubs_present()
+    test_ids_not_cut_at_a_dot()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
