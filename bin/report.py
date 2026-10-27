@@ -638,6 +638,17 @@ def build(args) -> str:
             "bad", f"{fmt(sp)} wells failed their spike-in",
             "Standards were expected and did not appear.",
         ))
+    imp = ic.get("slope_implausible", 0)
+    if imp:
+        band = qc.get("calibration_slope", {}).get("plausible_band") or []
+        concerns.append((
+            "warn",
+            f"{fmt(imp)} wells have no copy numbers: calibration slope "
+            "outside the plausible range"
+            + (f" {band[0]:g}-{band[1]:g}" if len(band) == 2 else ""),
+            "Both standards were recovered, so their detection calls stand, "
+            "but the line through them cannot be inverted into an amount.",
+        ))
     slope = qc.get("calibration_slope", {})
     if slope.get("outside_tolerance"):
         concerns.append((
@@ -881,8 +892,9 @@ def build(args) -> str:
             "every metric and counted in their own column, because a "
             "median depth with an NTC in the denominator moves when the "
             "number of NTCs does. Libraries with no metadata row appear "
-            "under &lsquo;(no value)&rsquo; rather than vanishing, so the "
-            "library counts within a field add up to the plate.</p>"
+            "under &lsquo;(no value)&rsquo; rather than vanishing, so "
+            "analysed libraries and controls within a field add up to the "
+            "plate.</p>"
         )
         by_field: dict = defaultdict(list)
         for g in groups:
@@ -895,7 +907,11 @@ def build(args) -> str:
                 continue
             parts.append(
                 "<table><thead><tr><th>Value</th>"
-                "<th class='num'>Libraries</th><th class='num'>Controls</th>"
+                # n_analysed, which excludes the negative controls - so
+                # the header says analysed. Labelled "Libraries" it read
+                # as n_libraries, and a group with controls in it looked
+                # as though it had lost wells.
+                "<th class='num'>Analysed</th><th class='num'>Controls</th>"
                 "<th class='num'>Reads assigned</th>"
                 "<th class='num'>Median depth</th>"
                 "<th class='num'>Target fraction</th>"
@@ -924,8 +940,18 @@ def build(args) -> str:
     # Only speciation targets form a composition. A panel carrying a second
     # locus for variant calling would otherwise count a species twice, with
     # a denominator mixing loci at different copy numbers.
+    #
+    # And only targets. With --controls-as-targets the control plasmids
+    # get calls rows too, and synthesis gives them the default purpose of
+    # speciation - so they passed the test above and their reads went into
+    # every sample's denominator, shrinking each species' share by however
+    # much plasmid the well held. Synthesis already keeps the two apart
+    # (fraction_of_group is within targets or within controls, never
+    # across); the picture has to agree with the table. A calls.tsv from
+    # before reference_type existed has only targets, hence the default.
     spec = [c for c in calls
-            if "speciation" in (c.get("purpose") or "speciation")]
+            if "speciation" in (c.get("purpose") or "speciation")
+            and (c.get("reference_type") or "target") != "control"]
     comp: dict = {}
     denom: dict = {}
     totals: Counter = Counter()
@@ -1193,9 +1219,12 @@ def build(args) -> str:
     elif comparison:
         parts.append("<h2>Agreement with the paired run</h2>")
         k = comparison.get("cohen_kappa")
+        ag = comparison.get("agreement")
         parts.append('<div class="cards">')
+        # None when every pairing had a failed well: there is nothing to
+        # agree about, which is not the same as agreeing on nothing.
         parts.append(f'<div class="card"><div class="n">'
-                     f'{comparison.get("agreement", 0):.3f}</div>'
+                     f'{"-" if ag is None else f"{ag:.3f}"}</div>'
                      f'<div class="k">raw agreement</div></div>')
         parts.append(f'<div class="card"><div class="n">'
                      f'{"-" if k is None else f"{k:.3f}"}</div>'
@@ -1209,16 +1238,43 @@ def build(args) -> str:
                      f'<div class="k">paired observations</div></div>')
         parts.append("</div>")
         parts.append(f'<p class="note">{esc(comparison.get("kappa_note", ""))}</p>')
+        nx = comparison.get("excluded_assay_failed") or 0
+        if nx:
+            parts.append(
+                f'<p class="note">{fmt(nx)} paired observation(s) had an '
+                "assay_failed well on at least one side and are left out of "
+                "agreement and kappa: a failed well is no call, so it can "
+                "neither agree nor disagree.</p>")
         only = comparison.get("detected_by_one_only", {})
         if only:
             dd = comparison.get("depth_of_disagreements") or {}
+            # The sentence is chosen by the counts, not written in
+            # advance. "Most were found by the deeper run" excuses every
+            # disagreement as sampling, so it is only said when it is so;
+            # otherwise the split is given and the reader is told the
+            # depth does not explain it.
+            depth_txt = ""
+            if dd and "found_by_deeper_run" in dd:
+                nd = dd.get("n_disagreements_with_depth", 0)
+                deep = dd.get("found_by_deeper_run", 0)
+                shallow = dd.get("found_by_shallower_run", 0)
+                tie = dd.get("equal_depth", 0)
+                split = (f"{deep} by the deeper run, {shallow} by the "
+                         f"shallower, {tie} at equal depth")
+                if dd.get("mostly_found_by_deeper_run"):
+                    depth_txt = (
+                        f". Of {nd} such disagreements with depth recorded, "
+                        f"most were found by the deeper run ({split}) "
+                        "&mdash; which points to a difference in sampling "
+                        "rather than between platforms.")
+                else:
+                    depth_txt = (
+                        f". Of {nd} such disagreements with depth recorded, "
+                        f"{split}: depth does not explain most of them.")
             parts.append(
                 "<p>Found by one run only: "
                 + ", ".join(f"<b>{esc(kk)}</b> {vv}" for kk, vv in only.items())
-                + (f". Of {dd.get('n_disagreements_with_depth', 0)} such "
-                   "disagreements with depth recorded, most were found by the "
-                   "deeper run &mdash; which is a difference in sampling, not "
-                   "between platforms." if dd else "")
+                + depth_txt
                 + "</p>"
             )
 
@@ -1235,7 +1291,8 @@ def build(args) -> str:
         det = [r for r in rws if r["call"] == "detected"]
         state = rws[0].get("internal_control", "")
         lvl = {"spiked": "ok", "unspiked": "warn",
-               "spike_failed": "bad"}.get(state, "warn")
+               "spike_failed": "bad",
+               "slope_implausible": "warn"}.get(state, "warn")
         parts.append(
             f"<tr><td>{esc(s)}</td><td>{esc(rws[0].get('sample_type',''))}</td>"
             f"<td>{esc(rws[0].get('well',''))}</td>"

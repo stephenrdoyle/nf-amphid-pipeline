@@ -112,15 +112,30 @@ def compare(
     ambiguous = [k for k in shared if len(ia[k]) > 1 or len(ib[k]) > 1]
     shared = [k for k in shared if k not in set(ambiguous)]
 
+    all_pairs: list[tuple[str, str]] = []
     call_pairs: list[tuple[str, str]] = []
+    n_failed = 0
     ratios: list[float] = []
     only: Counter = Counter()
-    disagreement_depth: list[tuple[int, int]] = []
+    # (side that detected, depth A, depth B) for each one-sided detection
+    disagreement_depth: list[tuple[str, int, int]] = []
     per_taxon: dict = defaultdict(lambda: {"n": 0, "agree": 0})
 
     for key in shared:
         a, b = ia[key][0], ib[key][0]
         ca, cb = a["call"], b["call"]
+        all_pairs.append((ca, cb))
+        # assay_failed is not a call - it is the absence of one. Two
+        # failed wells "agreeing" says nothing about whether the runs see
+        # the same biology, and a failed well against a negative is not a
+        # disagreement about it either. Counting them made a run that
+        # failed on both sides look concordant, and fed a third label into
+        # kappa whose marginals were set by bench failures rather than by
+        # detection. They stay in the call matrix, where they are visible,
+        # and the number left out is reported.
+        if "assay_failed" in (ca, cb):
+            n_failed += 1
+            continue
         call_pairs.append((ca, cb))
         t = a.get("taxon") or key[1]
         per_taxon[t]["n"] += 1
@@ -130,10 +145,12 @@ def compare(
             va, vb = a.get("copies_per_unit_dna"), b.get("copies_per_unit_dna")
             if va and vb and float(va) > 0 and float(vb) > 0:
                 ratios.append(math.log10(float(vb) / float(va)))
-        elif "detected" in (ca, cb) and "assay_failed" not in (ca, cb):
-            only[label_a if ca == "detected" else label_b] += 1
+        elif "detected" in (ca, cb):
+            finder = label_a if ca == "detected" else label_b
+            only[finder] += 1
             try:
-                disagreement_depth.append((int(a["depth"]), int(b["depth"])))
+                disagreement_depth.append(
+                    (finder, int(a["depth"]), int(b["depth"])))
             except (KeyError, ValueError):
                 pass
 
@@ -143,29 +160,57 @@ def compare(
 
     # Is the side that found it simply the deeper side? If so the platforms
     # are not disagreeing about biology.
+    #
+    # Asked per disagreement: was the side that DETECTED the deeper one?
+    # Counting how often A was deeper, regardless of who detected, answers
+    # a different question - A could be deeper every time and find nothing
+    # B missed. Equal depths are counted on their own rather than handed
+    # to either side, because a tie is evidence for neither reading.
     deeper_found = None
     if disagreement_depth:
-        wins = sum(1 for da, db in disagreement_depth if da > db)
+        by_deeper = by_shallower = ties = 0
+        for finder, da, db in disagreement_depth:
+            mine, theirs = (da, db) if finder == label_a else (db, da)
+            if mine > theirs:
+                by_deeper += 1
+            elif mine < theirs:
+                by_shallower += 1
+            else:
+                ties += 1
         deeper_found = {
             "n_disagreements_with_depth": len(disagreement_depth),
-            f"{label_a}_deeper": wins,
-            f"{label_b}_deeper": len(disagreement_depth) - wins,
+            "found_by_deeper_run": by_deeper,
+            "found_by_shallower_run": by_shallower,
+            "equal_depth": ties,
+            # Only true when it is true: a strict majority of all the
+            # one-sided detections with depth, ties included in the
+            # denominator so that they cannot manufacture a majority.
+            "mostly_found_by_deeper_run": (
+                by_deeper * 2 > len(disagreement_depth)),
         }
 
     return {
         "label_a": label_a,
         "label_b": label_b,
-        "paired_observations": n,
+        # Every pairing found, failed wells included - so "nothing
+        # paired" still means the ids did not match, not that the wells
+        # failed.
+        "paired_observations": len(all_pairs),
+        # The denominator of agreement, kappa and per-taxon agreement.
+        "pairs_compared": n,
+        "excluded_assay_failed": n_failed,
         "ambiguous_pairings": len(ambiguous),
         "agreement": round(agree / n, 4) if n else None,
         "cohen_kappa": None if kappa is None else round(kappa, 4),
         "kappa_note": (
             "Raw agreement is inflated by how often both runs say "
             "not_detected. Kappa removes that; a value near zero means the "
-            "agreement is no better than the marginal rates predict."
+            "agreement is no better than the marginal rates predict. Both "
+            "leave out pairs where either well was assay_failed, which is "
+            "no call at all."
         ),
         "call_matrix": {f"{x} / {y}": c
-                        for (x, y), c in Counter(call_pairs).most_common()},
+                        for (x, y), c in Counter(all_pairs).most_common()},
         "detected_by_one_only": dict(only),
         "depth_of_disagreements": deeper_found,
         "log10_copy_ratio": quantiles(ratios),
@@ -190,7 +235,7 @@ def side_labels(rows_a: list[dict], rows_b: list[dict], label_a: str,
                 label_b: str) -> tuple[str, str]:
     """Names for the two sides: as given, else each file's own run_id.
 
-    They must differ. Every per-side key - call_<label>, <label>_deeper -
+    They must differ. Every per-side key - call_<label>, detected_by_one_only[<label>] -
     is built from them, so two sides sharing a name (a run compared with
     a re-run of itself, both RUN01) would silently overwrite each other.
     """
@@ -270,7 +315,10 @@ def main(argv=None) -> int:
                         a["call"], b["call"], a.get("reads", ""),
                         b.get("reads", ""), a.get("depth", ""),
                         b.get("depth", ""), va or "", vb or "", ratio,
-                        "yes" if a["call"] == b["call"] else "no"])
+                        # Same rule as the summary: a failed well is not
+                        # a call, so it neither agrees nor disagrees.
+                        ("excluded" if "assay_failed" in (a["call"], b["call"])
+                         else "yes" if a["call"] == b["call"] else "no")])
 
     if not args.quiet:
         print(f"{args.label_a} vs {args.label_b}: "
@@ -284,10 +332,16 @@ def main(argv=None) -> int:
                   "that the ids match, or set --strip (replicate_suffix) "
                   "to remove a replicate suffix")
             return 0
-        print(f"    agreement {res['agreement']:.3f}", end="")
-        print(f"   kappa {res['cohen_kappa']:.3f}"
-              if res["cohen_kappa"] is not None
-              else "   kappa undefined (no disagreement possible)")
+        if res["excluded_assay_failed"]:
+            print(f"    {res['excluded_assay_failed']} left out of agreement "
+                  "and kappa: assay_failed on at least one side")
+        if res["agreement"] is None:
+            print("    agreement undefined: every pairing had a failed well")
+        else:
+            print(f"    agreement {res['agreement']:.3f}", end="")
+            print(f"   kappa {res['cohen_kappa']:.3f}"
+                  if res["cohen_kappa"] is not None
+                  else "   kappa undefined (no disagreement possible)")
         if res["n_both_detected"]:
             q = res["log10_copy_ratio"]
             print(f"    both detected: {res['n_both_detected']}, "
@@ -301,7 +355,9 @@ def main(argv=None) -> int:
             if d:
                 print(f"       of {d['n_disagreements_with_depth']} with "
                       "depth recorded, the deeper run found it "
-                      f"{max(d[f'{args.label_a}_deeper'], d[f'{args.label_b}_deeper'])} times")
+                      f"{d['found_by_deeper_run']} times, the shallower "
+                      f"{d['found_by_shallower_run']}, at equal depth "
+                      f"{d['equal_depth']}")
     return 0
 
 

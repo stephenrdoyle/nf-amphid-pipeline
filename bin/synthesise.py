@@ -62,13 +62,37 @@ CALL_MEANING = {
     "assay_failed": "the well cannot support either answer",
 }
 
-INTERNAL = ("spiked", "unspiked", "spike_failed")
+INTERNAL = ("spiked", "unspiked", "spike_failed", "slope_implausible")
 
 INTERNAL_MEANING = {
     "spiked": "both standards recovered, within the expected ratio",
     "unspiked": "no standard present - a negative here is unverified",
     "spike_failed": "standards present but wrong, so the well is unreliable",
+    "slope_implausible": (
+        "both standards recovered, so the well amplified and its calls "
+        "stand, but they did not scale with their nominal concentrations "
+        "closely enough to convert reads to copies - no copy number is "
+        "given"
+    ),
 }
+
+# The band of standard-curve slopes from which a copy number is still
+# worth emitting. Separate from --slope-tolerance, which only decides when
+# a slope earns a note: a slope of 0.8 is worth a warning but still gives
+# copy numbers in the right order of magnitude, whereas outside this band
+# the inversion stops being a measurement at all. The arithmetic is why:
+# copies are 10 ** (log-distance / slope), so a slope of 0.05 multiplies
+# every log-distance from the standards by twenty, and a negative slope
+# makes copies FALL as reads rise. A slope of 0.5 already means a hundred-
+# fold input difference produced a tenfold read difference; 2 means the
+# reverse. Beyond either, the two standards are not describing a dose-
+# response line and nothing read off it should be reported as an amount.
+#
+# Detection is not affected. Both standards were recovered, which is
+# exactly the evidence that the well could have produced a positive, so
+# its detected and not_detected calls stand; only quantification is
+# withheld.
+SLOPE_PLAUSIBLE = (0.5, 2.0)
 
 NEGATIVE_TYPES = {"neg_ntc", "neg_extraction", "blank", "negative"}
 
@@ -366,6 +390,8 @@ class Calibration:
         """Invert the fit. Returns None when there is no usable calibration,
         which is different from returning zero."""
         if reads <= 0 or self.state != "spiked":
+            # slope_implausible lands here too: its standards were found,
+            # but the line through them cannot be inverted honestly.
             return None
         if not (self.slope and math.isfinite(self.slope)):
             return None
@@ -475,6 +501,22 @@ def calibrate(
     cal.slope = (y2 - y1) / (x2 - x1)
     cal.intercept = y1 - cal.slope * x1
     cal.state = "spiked"
+    lo_ok, hi_ok = SLOPE_PLAUSIBLE
+    if not (lo_ok <= cal.slope <= hi_ok):
+        # The slope and intercept are kept and reported - they are the
+        # evidence - but the state changes so that copies() declines to
+        # invert them. Not spike_failed: the standards DID amplify, so the
+        # well can support a negative, and failing its calls would discard
+        # a detection result to punish a quantification problem.
+        cal.state = "slope_implausible"
+        cal.note = (
+            f"slope {cal.slope:.2f}, outside the plausible "
+            f"{lo_ok:g}-{hi_ok:g} - the standards did not describe a "
+            "dose-response line, so no copy number is given for this "
+            "well; detection calls still stand, since both standards "
+            "were recovered"
+        )
+        return cal
     if abs(cal.slope - 1.0) > slope_tol:
         cal.note = (
             f"slope {cal.slope:.2f} rather than 1 - the standards did not "
@@ -535,6 +577,16 @@ def limit_for(sid: str, s: Sample, lods: dict) -> tuple[int, str]:
     if not d:
         return 1, "no blanks on this run - the floor is a single read, "\
                   "which is an assumption rather than a measurement"
+    # detection_limits writes an entry for every reference whether or not
+    # the run had blanks, so the branch above never sees a run without
+    # them. Without this one, zero blanks fell through to "blanks were
+    # clean" - a measurement claimed where none was made. The fixed floor
+    # still applies; it is just not evidence of anything.
+    if not d.get("n_blanks"):
+        return d["absolute_floor"], (
+            f"the fixed floor of {d['absolute_floor']} - there were no "
+            "blanks on this run, so the limit is an assumption rather "
+            "than a measurement")
     absolute = d["max_reads_in_blank"]
     proportional = int(math.ceil(d["max_fraction_in_blank"] * s.depth))
     limit = max(absolute, proportional, d["absolute_floor"])
@@ -1115,9 +1167,22 @@ def main(argv=None) -> int:
     ap.add_argument("--run-id", default="")
     ap.add_argument("--min-quant-reads", type=int, default=10)
     ap.add_argument("--min-depth", type=int, default=100)
+    # Detection is strictly above the limit (n > limit), and the floor is
+    # one of the terms the limit is the maximum of. So a well needs MORE
+    # than this many reads - with the default of 2, three - however clean
+    # the blanks were. The help says that rather than "below which", which
+    # described a rule one read looser than the one applied.
     ap.add_argument("--absolute-floor", type=int, default=2,
-                    help="reads below which nothing is ever called detected")
-    ap.add_argument("--slope-tolerance", type=float, default=0.25)
+                    help="the smallest detection limit any reference can "
+                         "have: a detection needs MORE reads than this, "
+                         "however clean the blanks were")
+    # Default matches params.slope_tolerance, which the workflow passes;
+    # this default only matters when the script is run by hand.
+    ap.add_argument("--slope-tolerance", type=float, default=0.15,
+                    help="how far a well's standard-curve slope may sit "
+                         "from 1 before it is noted. Copy numbers are only "
+                         "withheld outside the wider plausible band "
+                         f"{SLOPE_PLAUSIBLE[0]:g}-{SLOPE_PLAUSIBLE[1]:g}")
     ap.add_argument("--permutations", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument(
@@ -1257,6 +1322,13 @@ def main(argv=None) -> int:
                     why += " - and unverified, since no standard was recovered"
 
             raw = cal.copies(n) if call == "detected" else None
+            if call == "detected" and cal.state == "slope_implausible":
+                # Said on the row, because an empty copies column on a
+                # detected row otherwise looks like a bug rather than a
+                # decision.
+                why += (f" - no copy number: calibration slope "
+                        f"{cal.slope:.2f} is outside the plausible "
+                        f"{SLOPE_PLAUSIBLE[0]:g}-{SLOPE_PLAUSIBLE[1]:g}")
             # corr_factor defaults to 1.0: unity is the sensible assumption
             # when efficiency has not been measured, and it keeps every
             # reference on the same arithmetic footing. The source is
@@ -1515,6 +1587,12 @@ def main(argv=None) -> int:
             else None,
             "outside_tolerance": sum(
                 1 for x in slopes if abs(x - 1) > args.slope_tolerance),
+            "tolerance": args.slope_tolerance,
+            # The stricter question: how many wells had copy numbers
+            # withheld altogether, not merely flagged.
+            "plausible_band": list(SLOPE_PLAUSIBLE),
+            "outside_plausible_band": sum(
+                1 for c in cals.values() if c.state == "slope_implausible"),
         },
         "detection_limits": lods,
         "read_funnel": funnel,

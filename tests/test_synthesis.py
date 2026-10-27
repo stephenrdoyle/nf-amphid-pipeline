@@ -282,6 +282,135 @@ def test_detection_limit() -> None:
           lim == 2 and "proportional" not in basis, f"{lim} ({basis})")
 
 
+def test_implausible_slope_and_missing_blanks() -> None:
+    """Two places where synthesis said more than it measured.
+
+    A two-point standard curve cannot fail to fit, so a slope of -0.5 or
+    0.05 used to be inverted like any other: copies fell as reads rose,
+    or every log-distance was multiplied twenty-fold, with only a note to
+    say so. And a run with no blanks at all was described as having
+    clean ones, because detection_limits writes an entry for every
+    reference and the "no blanks" branch never fired.
+    """
+    print("\nimplausible standard curves, and runs with no blanks")
+
+    # inverted: the high standard came back below the low one
+    s = sample_with({"QUANT_hi": 100, "QUANT_lo": 1000})
+    c = S.calibrate(s, QUANTS, 10, 0.25)
+    check("a negative slope withholds quantification",
+          c.state == "slope_implausible" and c.slope < 0
+          and c.copies(500) is None,
+          f"{c.state} slope {c.slope:.3f} copies {c.copies(500)}")
+    check("and keeps the fitted slope as evidence", "slope -" in c.note,
+          c.note)
+
+    # nearly flat: a 100-fold input difference gave 1.26-fold the reads
+    s = sample_with({"QUANT_hi": 126, "QUANT_lo": 100})
+    c = S.calibrate(s, QUANTS, 10, 0.25)
+    check("a near-zero slope withholds quantification",
+          c.state == "slope_implausible" and c.copies(500) is None,
+          f"{c.state} slope {c.slope:.3f}")
+
+    # merely compressed stays quantified, with its note
+    s = sample_with({"QUANT_hi": 2000, "QUANT_lo": 100})
+    c = S.calibrate(s, QUANTS, 10, 0.25)
+    check("a compressed but plausible slope still quantifies",
+          c.state == "spiked" and c.copies(500) is not None, c.state)
+
+    # zero blanks is zero blanks, not clean blanks
+    lone = {"S1": sample_with({"T1": 3}, 1000)}
+    lone["S1"].sample_id = "S1"
+    lods = S.detection_limits(lone, ["T1"], 2, 100)
+    lim, basis = S.limit_for("T1", lone["S1"], lods)
+    check("a run without blanks says so",
+          lim == 2 and "no blanks" in basis and "clean" not in basis,
+          f"{lim} ({basis})")
+    clean = {"B1": sample_with({"T1": 0}, 1000, "neg_ntc"),
+             "S1": sample_with({"T1": 3}, 1000)}
+    for k, v in clean.items():
+        v.sample_id = k
+    lim, basis = S.limit_for("T1", clean["S1"],
+                             S.detection_limits(clean, ["T1"], 2, 100))
+    check("while a run with clean blanks still says that",
+          lim == 2 and "clean" in basis, f"{lim} ({basis})")
+
+    # The floor's help describes the rule applied: a detection needs MORE
+    # reads than the floor. It used to say "below which", one read looser.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try:
+            S.main(["--help"])
+        except SystemExit:
+            pass
+    helptext = " ".join(buf.getvalue().split())
+    check("--absolute-floor help matches the strict comparison",
+          "needs MORE reads than this" in helptext
+          and "reads below which nothing" not in helptext,
+          helptext[helptext.find("--absolute-floor"):][:200])
+
+    # end to end: the call stands, the copy number does not, and the run
+    # QC and the row both say why
+    tmp = tempfile.mkdtemp()
+    try:
+        ref = os.path.join(tmp, "reference.tsv")
+        with open(ref, "w") as fh:
+            fh.write("seq_id\tlocus\ttype\tpurpose\ttaxon\tparent_id\t"
+                     "default_conc\tconc_units\tcorr_factor\tsequence\n")
+            fh.write("T1\tITS2\ttarget\tspeciation\tSpecies_a\t\t\t\t\tACGT\n")
+            fh.write("QUANT_hi\tITS2\tquant\t\t\t\t10000\tcopies_per_rxn\t1.0\tACGT\n")
+            fh.write("QUANT_lo\tITS2\tquant\t\t\t\t100\tcopies_per_rxn\t1.0\tACGT\n")
+        ss = os.path.join(tmp, "samplesheet.csv")
+        rows = {
+            "GOOD":     {"T1": 400, "QUANT_hi": 1000, "QUANT_lo": 10},
+            "INVERTED": {"T1": 400, "QUANT_hi": 100, "QUANT_lo": 1000},
+            "EMPTY":    {"T1": 0, "QUANT_hi": 1000, "QUANT_lo": 10},
+        }
+        with open(ss, "w") as fh:
+            fh.write("run_id,platform,sample_id,index_i7,index_i5,sample_type\n")
+            for sid in rows:
+                fh.write(f"RUN01,illumina,{sid},A,B,unknown\n")
+        adir = os.path.join(tmp, "assign")
+        os.makedirs(adir)
+        for sid, counts in rows.items():
+            with open(os.path.join(adir, f"{sid}.counts.tsv"), "w") as fh:
+                fh.write("sample_id\tseq_id\tlocus\ttype\tpurpose\ttaxon\t"
+                         "reads\tunique_seqs\n")
+                for k, v in counts.items():
+                    fh.write(f"{sid}\t{k}\tITS2\t-\t-\t-\t{v}\t1\n")
+            with open(os.path.join(adir, f"{sid}.assign.json"), "w") as fh:
+                json.dump({"sample_id": sid,
+                           "sequences_in": sum(counts.values())}, fh)
+        out = os.path.join(tmp, "synth")
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(["--assign-dir", adir, "--samplesheet", ss,
+                    "--reference", ref, "--outdir", out,
+                    "--run-id", "RUN01", "--permutations", "20", "--quiet"])
+        calls = {r["sample_id"]: r for r in csv.DictReader(
+            open(os.path.join(out, "calls.tsv")), delimiter="\t")}
+        qc = json.load(open(os.path.join(out, "run_qc.json")))
+        inv = calls["INVERTED"]
+        check("an implausible curve leaves the detection standing",
+              inv["call"] == "detected", f"{inv['call']} - {inv['basis']}")
+        check("but gives it no copy number",
+              inv["copies_per_unit_dna"] == ""
+              and inv["internal_control"] == "slope_implausible",
+              f"{inv['copies_per_unit_dna']!r} {inv['internal_control']}")
+        check("and the row says why the copies are missing",
+              "no copy number" in inv["basis"], inv["basis"])
+        check("a plausible well on the same run still quantifies",
+              calls["GOOD"]["copies_per_unit_dna"] != "")
+        check("run QC counts the wells withheld",
+              qc["calibration_slope"]["outside_plausible_band"] == 1
+              and qc["internal_control_summary"].get("slope_implausible") == 1,
+              str(qc["calibration_slope"]))
+        check("a run with no blanks does not claim clean ones",
+              "clean" not in calls["EMPTY"]["basis"]
+              and "no blanks" in calls["GOOD"]["basis"],
+              calls["GOOD"]["basis"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # the statistics
 # --------------------------------------------------------------------------
@@ -1186,6 +1315,7 @@ def main() -> int:
     test_control_plasmid_reporting()
     test_detection_limit()
     test_calls()
+    test_implausible_slope_and_missing_blanks()
     test_permutation_calibration()
     test_end_to_end()
     test_cohort_completeness()

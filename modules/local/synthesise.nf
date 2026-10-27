@@ -44,6 +44,11 @@ process SYNTHESISE {
     // by path rather than derived inside synthesise.py, because a tool
     // that goes looking inside a directory for optional inputs is a
     // tool whose inputs are not declared anywhere.
+    //
+    // --slope-tolerance is params.slope_tolerance, documented as the
+    // tolerated deviation in the standard-curve slope - which is this
+    // process's slope. Without it synthesise.py fell back on a default of
+    // its own and the parameter silently did nothing here.
     """
     synthesise.py \\
         --assign-dir assign \\
@@ -55,6 +60,7 @@ process SYNTHESISE {
         --run-id ${run_id} \\
         --min-depth ${params.min_depth} \\
         --absolute-floor ${params.absolute_floor} \\
+        --slope-tolerance ${params.slope_tolerance} \\
         --permutations ${params.permutations} \\
         ${params.controls_as_targets ? '--controls-as-targets' : ''} \\
         --plasmid-warn ${params.plasmid_warn} \\

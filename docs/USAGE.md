@@ -374,9 +374,9 @@ edit `nextflow.config` — where it is a real boolean — or use a
 | parameter | default | meaning |
 |---|---|---|
 | `--min_depth` | `100` | below this a well is `assay_failed`, not negative |
-| `--absolute_floor` | `2` | reads below this are never a detection |
+| `--absolute_floor` | `2` | a detection needs **more** reads than this, however clean the blanks |
 | `--permutations` | `2000` | permutations for the calibration test |
-| `--slope_tolerance` | `0.15` | tolerated deviation in the standard curve slope |
+| `--slope_tolerance` | `0.15` | deviation from a slope of 1 that earns a well a note; outside 0.5–2 copy numbers are withheld regardless |
 | `--min_composition_reads` | `100` | minimum reads to report composition |
 | `--replicate_suffix` | `null` | regex stripped from `sample_id` to pair replicates across runs, e.g. `'-r[0-9]+$'` |
 
@@ -474,6 +474,16 @@ The distinction matters: a negative result is only a negative result if
 the internal control says the well amplified. `assay_failed` is not a
 missing value to be dropped — it is the honest answer for a well whose
 spike-in did not come back.
+
+Copy numbers are a second, separate claim. They need a usable standard
+curve, so the `internal_control` column says whether the well had one:
+
+| `internal_control` | meaning |
+|---|---|
+| `spiked` | both standards recovered, slope plausible — copies reported |
+| `slope_implausible` | both standards recovered, but the fitted slope is outside 0.5–2 (or negative). Calls stand; copies are withheld, because inverting that curve would invent them |
+| `unspiked` | no standard present — calls stand, but a negative is unverified |
+| `spike_failed` | standards present but wrong — the well is `assay_failed` |
 
 ### Reading the fit distance
 

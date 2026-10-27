@@ -63,9 +63,39 @@ MODEL_MEANING = {
     ),
     "insufficient_data": (
         "too few mixtures or replicates to decide; corr_factor left unset "
-        "and the default of 1.0 will apply"
+        "here - an updated panel keeps whatever factor it already carried, "
+        "unverified by this run, or the default of 1.0 if it had none"
     ),
 }
+
+
+def check_units(mocks: dict[str, list[dict]]) -> None:
+    """Refuse a mock whose rows are not all in one unit.
+
+    Efficiency is reads per unit input, divided by the same ratio for the
+    spike-ins, so the units cancel only when they are the same unit. A
+    mock with standards in copies and targets in nanograms would yield a
+    number that is off by the copies-per-nanogram of each template - a
+    factor of thousands, and in no way visible in the output, which would
+    look like an ordinary efficiency. Nothing here can convert between
+    them, so the honest response is to stop.
+    """
+    bad = []
+    for sid, rows in sorted(mocks.items()):
+        units = sorted({r["units"] for r in rows})
+        if len(units) > 1:
+            by = ", ".join(
+                f"{u}: " + ",".join(sorted(r["seq_id"] for r in rows
+                                           if r["units"] == u))
+                for u in units)
+            bad.append(f"{sid} ({by})")
+    if bad:
+        raise SystemExit(
+            "mock(s) mix amount_units, so efficiencies relative to the "
+            "spike-ins would carry a unit conversion rather than an "
+            "amplification bias - state every amount in one unit:\n    "
+            + "\n    ".join(bad[:10])
+            + (f"\n    ... and {len(bad) - 10} more" if len(bad) > 10 else ""))
 
 
 # --------------------------------------------------------------------------
@@ -288,6 +318,7 @@ def main(argv=None) -> int:
     restore_declared_ids(observed, args.preflight_dir, args.run_id)
     if not mocks:
         raise SystemExit(f"no mock definitions in {args.mocks}")
+    check_units(mocks)
     usable = [s for s in mocks if s in observed]
     if not usable:
         raise SystemExit(
@@ -362,6 +393,18 @@ def main(argv=None) -> int:
             "note": MODEL_MEANING[model],
         })
 
+    if not factors:
+        # Every species fell below --min-reads in every well, or no well
+        # recovered enough of its standards to anchor anything. Said
+        # plainly, because the alternative was an IndexError on factors[0]
+        # that read as a bug in this script rather than as a thin run.
+        raise SystemExit(
+            f"no efficiency could be measured: in none of the {len(usable)} "
+            "mock well(s) with counts did a target reach --min-reads "
+            f"({args.min_reads}) alongside spike-ins totalling at least "
+            "that many reads. Check that the mocks were spiked and "
+            "sequenced deeply enough, or lower --min-reads")
+
     os.makedirs(args.outdir, exist_ok=True)
     with open(os.path.join(args.outdir, "corr_factors.tsv"), "w",
               newline="") as fh:
@@ -392,15 +435,54 @@ def main(argv=None) -> int:
             "in stool this corrects one step of three."
         ),
     }
+
+    # What --update-reference did to each species, decided before the
+    # summary is written so the summary can say so.
+    #
+    # constant              - the fitted factor replaces the panel's.
+    # composition_dependent - the panel's factor is CLEARED. This run
+    #                         showed no constant is valid for the species,
+    #                         so a constant carried over from the input
+    #                         panel is contradicted by the evidence, not
+    #                         merely unconfirmed. Left in place it looked
+    #                         freshly calibrated in a file named
+    #                         "calibrated", and synthesis applied it.
+    # insufficient_data     - kept, and listed. This run could not decide
+    #                         either way, which is not evidence against an
+    #                         earlier measurement; discarding it would let
+    #                         a thin mock run erase a good one.
+    cleared, kept = [], []
+    if args.update_reference:
+        model_of = {f["seq_id"]: f["model"] for f in factors}
+        got = {f["seq_id"]: f["corr_factor"] for f in factors
+               if f["corr_factor"]}
+        for r in refs:
+            sid = r["seq_id"]
+            old = (r.get("corr_factor") or "").strip()
+            if sid in got:
+                r["corr_factor"] = got[sid]
+            elif model_of.get(sid) == "composition_dependent":
+                if old:
+                    cleared.append({"seq_id": sid, "was": old})
+                r["corr_factor"] = ""
+            elif model_of.get(sid) == "insufficient_data" and old:
+                kept.append({"seq_id": sid, "value": old})
+        summary["reference_update"] = {
+            "cleared_composition_dependent": cleared,
+            "kept_unverified": kept,
+            "note": (
+                "Composition-dependent species have their corr_factor "
+                "cleared in the updated panel, so the default of 1.0 "
+                "applies; insufficient-data species keep the factor the "
+                "input panel carried, which this run neither confirmed "
+                "nor contradicted."
+            ),
+        }
+
     with open(os.path.join(args.outdir, "calibration.json"), "w") as fh:
         json.dump(summary, fh, indent=2)
 
     if args.update_reference:
-        got = {f["seq_id"]: f["corr_factor"] for f in factors
-               if f["corr_factor"]}
-        for r in refs:
-            if r["seq_id"] in got:
-                r["corr_factor"] = got[r["seq_id"]]
         with open(args.update_reference, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(refs[0]), delimiter="\t", lineterminator="\n")
             w.writeheader()
@@ -425,6 +507,12 @@ def main(argv=None) -> int:
                       f"CI {v['slope_ci'][0]}–{v['slope_ci'][1]}")
             print("    A constant fitted here would overstate every "
                   "minority species.")
+        for c in cleared:
+            print(f"    cleared corr_factor {c['was']} for {c['seq_id']} in "
+                  "the updated panel: composition dependent here")
+        for k in kept:
+            print(f"    kept corr_factor {k['value']} for {k['seq_id']} in "
+                  "the updated panel, unverified: too little data here")
     return 0
 
 

@@ -239,14 +239,25 @@ def test_composition_dependent_case() -> None:
               summary["species_calibrated"] == 0,
               str(summary["species_calibrated"]))
 
-        # and nothing is written into a panel that should not receive it
+        # And nothing constant survives into the updated panel. The input
+        # panel carries a factor for both species; this run showed no
+        # constant is valid for either, so carrying the old one over -
+        # which is what happened - wrote a contradicted number into a
+        # file called "calibrated", and synthesis applied it.
         newref = os.path.join(tmp, "updated.tsv")
-        run_cal(tmp, ref, mocks, adir, ["--update-reference", newref])
+        _f, summary2, _o = run_cal(tmp, ref, mocks, adir,
+                                   ["--update-reference", newref])
         rows = {r["seq_id"]: r for r in csv.DictReader(
             open(newref), delimiter="\t")}
-        check("an updated panel carries no fabricated factor",
-              all(rows[s]["corr_factor"] == str(TRUTH[s]) for s in TRUTH),
+        check("an updated panel clears a composition-dependent factor",
+              all(rows[s]["corr_factor"] == "" for s in TRUTH),
               str({s: rows[s]["corr_factor"] for s in TRUTH}))
+        cleared = summary2.get("reference_update", {}).get(
+            "cleared_composition_dependent", [])
+        check("and records what it cleared, and from what",
+              sorted(c["seq_id"] for c in cleared) == sorted(TRUTH)
+              and all(c["was"] == str(TRUTH[c["seq_id"]]) for c in cleared),
+              str(cleared))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -323,12 +334,78 @@ def test_update_reference() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_refusals() -> None:
+    """Inputs that used to produce a crash or a wrong number."""
+    print("\ninputs that cannot be calibrated")
+
+    # Spike-ins in copies, targets in ng. The efficiency would carry a
+    # unit conversion of thousands-fold and look like any other number.
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, mocks, adir = build_run(tmp, competition=0.0)
+        rows = list(csv.DictReader(open(mocks), delimiter="\t"))
+        for r in rows:
+            if not r["seq_id"].startswith("QUANT"):
+                r["amount_units"] = "ng"
+        with open(mocks, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0]), delimiter="\t")
+            w.writeheader()
+            w.writerows(rows)
+        try:
+            run_cal(tmp, ref, mocks, adir)
+            got = "ran"
+        except SystemExit as e:
+            got = str(e)
+        check("mixed amount_units in a mock are refused",
+              "amount_units" in got and "ng" in got and "copies" in got,
+              got[:200])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Nothing reaches --min-reads: was an IndexError on factors[0].
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, mocks, adir = build_run(tmp, competition=0.0, depth=200)
+        try:
+            run_cal(tmp, ref, mocks, adir, ["--min-reads", "100000"])
+            got = "ran"
+        except SystemExit as e:
+            got = str(e)
+        except Exception as e:                      # noqa: BLE001
+            got = f"raised {type(e).__name__}: {e}"
+        check("no measurable efficiency is a clear refusal, not a crash",
+              got.startswith("no efficiency could be measured"), got[:200])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Too little design to decide: the panel's existing factor is kept -
+    # this run is no evidence against it - and listed as unverified.
+    tmp = tempfile.mkdtemp()
+    try:
+        ref, mocks, adir = build_run(tmp, 0.0, ratios=[(50, 50)],
+                                     batches=("B1", "B2"))
+        newref = os.path.join(tmp, "updated.tsv")
+        _f, summary, _o = run_cal(tmp, ref, mocks, adir,
+                                  ["--update-reference", newref])
+        rows = {r["seq_id"]: r for r in csv.DictReader(
+            open(newref), delimiter="\t")}
+        check("an insufficient-data species keeps its earlier factor",
+              all(rows[s]["corr_factor"] == str(TRUTH[s]) for s in TRUTH),
+              str({s: rows[s]["corr_factor"] for s in TRUTH}))
+        kept = summary.get("reference_update", {}).get("kept_unverified", [])
+        check("and is listed as kept unverified",
+              sorted(k["seq_id"] for k in kept) == sorted(TRUTH), str(kept))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_stats()
     test_constant_case()
     test_composition_dependent_case()
     test_thin_designs()
     test_update_reference()
+    test_refusals()
 
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

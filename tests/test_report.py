@@ -182,9 +182,171 @@ def test_asymmetry() -> None:
           str(res["detected_by_one_only"]))
     d = res["depth_of_disagreements"]
     check("and the depth behind the disagreement is reported",
-          d and d["deep_deeper"] == 10 and d["shallow_deeper"] == 0, str(d))
+          d and d["found_by_deeper_run"] == 10
+          and d["found_by_shallower_run"] == 0
+          and d["mostly_found_by_deeper_run"], str(d))
     check("agreement is zero here, and kappa says so too",
           res["agreement"] == 0.0)
+
+    # The case the old count got backwards: A is deeper every time, but
+    # it is B - the SHALLOW side - that finds them. Counting "A was
+    # deeper" gave 10, and the CLI printed max(A_deeper, B_deeper) as
+    # "the deeper run found it 10 times" when it found none of them.
+    a, b = [], []
+    for i in range(10):
+        a.append(row(f"S{i}", "T1", "not_detected", 1, depth=20000))
+        b.append(row(f"S{i}", "T1", "detected", 80, depth=500, copies="300"))
+    d = C.compare(a, b, None, "deep", "shallow")["depth_of_disagreements"]
+    check("a detection by the shallower run is counted as such",
+          d["found_by_deeper_run"] == 0 and d["found_by_shallower_run"] == 10
+          and not d["mostly_found_by_deeper_run"], str(d))
+
+    # Equal depths are neither side's, and used to be credited to B.
+    a = [row(f"S{i}", "T1", "not_detected", 1, depth=1000) for i in range(4)]
+    b = [row(f"S{i}", "T1", "detected", 80, depth=1000) for i in range(4)]
+    d = C.compare(a, b, None, "A", "B")["depth_of_disagreements"]
+    check("ties are counted apart, not given to either side",
+          d["equal_depth"] == 4 and d["found_by_deeper_run"] == 0
+          and not d["mostly_found_by_deeper_run"], str(d))
+
+    # and the CLI prints the real count, not the larger of two others
+    tmp = tempfile.mkdtemp()
+    try:
+        a = [row(f"S{i}", "T1", "not_detected", 1, depth=20000)
+             for i in range(10)]
+        b = [row(f"S{i}", "T1", "detected", 80, depth=500) for i in range(10)]
+        for name, rows in (("a.tsv", a), ("b.tsv", b)):
+            with open(os.path.join(tmp, name), "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(rows[0]),
+                                   delimiter="\t", lineterminator="\n")
+                w.writeheader()
+                w.writerows(rows)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            C.main(["--a", os.path.join(tmp, "a.tsv"),
+                    "--b", os.path.join(tmp, "b.tsv"),
+                    "--outdir", os.path.join(tmp, "cmp")])
+        check("the CLI does not credit the deeper run with B's finds",
+              "the deeper run found it 0 times" in buf.getvalue(),
+              buf.getvalue()[-300:])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_failed_wells_are_not_agreement() -> None:
+    """assay_failed is no call, so it cannot agree with anything."""
+    print("\nfailed wells left out of agreement")
+    a, b = [], []
+    for i in range(5):     # both failed: used to count as agreement
+        a.append(row(f"F{i}", "T1", "assay_failed"))
+        b.append(row(f"F{i}", "T1", "assay_failed"))
+    for i in range(3):     # failed against a negative
+        a.append(row(f"G{i}", "T1", "assay_failed"))
+        b.append(row(f"G{i}", "T1", "not_detected"))
+    for i in range(4):
+        a.append(row(f"N{i}", "T1", "not_detected"))
+        b.append(row(f"N{i}", "T1", "not_detected"))
+    for i in range(4):
+        a.append(row(f"D{i}", "T1", "detected", 100, copies="10"))
+        b.append(row(f"D{i}", "T1", "detected", 100, copies="10"))
+    a.append(row("X", "T1", "detected", 100))
+    b.append(row("X", "T1", "not_detected"))
+    res = C.compare(a, b, None, "A", "B")
+    check("pairs with a failed well are excluded and counted",
+          res["excluded_assay_failed"] == 8 and res["pairs_compared"] == 9
+          and res["paired_observations"] == 17, str(
+              {k: res[k] for k in ("excluded_assay_failed", "pairs_compared",
+                                   "paired_observations")}))
+    check("agreement is over real calls only",
+          res["agreement"] == round(8 / 9, 4), str(res["agreement"]))
+    check("kappa sees two labels, not three",
+          res["cohen_kappa"] == round(C.cohen_kappa(
+              [("not_detected",) * 2] * 4 + [("detected",) * 2] * 4
+              + [("detected", "not_detected")]), 4), str(res["cohen_kappa"]))
+    check("the failures stay visible in the call matrix",
+          res["call_matrix"].get("assay_failed / assay_failed") == 5,
+          str(res["call_matrix"]))
+    check("per-taxon agreement leaves them out too",
+          res["per_taxon_agreement"].get("T") == round(8 / 9, 4),
+          str(res["per_taxon_agreement"]))
+
+    allfail = C.compare([row("F", "T1", "assay_failed")],
+                        [row("F", "T1", "assay_failed")], None, "A", "B")
+    check("a comparison of failed wells only has no agreement to report",
+          allfail["agreement"] is None and allfail["paired_observations"] == 1,
+          str(allfail["agreement"]))
+
+
+def test_controls_and_groups_in_the_report() -> None:
+    """Three rendering faults, each reading one thing as another.
+
+    With --controls-as-targets the plasmid rows carry purpose speciation,
+    so they entered every sample's composition denominator and a well
+    that was all one species drew it at half. The group table headed
+    n_analysed as "Libraries". And a well whose standard curve was
+    implausible lost its copy numbers without the opening section saying.
+    """
+    print("\ncontrols kept out of the composition, and the group table")
+    tmp = tempfile.mkdtemp()
+    try:
+        synth = make_synthesis(tmp)
+        cpath = os.path.join(synth, "calls.tsv")
+        calls = list(csv.DictReader(open(cpath), delimiter="\t"))
+        extra = []
+        for c in calls:
+            c["reference_type"] = "target"
+            if c["seq_id"] == "T1":
+                # a plasmid row exactly as synthesis writes one under
+                # --controls-as-targets: same purpose, its own type
+                extra.append(dict(c, seq_id="CTRL1", taxon="Plasmid_X",
+                                  reference_type="control",
+                                  reads=c["reads"]))
+        with open(cpath, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(calls[0]),
+                               delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            w.writerows(calls + extra)
+
+        gpath = os.path.join(synth, "group_summary.tsv")
+        with open(gpath, "w", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+            w.writerow(["run_id", "field", "value", "n_libraries",
+                        "n_controls", "n_analysed", "reads_assigned",
+                        "median_depth", "detected", "note"])
+            w.writerow(["RUN01", "batch", "b1", 7, 1, 6, 9000, 1500, 2, ""])
+            w.writerow(["RUN01", "batch", "b2", 5, 0, 5, 8000, 1600, 2, ""])
+
+        qpath = os.path.join(synth, "run_qc.json")
+        qc = json.load(open(qpath))
+        qc["internal_control_summary"]["slope_implausible"] = 2
+        qc["calibration_slope"]["plausible_band"] = [0.5, 2.0]
+        json.dump(qc, open(qpath, "w"))
+
+        out = os.path.join(tmp, "report.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            R.main(["--synthesis-dir", synth, "--out", out, "--quiet"])
+        doc = open(out, encoding="utf-8").read()
+
+        comp = doc[doc.index("<h2>Composition</h2>"):]
+        comp = comp[:comp.index("<h2>", 10)]
+        shares = [float(x) for x in
+                  re.findall(r'Taxon_T1: ([\d.]+)% of', comp)]
+        check("a well that is all one target draws it at 100%, plasmid aside",
+              shares and max(shares) == 100.0, str(shares[:6]))
+        check("the plasmid is not part of the target composition",
+              "Plasmid_X" not in comp, "plasmid drawn in the composition")
+
+        grp = doc[doc.index("<h2>By group</h2>"):]
+        grp = grp[:grp.index("</table>")]
+        check("the group table heads n_analysed as analysed",
+              "<th class='num'>Analysed</th>" in grp
+              and ">Libraries<" not in grp, grp[:400])
+
+        head = doc[:doc.index("<h2>Calls</h2>")]
+        check("wells with copies withheld are raised before the results",
+              "2 wells have no copy numbers" in head, "not raised")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
@@ -455,9 +617,12 @@ def test_report() -> None:
                        "cohen_kappa": 0.831, "within_twofold": 0.971,
                        "kappa_note": "chance removed",
                        "detected_by_one_only": {"nanopore": 9},
+                       "excluded_assay_failed": 6,
                        "depth_of_disagreements": {
                            "n_disagreements_with_depth": 9,
-                           "illumina_deeper": 2, "nanopore_deeper": 7}}, fh)
+                           "found_by_deeper_run": 7,
+                           "found_by_shallower_run": 2, "equal_depth": 0,
+                           "mostly_found_by_deeper_run": True}}, fh)
         out2 = os.path.join(tmp, "report2.html")
         with contextlib.redirect_stdout(io.StringIO()):
             R.main(["--synthesis-dir", synth, "--comparison", cmp_path,
@@ -469,6 +634,34 @@ def test_report() -> None:
               "0.925" in doc2 and "0.831" in doc2)
         check("the section is absent when there is no paired run",
               "Agreement with the paired run" not in doc)
+        check("failed wells left out of agreement are counted",
+              "6 paired observation(s) had an assay_failed well" in doc2)
+        check("'most found by the deeper run' when it is so",
+              "most were found by the deeper run" in doc2)
+
+        # The sentence used to be unconditional. When the shallower run
+        # made most of the one-sided detections, saying the deeper one did
+        # explains away a real platform difference as sampling.
+        with open(cmp_path, "w") as fh:
+            json.dump({"label_a": "illumina", "label_b": "nanopore",
+                       "paired_observations": 120, "agreement": 0.925,
+                       "cohen_kappa": 0.831, "within_twofold": 0.971,
+                       "kappa_note": "chance removed",
+                       "detected_by_one_only": {"nanopore": 9},
+                       "depth_of_disagreements": {
+                           "n_disagreements_with_depth": 9,
+                           "found_by_deeper_run": 2,
+                           "found_by_shallower_run": 6, "equal_depth": 1,
+                           "mostly_found_by_deeper_run": False}}, fh)
+        out4 = os.path.join(tmp, "report4.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            R.main(["--synthesis-dir", synth, "--comparison", cmp_path,
+                    "--out", out4, "--quiet"])
+        doc4 = open(out4, encoding="utf-8").read()
+        check("and not when the shallower run found most of them",
+              "most were found by the deeper run" not in doc4
+              and "2 by the deeper run, 6 by the shallower" in doc4,
+              doc4[doc4.find("Found by one run only"):][:300])
 
         # Nothing paired. compare_runs writes agreement as None, and the
         # report formatted it with :.3f and crashed - so a comparison that
@@ -641,7 +834,9 @@ def main() -> int:
     test_distance_chart_shows_a_minority_mode()
     test_pairing()
     test_asymmetry()
+    test_failed_wells_are_not_agreement()
     test_report()
+    test_controls_and_groups_in_the_report()
     test_composition_is_per_sample()
 
     print(f"\n{'='*62}")
