@@ -53,7 +53,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    find_anchor_cost,
+    find_anchor_leftmost,
     load_assay,
     open_reads,
     read_run_metadata,
@@ -98,11 +98,22 @@ CLOSES = ("7+", "5-")
 
 
 def scan_all(text: str, pattern: str, max_edits: int, limit: int = 24):
-    """Every non-overlapping occurrence, left to right."""
+    """Every non-overlapping occurrence, left to right.
+
+    Each search asks for the FIRST copy in the remainder, not the best
+    one. Asking for the best is how this used to work, and it skipped
+    anchors: a read of [unit A whose i7 anchor carries one error][a
+    fragment of B ending in a clean i7 anchor] presents B's anchor as
+    the best match, the search resumes past it, and A's anchor is never
+    seen. With one CLOSE where there were two, the CLOSE -> CLOSE cut
+    cannot fire, and demultiplexing reads A's i5 with B's i7 - the
+    hybrid pair this whole stage exists to prevent. Nanopore puts an
+    error in a 14bp anchor often enough that this was not a corner case.
+    """
     hits = []
     off = 0
     while len(hits) < limit and off < len(text):
-        h = find_anchor_cost(text[off:], pattern, max_edits)
+        h = find_anchor_leftmost(text[off:], pattern, max_edits)
         if h is None:
             break
         s, e, _c = h
@@ -226,9 +237,15 @@ def split_one_file(job: dict) -> dict:
     head_len, tail_len = job["head_len"], job["tail_len"]
     min_length = job["min_length"]
 
-    n_reads = n_pieces = n_dropped = 0
+    n_reads = n_pieces = n_dropped = n_cut = n_none = 0
     bases_in = bases_out = 0
+    # Counted on the pieces that SURVIVE the length floor, because that is
+    # what a read became. Counting them before the floor made a read whose
+    # cut left a one-base remainder (the clamp in cut_positions puts the
+    # last cut at most one base from the end) count as "split" while
+    # writing one piece - a cut rate the output does not show.
     per_read: Counter = Counter()
+    per_read_cut: Counter = Counter()
 
     tmp = dest + ".partial"
     with gzip.open(tmp, "wt") as out:
@@ -238,7 +255,15 @@ def split_one_file(job: dict) -> dict:
             pieces = split_read(seq, qual, a5, a7, edits, head_len, tail_len)
             kept = [p for p in pieces if len(p[0]) >= min_length]
             n_dropped += len(pieces) - len(kept)
-            per_read[min(len(pieces), 5)] += 1
+            if len(pieces) > 1:
+                n_cut += 1
+            # A read every piece of which is below the floor leaves nothing
+            # behind. Without its own count it vanished: reads_in could
+            # not be reconciled against anything written.
+            if not kept:
+                n_none += 1
+            per_read[min(len(kept), 5)] += 1
+            per_read_cut[min(len(pieces), 5)] += 1
             for k, (s, q) in enumerate(kept):
                 pid = read_id if len(kept) == 1 else f"{read_id}_u{k + 1}"
                 out.write(f"@{pid}\n{s}\n+\n{q}\n")
@@ -252,9 +277,17 @@ def split_one_file(job: dict) -> dict:
         "source": src,
         "reads_in": n_reads,
         "pieces_out": n_pieces,
+        # Reads that came out as more than one usable piece.
         "reads_split": sum(v for k, v in per_read.items() if k > 1),
+        # Reads the cut rule fired on at all, whatever the floor then
+        # kept - the measure of what the anchors saw, not of the output.
+        "reads_cut": n_cut,
+        "reads_with_no_piece_kept": n_none,
         "pieces_dropped_below_min_length": n_dropped,
+        # Kept pieces per read; bin 0 is reads_with_no_piece_kept, so the
+        # bins sum to reads_in.
         "pieces_per_read_distribution": dict(per_read),
+        "pieces_per_read_distribution_before_min_length": dict(per_read_cut),
         "bases_in": bases_in,
         "bases_out": bases_out,
         # Recorded per part, not once for the run: when Nextflow fans
@@ -262,11 +295,21 @@ def split_one_file(job: dict) -> dict:
         # sees an original read header. Splitting rewrites read ids, so
         # if it is not captured here it cannot be recovered at all.
         "basecalling": read_run_metadata([src]),
+        # The cut geometry this part used. The index length sets where
+        # every cut lands, and the workflow does not pass it, so the
+        # summary has to be able to say which value was in force.
+        "index_length": job.get("index_length"),
+        "barcode_repeats": job.get("barcode_repeats"),
         "code": job["code"],
     }
     with open(job["stats"], "w", encoding="utf-8") as fh:
         json.dump(stats, fh)
     return stats
+
+
+def _one_or_all(results: list, key: str):
+    vals = sorted({r.get(key) for r in results if r.get(key) is not None})
+    return vals[0] if len(vals) == 1 else (vals or None)
 
 
 def build_summary(results: list, file_report: dict, min_length: int,
@@ -288,9 +331,16 @@ def build_summary(results: list, file_report: dict, min_length: int,
     bases_in = sum(r["bases_in"] for r in results)
     bases_out = sum(r["bases_out"] for r in results)
     per_read: Counter = Counter()
+    per_read_cut: Counter = Counter()
     for r in results:
         for k, v in r["pieces_per_read_distribution"].items():
             per_read[int(k)] += v
+        # .get, not [], for the counters added later: a part written
+        # without them (the workflow's stub, for one) is still a part, and
+        # its contribution to them is nothing rather than a KeyError.
+        for k, v in r.get("pieces_per_read_distribution_before_min_length",
+                          {}).items():
+            per_read_cut[int(k)] += v
 
     # Basecalling provenance. Each part records what produced its own
     # reads; splitting rewrites read ids, so this is the last stage that
@@ -324,9 +374,14 @@ def build_summary(results: list, file_report: dict, min_length: int,
         "pieces_out": n_pieces,
         "pieces_per_read": n_pieces / n_reads if n_reads else 0,
         "reads_split": sum(r["reads_split"] for r in results),
+        "reads_cut": sum(r.get("reads_cut", 0) for r in results),
+        "reads_with_no_piece_kept": sum(
+            r.get("reads_with_no_piece_kept", 0) for r in results),
         "pieces_dropped_below_min_length": n_dropped,
         "min_length": min_length,
         "pieces_per_read_distribution": dict(sorted(per_read.items())),
+        "pieces_per_read_distribution_before_min_length":
+            dict(sorted(per_read_cut.items())),
         "bases_in": bases_in,
         "bases_out": bases_out,
         # Cutting removes nothing but the pieces below the length floor.
@@ -337,7 +392,14 @@ def build_summary(results: list, file_report: dict, min_length: int,
         "basecalling": basecalling,
         "parts": len(results),
         "settings": {"anchor_max_edits": anchor_max_edits,
-                     "threads": threads},
+                     "threads": threads,
+                     # From the parts, so the fanned-out route reports
+                     # them too. More than one value is listed rather
+                     # than one picked: it would mean shards cut on
+                     # different geometry.
+                     "index_length": _one_or_all(results, "index_length"),
+                     "barcode_repeats": _one_or_all(results,
+                                                    "barcode_repeats")},
     }
 
 
@@ -457,7 +519,9 @@ def main(argv=None) -> int:
         jobs.append({"src": src, "dest": dest, "stats": stats_path,
                      "a5": a5, "a7": a7, "edits": args.anchor_max_edits,
                      "head_len": head_len, "tail_len": tail_len,
-                     "min_length": args.min_length, "code": fingerprint})
+                     "min_length": args.min_length, "code": fingerprint,
+                     "index_length": args.index_length,
+                     "barcode_repeats": args.barcode_repeats})
 
     threads = args.threads or min(8, os.cpu_count() or 1)
     if not args.quiet:
@@ -519,9 +583,11 @@ def main(argv=None) -> int:
         n_dropped = summary["pieces_dropped_below_min_length"]
         print(f"\n{n_reads:,} reads -> {n_pieces:,} pieces "
               f"({summary['pieces_per_read']:.2f} per read)")
-        print(f"  reads cut            {split:>9,}  "
+        print(f"  reads split          {split:>9,}  "
               f"{100 * split / max(1, n_reads):5.1f}%")
         print(f"  pieces below {args.min_length}bp    {n_dropped:>9,}  dropped")
+        print(f"  reads with no piece  {summary['reads_with_no_piece_kept']:>9,}  "
+              f"left at or above {args.min_length}bp")
         print(f"  bases retained       {100 * summary['bases_retained_fraction']:>8.1f}%")
         print(f"\n{reads_dir}/  ({len(results)} file(s))")
     return 0

@@ -20,6 +20,10 @@ process SPLIT_CONCATEMERS {
 
     script:
     def repeats = meta.barcode_repeats ? "--barcode-repeats ${meta.barcode_repeats}" : ''
+    // The index span sets where each cut falls. Pre-flight reads it off
+    // the run's declared indices; left to the tool's default of 8, a 10bp
+    // index set put every cut 4bp off.
+    def idx_len = meta.index_length ? "--index-length ${meta.index_length}" : ''
     // One input file per task, so no --threads: the tool divides work
     // BY INPUT FILE, and a shard holding one file has nothing for a
     // second worker to do. Asking for more cores would reserve them
@@ -31,7 +35,7 @@ process SPLIT_CONCATEMERS {
         --reads ${reads} \\
         --assay ${assay} \\
         --part-index ${index} \\
-        ${repeats} \\
+        ${repeats} ${idx_len} \\
         --anchor-max-edits ${params.anchor_max_edits} \\
         --min-length ${params.min_unit_length} \\
         --outdir split

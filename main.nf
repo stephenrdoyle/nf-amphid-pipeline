@@ -186,7 +186,8 @@ workflow {
         .filter { row -> row.platform == 'nanopore' }
         .map { row ->
             [ [ run_id: row.run_id, platform: 'nanopore',
-                barcode_repeats: row.barcode_repeats ?: null ],
+                barcode_repeats: row.barcode_repeats ?: null,
+                index_length: row.index_length ?: null ],
               file(row.path, checkIfExists: true) ]
         }
 

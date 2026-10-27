@@ -493,6 +493,90 @@ def test_minknow_input() -> None:
               resolve_read_files([one, one])[1]["n_files"] == 1)
         check("an empty directory yields nothing rather than failing",
               resolve_read_files(tempfile.mkdtemp())[1]["n_files"] == 0)
+
+        # A user-made concatenation of fastq_pass, left in the run folder.
+        # It is a different file holding the same reads, so deduplicating
+        # by path cannot catch it, and it used to be read as well -
+        # doubling every count.
+        write(os.path.join(run, "all_pass.fastq.gz"), 30)
+        files4, rep4 = resolve_read_files(run)
+        check("a FASTQ beside fastq_pass is not read as well",
+              sum(1 for _ in open_reads_many(files4)) == 30,
+              str(sum(1 for _ in open_reads_many(files4))))
+        check("and it is named as ignored, not dropped silently",
+              rep4.get("ignored_outside_fastq_pass") == ["all_pass.fastq.gz"]
+              and any("ignored" in n and "all_pass" in n
+                      for n in rep4["notes"]),
+              str(rep4.get("ignored_outside_fastq_pass")))
+        check("include_failed still adds fastq_fail, and only that",
+              sum(1 for _ in open_reads_many(
+                  resolve_read_files(run, prefer_pass=False)[0])) == 37)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_awkward_fastq_files() -> None:
+    """Files is_fastq accepts must be files open_reads can read.
+
+    Two ways that failed. The suffix check that decides "this is a FASTQ"
+    lower-cases the name, the one that decides "this is gzipped" did not,
+    so READS.FASTQ.GZ was accepted and then opened as text. And a blank
+    line where a header belongs - a trailing empty line, typically - was
+    taken as a record and raised IndexError on its missing id.
+    """
+    print("\nawkward FASTQ files")
+    import gzip as _gz
+    sys.path.insert(0, os.path.join(ROOT, "bin"))
+    from ampseqlib import open_reads, resolve_read_files
+
+    tmp = tempfile.mkdtemp()
+    try:
+        upper = os.path.join(tmp, "READS.FASTQ.GZ")
+        with _gz.open(upper, "wt") as fh:
+            fh.write("@r1\nACGT\n+\nIIII\n@r2\nTTTT\n+\nIIII\n")
+        files, _ = resolve_read_files(tmp)
+        check("an upper-case .FASTQ.GZ is found", files == [upper], str(files))
+        try:
+            got = [r[0] for r in open_reads(upper)]
+            err = ""
+        except Exception as e:  # noqa: BLE001
+            got, err = [], repr(e)
+        check("and read as gzip rather than as text", got == ["r1", "r2"],
+              err or str(got))
+
+        blank = os.path.join(tmp, "trailing.fastq")
+        with open(blank, "w") as fh:
+            fh.write("@r1 x=1\nACGT\n+\nIIII\n\n@r2\nTTTT\n+\nIIII\n\n\n")
+        try:
+            got = list(open_reads(blank))
+            err = ""
+        except Exception as e:  # noqa: BLE001
+            got, err = [], repr(e)
+        check("blank lines between and after records are not records",
+              [r[0] for r in got] == ["r1", "r2"]
+              and got[1][1:] == ("TTTT", "IIII"),
+              err or str(got))
+
+        # Excel's "CSV UTF-8" starts the file with a byte-order mark. Read
+        # as plain utf-8 it became part of the first header, and every
+        # lookup on that column missed.
+        from ampseqlib import read_table, load_assay
+        for ext, sep in ((".csv", ","), (".tsv", "\t")):
+            path = os.path.join(tmp, "sheet" + ext)
+            with open(path, "w", encoding="utf-8-sig") as fh:
+                fh.write(f"run_id{sep}sample_id\nRUN01{sep}S1\n")
+            rows = read_table(path)
+            check(f"a BOM does not leak into the first {ext} header",
+                  rows and list(rows[0])[0] == "run_id"
+                  and rows[0]["run_id"] == "RUN01", str(rows))
+        bom_assay = os.path.join(tmp, "assay.json")
+        with open(bom_assay, "w", encoding="utf-8-sig") as fh:
+            json.dump({"library": {"p5_tail": "ACGT"}}, fh)
+        try:
+            p5 = load_assay(bom_assay)["p5_tail"]
+        except Exception as e:  # noqa: BLE001
+            p5 = repr(e)
+        check("nor stops an assay JSON from loading", p5 == "ACGT", p5)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1407,6 +1491,7 @@ def main() -> int:
     test_index_matrix()
     test_streaming_output()
     test_minknow_input()
+    test_awkward_fastq_files()
     test_barcode_set()
     test_against_truth()
     test_hopping_and_chimeras()

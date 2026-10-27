@@ -117,6 +117,83 @@ def find_anchor_cost(
     return max(0, best_end - m), best_end, best_cost
 
 
+def find_anchor_leftmost(
+    text: str, pattern: str, max_edits: int
+) -> tuple[int, int, int] | None:
+    """The FIRST occurrence of `pattern` within tolerance, not the best.
+
+    find_anchor_cost answers "where does this pattern fit best in this
+    window", which is the right question when the window is known to
+    hold one copy - a primer at a read start, an anchor at a read end.
+    It is the wrong question for a caller that wants every copy, left to
+    right. Such a caller searches the remainder after each hit, and if
+    the remainder holds a one-edit copy followed by an exact one, the
+    best hit is the exact one: the search jumps straight past the
+    earlier copy and never comes back for it. In the splitter that loses
+    exactly the anchor that marks a junction, and the read goes on to be
+    demultiplexed on one molecule's i5 and another's i7.
+
+    So: the first end position whose cost is within tolerance. Not that
+    position alone, though - an exact copy ending at j also matches
+    with k deletions ending at j - k, so the first position within
+    tolerance is usually a worse-scoring early view of the same copy.
+    The scan carries on for max_edits further columns and takes the
+    lowest cost in that window (the earliest, on a tie), which is the
+    end of the copy it found rather than a ragged prefix of it. Beyond
+    that window any further hit is a different copy, and is left for
+    the caller's next search.
+
+    Returns (start, end, cost) like find_anchor_cost, with start taken
+    the same way - end minus pattern length - so the two agree on any
+    window holding a single copy.
+    """
+    m = len(pattern)
+    if not m or m > 64 or not text:
+        return None
+
+    base: dict[str, int] = {"A": 0, "C": 0, "G": 0, "T": 0}
+    for i, c in enumerate(pattern):
+        for b in IUPAC.get(c, ""):
+            base[b] |= 1 << i
+    peq = {
+        code: (base["A"] if "A" in bases else 0)
+        | (base["C"] if "C" in bases else 0)
+        | (base["G"] if "G" in bases else 0)
+        | (base["T"] if "T" in bases else 0)
+        for code, bases in IUPAC.items()
+    }
+
+    full = (1 << m) - 1
+    top = 1 << (m - 1)
+    pv, mv, score = full, 0, m
+    best_end, best_cost, stop_at = -1, max_edits + 1, -1
+
+    for j, c in enumerate(text, 1):
+        eq = peq.get(c, 0)
+        xv = eq | mv
+        xh = ((((eq & pv) + pv) ^ pv) | eq) & full
+        ph = (mv | ~(xh | pv)) & full
+        mh = pv & xh
+        if ph & top:
+            score += 1
+        elif mh & top:
+            score -= 1
+        ph = (ph << 1) & full
+        mh = (mh << 1) & full
+        pv = (mh | ~(xv | ph)) & full
+        mv = ph & xv
+        if score < best_cost:
+            best_cost, best_end = score, j
+            if stop_at < 0:
+                stop_at = j + max_edits
+        if 0 <= stop_at <= j:
+            break
+
+    if best_end < 0 or best_cost > max_edits:
+        return None
+    return max(0, best_end - m), best_end, best_cost
+
+
 def find_anchor(text: str, pattern: str, max_edits: int) -> tuple[int, int] | None:
     """Locate `pattern` in `text` allowing indels; return (start, end) of the
     best alignment, or None.
@@ -392,7 +469,12 @@ def delimiter_for(path: str) -> str:
 
 def read_table(path: str) -> list[dict[str, str]]:
     delim = delimiter_for(path)
-    with open(path, newline="", encoding="utf-8") as fh:
+    # utf-8-sig, not utf-8: Excel's "CSV UTF-8" writes a byte-order mark,
+    # and read as plain utf-8 it becomes part of the first header - so
+    # '\ufeffrun_id' is a column nobody asks for and every lookup on
+    # run_id misses. utf-8-sig drops a BOM if there is one and reads plain
+    # UTF-8 identically.
+    with open(path, newline="", encoding="utf-8-sig") as fh:
         lines = [ln for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
     return [
         {k.strip(): (v or "").strip() for k, v in row.items()}
@@ -403,7 +485,9 @@ def read_table(path: str) -> list[dict[str, str]]:
 def load_assay(path: str | None) -> dict:
     cfg = dict(DEFAULTS)
     if path and os.path.exists(path):
-        with open(path, encoding="utf-8") as fh:
+        # utf-8-sig for the same reason as read_table: an editor that saves
+        # a BOM would otherwise make json.load refuse the file outright.
+        with open(path, encoding="utf-8-sig") as fh:
             data = json.load(fh)
         lib = {
             k: v for k, v in data.get("library", {}).items() if not k.startswith("_")
@@ -452,6 +536,7 @@ def resolve_read_files(paths, prefer_pass: bool = True) -> tuple[list, dict]:
         "n_files": 0,
         "from_fastq_pass": 0,
         "excluded_fastq_fail": 0,
+        "ignored_outside_fastq_pass": [],
         "minknow_barcode_dirs": [],
         "notes": [],
     }
@@ -499,10 +584,24 @@ def resolve_read_files(paths, prefer_pass: bool = True) -> tuple[list, dict]:
         if passed:
             found.extend(passed)
             report["from_fastq_pass"] += len(passed)
+            # Once a run has a fastq_pass, fastq_pass IS the run. Anything
+            # else in the tree is something made from it afterwards - most
+            # often an all_pass.fastq.gz someone built with cat to have one
+            # file to hand round. Taking that too reads every read twice,
+            # and deduplicating by path cannot catch it because it is a
+            # different file holding the same reads. So they are left out
+            # and named, so a file that genuinely belongs can be pointed
+            # at directly.
             if other:
-                found.extend(other)
+                report["ignored_outside_fastq_pass"].extend(
+                    os.path.relpath(f, p) for f in other)
+                shown = ", ".join(os.path.relpath(f, p) for f in other[:3])
+                more = f" and {len(other) - 3} more" if len(other) > 3 else ""
                 report["notes"].append(
-                    f"{len(other)} FASTQ outside fastq_pass were also used"
+                    f"{len(other)} FASTQ outside fastq_pass were ignored "
+                    f"({shown}{more}) - with a fastq_pass present those are "
+                    "usually copies of it, and reading them would count "
+                    "every read twice. Pass a file directly to use it"
                 )
         else:
             found.extend(other)
@@ -546,16 +645,25 @@ def open_reads_many(paths):
 
 def open_reads(path: str):
     """Yield (read_id, sequence, quality) from a FASTQ, gzipped or not."""
-    op = gzip.open if path.endswith(".gz") else open
+    # Lower-cased, as is_fastq does when deciding the file is a FASTQ at
+    # all. Checked case-sensitively here, a READS.FASTQ.GZ was accepted
+    # by the one and then opened as text by the other.
+    op = gzip.open if str(path).lower().endswith(".gz") else open
     with op(path, "rt") as fh:
         while True:
             head = fh.readline()
             if not head:
                 return
+            # A blank line where a header should be - a trailing empty
+            # line, most often, left by an editor or a careless cat - is
+            # not a record. Taken as one it raised IndexError on the id.
+            if not head.strip():
+                continue
             seq = fh.readline().rstrip("\n")
             fh.readline()
             qual = fh.readline().rstrip("\n")
-            yield head[1:].split()[0], seq, qual
+            ident = head[1:].split()
+            yield (ident[0] if ident else ""), seq, qual
 
 
 def read_run_metadata(paths) -> dict:
@@ -582,7 +690,7 @@ def read_run_metadata(paths) -> dict:
         paths = [paths]
     for path in paths:
         try:
-            op = gzip.open if str(path).endswith(".gz") else open
+            op = gzip.open if str(path).lower().endswith(".gz") else open
             with op(path, "rt") as fh:
                 head = fh.readline().rstrip("\n")
         except OSError:

@@ -682,7 +682,147 @@ def test_cutting_preserves_indices() -> None:
           ends(got[1][0]) == "i7", ends(got[1][0]))
 
 
+def _geometry():
+    cfg = sc.load_assay(ASSAY)
+    span = 8 * 2
+    head_len = {"5+": span + len(cfg["p5_tail"]), "7-": span + len(cfg["p7_tail"])}
+    tail_len = {"7+": span + len(cfg["p7_tail"]), "5-": span + len(cfg["p5_tail"])}
+    return cfg, head_len, tail_len
+
+
+def test_earlier_worse_anchor_is_not_skipped() -> None:
+    """Every anchor within tolerance is found, not only the best one.
+
+    The scan used to ask "where does this anchor fit best in the rest of
+    the read" and resume past the answer. A read of [molecule A whose i7
+    anchor carries one error][a fragment of B ending in a clean i7
+    anchor] answers with B's anchor, and A's is skipped: one CLOSE where
+    there are two, no CLOSE -> CLOSE cut, and the read reaches demux
+    whole - A's i5 with B's i7.
+    """
+    print("\nan imperfect anchor before a perfect one")
+    from ampseqlib import find_anchor_cost, find_anchor_leftmost
+    cfg, head_len, tail_len = _geometry()
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+
+    # The primitive first. One substitution, then an exact copy.
+    bad = a7[:5] + ("A" if a7[5] != "A" else "C") + a7[6:]
+    text = "T" * 30 + bad + "T" * 30 + a7 + "T" * 10
+    lm = find_anchor_leftmost(text, a7, 2)
+    check("the leftmost search finds the first, imperfect copy",
+          lm is not None and lm[1] == 30 + len(a7) and lm[2] == 1, str(lm))
+    check("and lands on its end, not a ragged prefix of an exact copy",
+          find_anchor_leftmost("G" * 20 + a7 + "G" * 20, a7, 2)
+          == (20, 20 + len(a7), 0),
+          str(find_anchor_leftmost("G" * 20 + a7 + "G" * 20, a7, 2)))
+    check("find_anchor_cost still answers with the best copy, for its "
+          "other callers", find_anchor_cost(text, a7, 2)[2] == 0)
+    check("both copies are scanned", len(sc.scan_all(text, a7, 2)) == 2,
+          str(sc.scan_all(text, a7, 2)))
+
+    # Then the read that went wrong.
+    m1 = sim.build_molecule("ACGT" * 60, "GGGGTTTT", "AAAACCCC", 2, cfg)
+    m2 = sim.build_molecule("ACGT" * 60, "CCCCAAAA", "TTTTGGGG", 2, cfg)
+    p = m1.find(a7)
+    check("the fixture molecule carries its i7 anchor forward", p > 0)
+    m1_bad = m1[:p + 5] + ("A" if m1[p + 5] != "A" else "C") + m1[p + 6:]
+    frag = m2[m2.find(a5) + len(a5) + 40:]
+    seq = m1_bad + frag
+    got = sc.split_read(seq, "I" * len(seq), a5, a7, 2, head_len, tail_len)
+    check("a one-error anchor before an exact one still triggers the cut",
+          len(got) == 2 and got[0][0] == m1_bad,
+          str([len(s) for s, _ in got]) + f" vs A={len(m1_bad)}")
+
+
+def test_split_accounting() -> None:
+    """Every read is accounted for, and "split" means split in the output.
+
+    Two gaps. A read all of whose pieces fell below the length floor
+    vanished with no counter, so reads_in could not be reconciled with
+    anything written. And reads_split and the pieces-per-read histogram
+    were taken BEFORE the floor, so a read whose cut left a remainder of
+    a few bases counted as split while producing one piece.
+    """
+    print("\nsplit read accounting")
+    cfg, head_len, tail_len = _geometry()
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+    m1 = sim.build_molecule("ACGT" * 60, "GGGGTTTT", "AAAACCCC", 2, cfg)
+    m2 = sim.build_molecule("ACGT" * 60, "CCCCAAAA", "TTTTGGGG", 2, cfg)
+    stub = m2[-80:]          # B's i7 end only, below the 100bp floor
+    check("the fixture's fragment carries an anchor and is short",
+          a7 in stub and len(stub) < 100)
+    reads = {
+        "whole": m1,                    # one piece, kept
+        "joined": m1 + m2,              # two pieces, both kept
+        "stub_tail": m1 + stub,         # cut, but only one piece survives
+        "tiny": "ACGT" * 10,            # nothing survives at all
+    }
+    tmp = tempfile.mkdtemp()
+    try:
+        src = f"{tmp}/in.fastq"
+        with open(src, "w") as fh:
+            for rid, s in reads.items():
+                fh.write(f"@{rid}\n{s}\n+\n{'I' * len(s)}\n")
+        job = {"src": src, "dest": f"{tmp}/out.fastq.gz",
+               "stats": f"{tmp}/part.json", "a5": a5, "a7": a7, "edits": 2,
+               "head_len": head_len, "tail_len": tail_len,
+               "min_length": 100, "code": "x", "index_length": 8,
+               "barcode_repeats": 2}
+        st = sc.split_one_file(job)
+        check("a read that left no piece is counted",
+              st.get("reads_with_no_piece_kept") == 1,
+              str(st.get("reads_with_no_piece_kept")))
+        check("reads_split counts only reads that came out in pieces",
+              st["reads_split"] == 1, str(st["reads_split"]))
+        check("reads the cut rule fired on are still visible",
+              st.get("reads_cut") == 2, str(st.get("reads_cut")))
+        dist = {int(k): v for k, v in st["pieces_per_read_distribution"].items()}
+        check("the histogram is of kept pieces and sums to reads_in",
+              dist == {0: 1, 1: 2, 2: 1}
+              and sum(dist.values()) == st["reads_in"], str(dist))
+        check("and pieces_out is its weighted sum",
+              sum(k * v for k, v in dist.items()) == st["pieces_out"])
+
+        # Merged across shards, the new counters are summed like the old.
+        # A part written without them (the workflow's stub) contributes
+        # nothing rather than failing the merge.
+        stub_part = {"source": "stub", "reads_in": 0, "pieces_out": 0,
+                     "reads_split": 0, "pieces_dropped_below_min_length": 0,
+                     "pieces_per_read_distribution": {}, "bases_in": 0,
+                     "bases_out": 0}
+        st2 = dict(st, source="other")
+        os.makedirs(f"{tmp}/parts")
+        for name, part in (("a", st), ("b", st2), ("c", stub_part)):
+            with open(f"{tmp}/parts/{name}.json", "w") as fh:
+                json.dump(part, fh)
+        quiet(ms.main, ["--parts", f"{tmp}/parts", "--outdir", f"{tmp}/m",
+                        "--expect-parts", "3", "--quiet"])
+        summ = json.load(open(f"{tmp}/m/split_summary.json"))
+        check("merge sums reads with no piece across shards",
+              summ["reads_with_no_piece_kept"] == 2
+              and summ["reads_cut"] == 4 and summ["reads_split"] == 2,
+              str({k: summ.get(k) for k in ("reads_with_no_piece_kept",
+                                            "reads_cut", "reads_split")}))
+        check("and the merged histogram still reconciles with reads_in",
+              sum(summ["pieces_per_read_distribution"].values())
+              == summ["reads_in"] == 8)
+        check("the cut geometry in force is reported",
+              summ["settings"].get("index_length") == 8,
+              str(summ["settings"]))
+        try:
+            quiet(ms.main, ["--parts", f"{tmp}/parts", "--outdir", f"{tmp}/m2",
+                            "--expect-parts", "4", "--quiet"])
+            refused = False
+        except SystemExit:
+            refused = True
+        check("--expect-parts still refuses a missing shard", refused)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
+    test_earlier_worse_anchor_is_not_skipped()
+    test_split_accounting()
     test_basecall_provenance()
     test_partial_second_unit()
     test_three_units()

@@ -126,6 +126,10 @@ def main(argv=None) -> int:
         n, p = summary["reads_in"], summary["pieces_out"]
         print(f"{len(results)} shard(s) merged: {n:,} reads -> {p:,} pieces "
               f"({summary['pieces_per_read']:.2f} per read)")
+        none = summary.get("reads_with_no_piece_kept", 0)
+        if none:
+            print(f"  {none:,} read(s) left no piece at or above "
+                  f"{args.min_length}bp")
         bc = summary.get("basecalling", {})
         if bc.get("basecall_model") == "MIXED":
             print(f"  WARNING: {bc['warning']}")
