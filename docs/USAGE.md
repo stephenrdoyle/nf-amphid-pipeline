@@ -101,10 +101,26 @@ required field as missing.
 | `sample_type` | yes | `unknown`, `neg_extraction`, `neg_ntc`, `mock`, `pos_control` |
 | `subject_id` | no | who the library came from. Groups replicates with no metadata file needed; also the join key for a subject-keyed `--metadata`. Defaults to `sample_id` |
 | `file_prefix` | no | overrides filename matching for Illumina file resolution |
+| `expected_taxa` | no | on a `pos_control` row: what it should contain, `;`-separated target taxa or seq_ids |
 
 The `sample_type` vocabulary is **not** configurable. The logic depends
-on it: blanks set detection limits, NTCs measure contamination, mocks
-calibrate efficiency, and positives confirm the assay ran.
+on it:
+
+| `sample_type` | what it is | what the pipeline does with it |
+|---|---|---|
+| `unknown` | a field sample | called, quantified, summarised |
+| `mock` | a known mixture of the tagged control plasmids | processed like a field sample, with its plasmids called as its content (§3.7) |
+| `pos_control` | a deliberately positive sample | checked for detection: every `expected_taxa` entry must be detected, or - without that column - any target. A failure is raised before the results. Kept out of field-sample summaries and plate QC |
+| `neg_extraction` | an extraction blank | sets the detection limits; reported apart from NTCs, since it carries the kit and handling |
+| `neg_ntc` | a no-template PCR control | sets the detection limits; reported apart, since it carries the PCR reagents and carryover |
+
+Any negative carrying more than `--absolute_floor` reads of a reference is
+named in run QC and the report: a negative can never be called detected,
+since the limits are built from the negatives, so contamination would
+otherwise show only as a quietly raised limit. When the samplesheet
+declares any controls, the report gains a **Controls** section with each
+positive's result and the negatives by type. Pre-flight checks that every
+`expected_taxa` entry is a target in the panel.
 
 Leaving a few index combinations unused is worth doing. If every
 combination in the pool is assigned, no sentinel exists and index
@@ -561,10 +577,11 @@ Three things about it decide how to read it:
 designed comparison, summing them answers a question nobody asked and
 destroys the one that was. Each arm gets its own row, side by side.
 
-**Negative controls are excluded from every metric** and counted in
-`n_controls`. A median depth with an NTC in the denominator moves when
-the number of NTCs does, which would make two runs incomparable for a
-reason invisible in the table. What the negatives say gets its own
+**Controls are excluded from every metric**: negatives are counted in
+`n_controls` and positives in `n_positives`. A median depth with an NTC
+in the denominator moves when the number of NTCs does, and a
+deliberately positive well inflates a detection rate - either would make
+two runs incomparable for a reason invisible in the table. What the negatives say gets its own
 column instead: `deepest_negative`, the read count of the deepest
 negative in that group — which is how you tell whether an arm stayed
 clean.
@@ -578,6 +595,7 @@ plate, and a small group is distinguishable from a broken join.
 | `field`, `value` | the grouping and one of its values |
 | `n_libraries` | all libraries in the group, controls included |
 | `n_controls` | negatives, excluded from everything below |
+| `n_positives` | positive controls, likewise excluded |
 | `n_analysed` | the denominator for every metric that follows |
 | `n_subjects`, `n_empty` | distinct subjects; libraries with zero reads |
 | `reads_assigned` | reads reaching assignment — "how many reads per group" |

@@ -1460,6 +1460,137 @@ def test_spiked_is_declared() -> None:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+def test_controls() -> None:
+    """Positives must find something; negatives are told apart and named.
+
+    A positive control is the run's evidence that the assay can detect
+    anything, so it is checked - against the samplesheet's expected_taxa
+    when given, otherwise for any detected target - and kept out of the
+    field-sample summaries it would inflate. The two kinds of negative
+    both set the limits but point at different steps, so their worst
+    reads are reported apart, and any negative over the floor is named:
+    a negative can never be called detected, so contamination would
+    otherwise show only as a raised limit.
+    """
+    print("\npositive and negative controls")
+
+    def row(sid, taxon, call, rtype="target"):
+        return {"sample_id": sid, "seq_id": taxon + "_h1", "taxon": taxon,
+                "call": call, "reference_type": rtype}
+
+    samples = {
+        "P_OK": S.Sample("P_OK", sample_type="pos_control",
+                         expected_taxa=["Species_a"]),
+        "P_MISS": S.Sample("P_MISS", sample_type="pos_control",
+                           expected_taxa=["Species_a", "Species_b"]),
+        "P_ANY": S.Sample("P_ANY", sample_type="pos_control"),
+        "P_NONE": S.Sample("P_NONE", sample_type="pos_control"),
+        "P_FAIL": S.Sample("P_FAIL", sample_type="pos_control"),
+        "F1": S.Sample("F1"),
+    }
+    rows = [row("P_OK", "Species_a", "detected"),
+            row("P_MISS", "Species_a", "detected"),
+            row("P_MISS", "Species_b", "not_detected"),
+            row("P_ANY", "Species_c", "detected"),
+            row("P_NONE", "Species_a", "not_detected"),
+            row("P_FAIL", "Species_a", "assay_failed"),
+            row("F1", "Species_a", "detected")]
+    res = S.positive_control_check(samples, rows, [])
+    by = {w["sample_id"]: w for w in res["wells"]}
+    check("only positive controls are checked",
+          set(by) == {"P_OK", "P_MISS", "P_ANY", "P_NONE", "P_FAIL"},
+          str(sorted(by)))
+    check("a positive that found every expected taxon passes",
+          by["P_OK"]["passed"], by["P_OK"]["reason"])
+    check("one missing an expected taxon fails, naming it",
+          not by["P_MISS"]["passed"] and "Species_b" in by["P_MISS"]["reason"],
+          by["P_MISS"]["reason"])
+    check("without expected_taxa, any detected target passes",
+          by["P_ANY"]["passed"])
+    check("and nothing detected fails",
+          not by["P_NONE"]["passed"], by["P_NONE"]["reason"])
+    check("an assay_failed positive fails",
+          not by["P_FAIL"]["passed"] and "assay_failed" in by["P_FAIL"]["reason"])
+    check("the failures are counted", res["n_failed"] == 3, str(res["n_failed"]))
+
+    def neg(sid, t, reads):
+        x = S.Sample(sid, sample_type=t)
+        x.counts = {"T1": reads}
+        return x
+
+    negs = {"EB": neg("EB", "neg_extraction", 5),
+            "NTC": neg("NTC", "neg_ntc", 1),
+            "F": neg("F", "unknown", 500)}
+    rep = S.negative_control_report(negs, [{"seq_id": "T1", "type": "target"}], 2)
+    check("the two kinds of negative are reported apart",
+          rep["by_type"]["neg_extraction"]["worst_by_reference"]["T1"]["reads"] == 5
+          and rep["by_type"]["neg_ntc"]["worst_by_reference"]["T1"]["reads"] == 1,
+          str(rep["by_type"]))
+    check("a negative over the floor is named, one under it is not",
+          [c["sample_id"] for c in rep["contaminated"]] == ["EB"],
+          str(rep["contaminated"]))
+    check("and a field sample is never a negative",
+          all(c["sample_id"] != "F" for c in rep["contaminated"]))
+
+    # End to end: the samplesheet's expected_taxa reaches the check, and
+    # the positive is kept out of the field-sample group metrics.
+    tmp = tempfile.mkdtemp()
+    try:
+        ref = os.path.join(tmp, "reference.tsv")
+        with open(ref, "w") as fh:
+            fh.write("seq_id\tlocus\ttype\tpurpose\ttaxon\tparent_id\t"
+                     "default_conc\tconc_units\tcorr_factor\tsequence\n")
+            fh.write("T1\tITS2\ttarget\tspeciation\tSpecies_a\t\t\t\t\tACGT\n")
+            fh.write("T2\tITS2\ttarget\tspeciation\tSpecies_b\t\t\t\t\tACGT\n")
+        ss = os.path.join(tmp, "samplesheet.csv")
+        layout = {"POS": ("pos_control", "Species_a;Species_b",
+                          {"T1": 400, "T2": 0}),
+                  "EB": ("neg_extraction", "", {"T1": 6, "T2": 0}),
+                  "S1": ("unknown", "", {"T1": 300, "T2": 0}),
+                  "S2": ("unknown", "", {"T1": 0, "T2": 0})}
+        with open(ss, "w") as fh:
+            # One subject for all four, so there is a group to summarise.
+            fh.write("run_id,platform,sample_id,index_i7,index_i5,"
+                     "sample_type,expected_taxa,subject_id\n")
+            for sid, (t, exp, _) in layout.items():
+                fh.write(f"RUN01,illumina,{sid},A,B,{t},{exp},SUBJ\n")
+        adir = os.path.join(tmp, "assign")
+        os.makedirs(adir)
+        for sid, (_, _, counts) in layout.items():
+            with open(os.path.join(adir, f"{sid}.counts.tsv"), "w") as fh:
+                fh.write("sample_id\tseq_id\tlocus\ttype\tpurpose\ttaxon\t"
+                         "reads\tunique_seqs\n")
+                for k, v in counts.items():
+                    fh.write(f"{sid}\t{k}\tITS2\t-\t-\t-\t{v}\t1\n")
+            with open(os.path.join(adir, f"{sid}.assign.json"), "w") as fh:
+                json.dump({"sample_id": sid, "sequences_in": 1000}, fh)
+        out = os.path.join(tmp, "synth")
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.main(["--assign-dir", adir, "--samplesheet", ss,
+                    "--reference", ref, "--outdir", out, "--run-id", "RUN01",
+                    "--permutations", "20", "--quiet"])
+        qc = json.load(open(os.path.join(out, "run_qc.json")))
+        pc = qc["positive_controls"]
+        check("the samplesheet's expected_taxa reaches the check",
+              pc["n"] == 1 and pc["wells"][0]["expected"]
+              == ["Species_a", "Species_b"]
+              and not pc["wells"][0]["passed"], str(pc))
+        nc = qc["negative_controls"]
+        check("run QC names the contaminated negative",
+              [c["sample_id"] for c in nc["contaminated"]] == ["EB"], str(nc))
+        grp = list(csv.DictReader(
+            open(os.path.join(out, "group_summary.tsv")), delimiter="\t"))
+        sub = [g for g in grp if g["field"] == "subject_id"]
+        check("positives are counted apart from the field samples",
+              sub and sum(int(g["n_positives"]) for g in sub) == 1
+              and sum(int(g["n_controls"]) for g in sub) == 1
+              and sum(int(g["n_analysed"]) for g in sub) == 2,
+              str([(g["value"], g["n_analysed"], g["n_positives"])
+                   for g in sub]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calibration()
     test_read_funnel()
@@ -1468,6 +1599,7 @@ def main() -> int:
     test_calls()
     test_implausible_slope_and_missing_blanks()
     test_spiked_is_declared()
+    test_controls()
     test_permutation_calibration()
     test_end_to_end()
     test_cohort_completeness()

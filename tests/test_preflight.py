@@ -461,6 +461,50 @@ def test_samplesheet_errors() -> None:
     expect_error("an id that reads as a command-line flag", "begins with '-'",
                  mutate_ss=leading_dash)
 
+    # expected_taxa names what a positive control must contain. A typo
+    # would make a working positive read as failed, so it is checked
+    # against the panel here. The fixture writer has a fixed column set,
+    # so the column is added to the written file.
+    def with_expected(ss_path, idx, name, as_positive):
+        import csv as _csv
+        delim = "," if ss_path.endswith(".csv") else "\t"
+        rows = list(_csv.DictReader(open(ss_path, encoding="utf-8"),
+                                    delimiter=delim))
+        for r in rows:
+            r["expected_taxa"] = ""
+        rows[idx]["expected_taxa"] = name
+        if as_positive:
+            rows[idx]["sample_type"] = "pos_control"
+        with open(ss_path, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=list(rows[0]),
+                                delimiter=delim, lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+
+    for name, positive, label, ok in (
+            ("Not_a_taxon", True, "an expected taxon not in the panel is "
+             "refused", False),
+            ("Asc_ITS2_h1", True, "an expected taxon given as a target "
+             "seq_id passes", True),
+            ("Asc_ITS2_h1", False, "expected_taxa on a non-positive row "
+             "warns and is ignored", True)):
+        tmp = tempfile.mkdtemp()
+        try:
+            ref, ss, runs = build_case(tmp)
+            with_expected(ss, 14, name, positive)
+            code, diag = run_preflight(tmp, ref, ss, runs)
+            if not ok:
+                good = code == 1 and any("is not a target taxon or seq_id"
+                                         in e for e in diag.errors)
+            elif positive:
+                good = code == 0
+            else:
+                good = code == 0 and any("only used on pos_control" in w
+                                         for w in diag.warnings)
+            check(label, good, f"exit {code}, {diag.errors[:2]}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def sanitise_collision(ss):
         ss[10]["sample_id"] = "iCCH 007"
         ss[11]["sample_id"] = "iCCH/007"

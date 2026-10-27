@@ -659,6 +659,58 @@ def test_report() -> None:
         check("the section is absent when there is no paired run",
               "Agreement with the paired run" not in doc)
 
+        # The Controls section, when the samplesheet declares controls:
+        # each positive's result, the negatives by kind, and contaminated
+        # negatives by name - with a failed positive and a dirty negative
+        # also raised before the results.
+        qc_path = os.path.join(synth, "run_qc.json")
+        qc0 = json.load(open(qc_path))
+        try:
+            check("no Controls section when no controls are declared",
+                  "<h2>Controls</h2>" not in doc)
+            ctl = dict(qc0,
+                       positive_controls={"n": 2, "n_failed": 1, "wells": [
+                           {"sample_id": "POS-1", "expected": ["Species_a"],
+                            "detected": ["Species_a"], "passed": True,
+                            "reason": "every expected taxon detected"},
+                           {"sample_id": "POS-2", "expected": ["Species_b"],
+                            "detected": [], "passed": False,
+                            "reason": "expected but not detected: Species_b"}]},
+                       negative_controls={
+                           "absolute_floor": 2, "n_contaminated_wells": 1,
+                           "by_type": {
+                               "neg_extraction": {"n_wells": 2,
+                                   "worst_by_reference": {"T1": {
+                                       "reads": 9, "sample_id": "EB-1"}}},
+                               "neg_ntc": {"n_wells": 1,
+                                           "worst_by_reference": {}}},
+                           "contaminated": [{"sample_id": "EB-1",
+                                             "sample_type": "neg_extraction",
+                                             "seq_id": "T1", "reads": 9}]})
+            json.dump(ctl, open(qc_path, "w"))
+            outc = os.path.join(tmp, "report_controls.html")
+            with contextlib.redirect_stdout(io.StringIO()):
+                R.main(["--synthesis-dir", synth, "--out", outc, "--quiet"])
+            dc = open(outc, encoding="utf-8").read()
+            sec = dc[dc.index("<h2>Controls</h2>"):]
+            sec = sec[:sec.index("<h2>", 10)]
+            head = dc[:dc.index("<h2>Calls</h2>")]
+            check("declared controls get a Controls section",
+                  "Positive controls" in sec and "Negative controls" in sec)
+            check("each positive shows its result and why",
+                  "POS-1" in sec and "POS-2" in sec
+                  and "expected but not detected: Species_b" in sec)
+            check("the negatives are shown by kind",
+                  "Extraction blanks" in sec and "No-template controls" in sec)
+            check("and a contaminated negative is named in the section",
+                  "EB-1" in sec)
+            check("a failed positive is raised before the results",
+                  "1 of 2 positive control(s) failed" in head)
+            check("as is a contaminated negative",
+                  "1 negative control(s) carry more than 2 reads" in head)
+        finally:
+            json.dump(qc0, open(qc_path, "w"))
+
         # --spiked decides which report is written. Unspiked (the default)
         # says so once, drops quantification and the per-well internal
         # control column; spiked keeps both; a declaration the reads

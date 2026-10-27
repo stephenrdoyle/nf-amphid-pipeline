@@ -642,6 +642,31 @@ def build(args) -> str:
             "have produced a positive. If the standards were added, rerun "
             "with --spiked.",
         ))
+    posc = qc.get("positive_controls") or {}
+    if posc.get("n_failed"):
+        bad_ids = [w["sample_id"] for w in posc.get("wells", [])
+                   if not w.get("passed")]
+        concerns.append((
+            "bad",
+            f"{fmt(posc['n_failed'])} of {fmt(posc.get('n', 0))} positive "
+            "control(s) failed",
+            "A positive control is the run's evidence that the assay can "
+            "find anything. Without it, a negative here is weaker than it "
+            f"looks. Failed: {', '.join(bad_ids[:6])}"
+            + (" ..." if len(bad_ids) > 6 else "") + ".",
+        ))
+    negc = qc.get("negative_controls") or {}
+    if negc.get("n_contaminated_wells"):
+        dirty = sorted({c["sample_id"] for c in negc.get("contaminated", [])})
+        concerns.append((
+            "warn",
+            f"{fmt(negc['n_contaminated_wells'])} negative control(s) carry "
+            f"more than {negc.get('absolute_floor', 0)} reads of a reference",
+            "Their reads raise the detection limit for that reference on "
+            "every well of the plate, so they cost sensitivity everywhere. "
+            f"Contaminated: {', '.join(dirty[:6])}"
+            + (" ..." if len(dirty) > 6 else "") + ".",
+        ))
     if spike.get("note"):
         # The declaration and the reads disagree. The declaration was used;
         # the mismatch is a run-wide spike failure, carryover, or a missing
@@ -884,6 +909,78 @@ def build(args) -> str:
         )
     parts.append("</tbody></table>")
 
+    # ---- controls --------------------------------------------------------
+    # Shown when the samplesheet declares any. The positives answer "could
+    # this run find something"; the negatives "what did an empty well pick
+    # up, and at which step" - an extraction blank carries the kit and
+    # handling, an NTC the PCR reagents and carryover.
+    by_neg = (negc.get("by_type") or {})
+    if posc.get("n") or by_neg:
+        parts.append("<h2>Controls</h2>")
+    if posc.get("n"):
+        parts.append("<h3>Positive controls</h3>")
+        parts.append("<table><thead><tr><th>Sample</th><th>Expected</th>"
+                     "<th>Detected</th><th>Result</th></tr></thead><tbody>")
+        for w in posc.get("wells", []):
+            res = flag("ok" if w.get("passed") else "bad",
+                       "pass" if w.get("passed") else "fail")
+            parts.append(
+                f"<tr><td>{esc(w['sample_id'])}</td>"
+                f"<td>{esc(', '.join(w.get('expected') or []) or 'any target')}</td>"
+                f"<td>{esc(', '.join(w.get('detected') or []) or '—')}</td>"
+                f"<td>{res} {esc(w.get('reason', ''))}</td></tr>")
+        parts.append("</tbody></table>")
+    if by_neg:
+        parts.append("<h3>Negative controls</h3>")
+        label = {"neg_extraction": "Extraction blanks",
+                 "neg_ntc": "No-template controls"}
+        kinds = sorted(by_neg)
+        refs = sorted({r for k in kinds
+                       for r in by_neg[k].get("worst_by_reference", {})})
+        parts.append(
+            "<p>" + "; ".join(
+                f"{esc(label.get(k, k))}: {fmt(by_neg[k].get('n_wells', 0))}"
+                for k in kinds)
+            + ". Both set the detection limits; they are shown apart "
+            "because they point at different steps. An extraction blank "
+            "carries the kit and handling, a no-template control the PCR "
+            "reagents and carryover.</p>")
+        if refs:
+            parts.append(
+                "<table><thead><tr><th>Reference</th>"
+                + "".join(f"<th class='num'>Worst {esc(label.get(k, k).lower())}</th>"
+                          for k in kinds)
+                + "</tr></thead><tbody>")
+            for ref in refs:
+                cells = []
+                for k in kinds:
+                    w = by_neg[k].get("worst_by_reference", {}).get(ref)
+                    cells.append(
+                        f"<td class='num'>{fmt(w['reads'])} "
+                        f"<span class='note'>({esc(w['sample_id'])})</span></td>"
+                        if w else "<td class='num'>0</td>")
+                parts.append(f"<tr><td>{esc(ref)}</td>{''.join(cells)}</tr>")
+            parts.append("</tbody></table>")
+        else:
+            parts.append('<p class="note">Every negative control is clean: '
+                         'no reads of any reference.</p>')
+        dirty = negc.get("contaminated") or []
+        if dirty:
+            parts.append(
+                f"<p>{flag('warn', str(negc.get('n_contaminated_wells', 0)))} "
+                "negative control(s) carry more than "
+                f"{negc.get('absolute_floor', 0)} reads of a reference:</p>")
+            parts.append("<table><thead><tr><th>Sample</th><th>Type</th>"
+                         "<th>Reference</th><th class='num'>Reads</th>"
+                         "</tr></thead><tbody>")
+            for c in dirty[:20]:
+                parts.append(
+                    f"<tr><td>{esc(c['sample_id'])}</td>"
+                    f"<td>{esc(label.get(c['sample_type'], c['sample_type']))}</td>"
+                    f"<td>{esc(c['seq_id'])}</td>"
+                    f"<td class='num'>{fmt(c['reads'])}</td></tr>")
+            parts.append("</tbody></table>")
+
     # ---- by metadata group ---------------------------------------------
     # Placed after the calls because it consolidates them, and before the
     # composition because a designed comparison - cleaned against
@@ -904,10 +1001,11 @@ def build(args) -> str:
             "<p>The run consolidated by each grouping field in turn. Groups "
             "sit side by side and are never pooled: where the groups are "
             "the arms of a designed comparison, summing them answers a "
-            "question nobody asked. Negative controls are excluded from "
-            "every metric and counted in their own column, because a "
-            "median depth with an NTC in the denominator moves when the "
-            "number of NTCs does. Libraries with no metadata row appear "
+            "question nobody asked. Negative and positive controls are "
+            "excluded from every metric and counted in their own column, "
+            "because a median depth with an NTC in the denominator moves "
+            "when the number of NTCs does, and a deliberately positive "
+            "well inflates a detection rate. Libraries with no metadata row appear "
             "under &lsquo;(no value)&rsquo; rather than vanishing, so "
             "analysed libraries and controls within a field add up to the "
             "plate.</p>"
@@ -942,7 +1040,7 @@ def build(args) -> str:
                 parts.append(
                     f"<tr><td>{esc(g['value'])}</td>"
                     f"<td class='num'>{fmt(g.get('n_analysed') or 0)}</td>"
-                    f"<td class='num'>{fmt(g.get('n_controls') or 0)}</td>"
+                    f"<td class='num'>{fmt(int(g.get('n_controls') or 0) + int(g.get('n_positives') or 0))}</td>"
                     f"<td class='num'>{fmt(g.get('reads_assigned') or 0)}</td>"
                     f"<td class='num'>{fmt(g.get('median_depth') or 0)}</td>"
                     f"<td class='num'>{esc(g.get('target_fraction') or '-')}</td>"

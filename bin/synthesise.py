@@ -96,6 +96,15 @@ SLOPE_PLAUSIBLE = (0.5, 2.0)
 
 NEGATIVE_TYPES = {"neg_ntc", "neg_extraction", "blank", "negative"}
 
+# Positive controls: deliberately positive, often at high load. They prove
+# the assay can find something, and are checked for exactly that; they are
+# kept out of every field-sample summary, where they would inflate
+# detection rates and could fake a plate-position effect.
+POSITIVE_TYPES = {"pos_control"}
+
+# Wells that are not field samples, for every summary of field samples.
+NOT_FIELD = NEGATIVE_TYPES | POSITIVE_TYPES
+
 # Wells whose content IS the tagged control plasmids. A mock is assembled
 # from them, so in a mock the plasmids are called and quantified like
 # targets; in every other well they are contamination.
@@ -130,6 +139,9 @@ class Sample:
     index_i7: str = ""
     plate_row: str = ""
     plate_col: int = 0
+    # What a positive control should contain (taxa or target seq_ids),
+    # from the samplesheet's optional expected_taxa column.
+    expected_taxa: list = field(default_factory=list)
     counts: dict = field(default_factory=dict)
     total_target: int = 0
     depth: int = 0
@@ -748,7 +760,7 @@ def plate_qc(
     """
     placed = [
         s for s in samples.values()
-        if s.plate_row and s.plate_col and s.sample_type not in NEGATIVE_TYPES
+        if s.plate_row and s.plate_col and s.sample_type not in NOT_FIELD
     ]
     if len(placed) < 12:
         return []
@@ -806,7 +818,8 @@ MAX_GROUPS = 50
 # from whatever that group happened to have gives a TSV whose header
 # depends on which group sorted first.
 COLUMNS = (
-    ["run_id", "field", "value", "n_libraries", "n_controls", "n_analysed",
+    ["run_id", "field", "value", "n_libraries", "n_controls", "n_positives",
+     "n_analysed",
      "n_subjects", "n_empty", "reads_assigned", "median_depth", "min_depth",
      "max_depth"]
     + [f"reads_{k}" for k in FATES]
@@ -985,6 +998,106 @@ def median(vals: list) -> float:
     return float(v[n // 2]) if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0
 
 
+def positive_control_check(samples: dict, call_rows: list,
+                           targets: list) -> dict:
+    """Did every positive control find what it was there to find?
+
+    A positive control is the run's proof that the assay can detect
+    anything at all. One that comes back empty does not make the field
+    negatives wrong on its own, but it removes the evidence that they
+    could have been positive - so it is raised, not averaged away.
+
+    What it should contain comes from the samplesheet's expected_taxa
+    (';'-separated taxa or target seq_ids); all of them must be detected.
+    Without it, any detected target counts - which cannot tell a positive
+    that amplified the wrong thing from one that worked.
+    """
+    detected: dict[str, set] = defaultdict(set)
+    failed_wells: set = set()
+    for r in call_rows:
+        if r["call"] == "assay_failed":
+            failed_wells.add(r["sample_id"])
+        if r["call"] == "detected" and r["reference_type"] == "target":
+            detected[r["sample_id"]].update({r["taxon"], r["seq_id"]})
+    wells = []
+    for sid in sorted(samples):
+        s = samples[sid]
+        if s.sample_type not in POSITIVE_TYPES:
+            continue
+        found = detected.get(sid, set())
+        taxa_found = sorted({r["taxon"] for r in call_rows
+                             if r["sample_id"] == sid
+                             and r["call"] == "detected"
+                             and r["reference_type"] == "target"})
+        if sid in failed_wells:
+            ok, why = False, "assay_failed - the well itself did not work"
+        elif s.expected_taxa:
+            missing = [x for x in s.expected_taxa if x not in found]
+            ok = not missing
+            why = ("every expected taxon detected" if ok else
+                   f"expected but not detected: {', '.join(missing)}")
+        else:
+            ok = bool(found)
+            why = ("a target was detected (no expected_taxa declared)"
+                   if ok else "nothing detected")
+        wells.append({"sample_id": sid, "expected": s.expected_taxa,
+                      "detected": taxa_found, "passed": ok, "reason": why})
+    return {
+        "n": len(wells),
+        "n_failed": sum(1 for w in wells if not w["passed"]),
+        "wells": wells,
+    }
+
+
+def negative_control_report(samples: dict, refs: list, floor: int) -> dict:
+    """What each kind of negative picked up, kept apart.
+
+    Both kinds set the detection limits, pooled, because field samples
+    pass through extraction and PCR and either step can contaminate them.
+    But they answer different questions. An extraction blank carries the
+    kit and handling; an NTC carries the PCR reagents and carryover. A
+    dirty NTC beside a clean extraction blank points at the PCR, and the
+    reverse at extraction - so the worst per reference is given per kind.
+
+    And every negative over the absolute floor is named. A negative can
+    never be called detected - the limit is built from the negatives
+    themselves - so contamination otherwise shows only as a raised limit,
+    quietly costing sensitivity across the whole plate.
+    """
+    by_type: dict[str, dict] = {}
+    contaminated = []
+    for t in sorted(NEGATIVE_TYPES):
+        wells = [s for s in samples.values() if s.sample_type == t]
+        if not wells:
+            continue
+        worst = {}
+        for r in refs:
+            sid = r["seq_id"]
+            top = max(wells, key=lambda s_: s_.counts.get(sid, 0))
+            n = top.counts.get(sid, 0)
+            if n:
+                worst[sid] = {"reads": n, "sample_id": top.sample_id}
+        by_type[t] = {"n_wells": len(wells), "worst_by_reference": worst}
+        for s_ in wells:
+            for r in refs:
+                n = s_.counts.get(r["seq_id"], 0)
+                if n > floor:
+                    contaminated.append({
+                        "sample_id": s_.sample_id, "sample_type": t,
+                        "seq_id": r["seq_id"],
+                        "reference_type": r.get("type", ""),
+                        "taxon": r.get("taxon") or r["seq_id"],
+                        "reads": n,
+                    })
+    contaminated.sort(key=lambda d: -d["reads"])
+    return {
+        "absolute_floor": floor,
+        "by_type": by_type,
+        "n_contaminated_wells": len({c["sample_id"] for c in contaminated}),
+        "contaminated": contaminated,
+    }
+
+
 def group_summary(
     samples: dict, meta: dict[str, dict], fields: list[str],
     call_rows: list[dict], cals: dict, plasmid_share: dict, run_id: str,
@@ -1078,8 +1191,9 @@ def group_summary(
         for value in sorted(members):
             sids = members[value]
             ctrl = [s for s in sids if samples[s].sample_type in NEGATIVE_TYPES]
+            pos = [s for s in sids if samples[s].sample_type in POSITIVE_TYPES]
             keep = [s for s in sids
-                    if samples[s].sample_type not in NEGATIVE_TYPES]
+                    if samples[s].sample_type not in NOT_FIELD]
 
             fates = Counter()
             for s in keep:
@@ -1101,6 +1215,7 @@ def group_summary(
                 "value": value,
                 "n_libraries": len(sids),
                 "n_controls": len(ctrl),
+                "n_positives": len(pos),
                 "n_analysed": len(keep),
                 "n_subjects": len({samples[s].subject_id or s for s in keep}),
                 "n_empty": sum(1 for d in depths if d == 0),
@@ -1314,6 +1429,9 @@ def main(argv=None) -> int:
             s.subject_id = (r.get("subject_id") or "").strip()
             s.index_i5 = r.get("index_i5", "")
             s.index_i7 = r.get("index_i7", "")
+            s.expected_taxa = [x.strip() for x in
+                               (r.get("expected_taxa") or "").split(";")
+                               if x.strip()]
 
     # Plate geometry, as pre-flight derived it from the index primer names.
     # Without it the position sensors are simply skipped - they are not
@@ -1581,6 +1699,11 @@ def main(argv=None) -> int:
             split = json.load(fh)
     funnel = read_funnel(samples, prep, demux, fate_totals, split)
 
+    # -- controls ---------------------------------------------------------
+    positives = positive_control_check(samples, rows, targets)
+    negatives = negative_control_report(samples, targets + controls,
+                                        args.absolute_floor)
+
     # -- QC ---------------------------------------------------------------
     # Mock wells are left out of every contamination figure: plasmid is
     # what they are made of, and counting it would flag every mock and
@@ -1739,6 +1862,8 @@ def main(argv=None) -> int:
         # where the plasmids ARE the subject: it means something carried
         # across, not that the titration worked.
         "plasmid_contamination": plasmid_qc,
+        "positive_controls": positives,
+        "negative_controls": negatives,
         "plate_geometry": geometry,
         "plate_geometry_note": (
             "Wells hold unrelated samples, so position should explain "

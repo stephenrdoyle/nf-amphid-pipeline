@@ -2301,10 +2301,45 @@ class Sample:
     # id does not follow the convention, and then it fails silently.
     subject_id: str = ""
     file_prefix: str = ""
+    # What a positive control should contain: taxa or target seq_ids,
+    # ';'-separated in the optional expected_taxa column.
+    expected_taxa: list[str] = field(default_factory=list)
     well: str | None = None
     plate_row: str | None = None
     plate_col: int | None = None
     files: list[str] = field(default_factory=list)
+
+
+def check_expected_taxa(samples: list, entries: list, diag: Diagnostics) -> None:
+    """expected_taxa must name panel targets, and only on positives.
+
+    Synthesis checks every positive control against this list, so a typo
+    here would make a working positive read as failed - caught now, while
+    the samplesheet is still a spreadsheet. A name may be a target's
+    taxon or its seq_id.
+    """
+    known = set()
+    for e in entries:
+        if e.type == "target":
+            known.update({e.seq_id, e.report_taxon})
+            if getattr(e, "taxon", ""):
+                known.add(e.taxon)
+    for s in samples:
+        if not s.expected_taxa:
+            continue
+        if s.sample_type != "pos_control":
+            diag.warn(
+                f"samplesheet '{s.sample_id}': expected_taxa is only used on "
+                f"pos_control rows, and this is '{s.sample_type}' - ignored"
+            )
+            continue
+        unknown = [x for x in s.expected_taxa if x not in known]
+        if unknown:
+            diag.error(
+                f"samplesheet '{s.sample_id}': expected_taxa "
+                f"{', '.join(unknown)} is not a target taxon or seq_id in "
+                "the reference panel"
+            )
 
 
 def parse_samplesheet(
@@ -2328,6 +2363,9 @@ def parse_samplesheet(
             # subject needs no new column at all.
             subject_id=(row.get("subject_id") or row["sample_id"]).strip(),
             file_prefix=row.get("file_prefix", ""),
+            expected_taxa=[x.strip() for x in
+                           (row.get("expected_taxa") or "").split(";")
+                           if x.strip()],
         )
         if not s.sample_id:
             diag.error("samplesheet: sample_id is empty")
@@ -3049,6 +3087,7 @@ def main(argv: list[str] | None = None) -> int:
                 im, diag, {r.platform for r in runs.values()})
             barcode_strategy = barcode_strategy_report(idx_rep, runs, diag)
         samples = parse_samplesheet(args.samplesheet, runs, im, diag)
+        check_expected_taxa(samples, entries, diag)
         used_idx = used_index_geometry(
                 samples, runs, diag, args.min_index_edit)
         plates = plate_report(samples, im, diag)
