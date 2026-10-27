@@ -444,6 +444,23 @@ def test_samplesheet_errors() -> None:
     expect_error("two samples in one well", "resolves to well",
                  mutate_ss=collide_well)
 
+    # The sanitised id names files and is passed as a command-line value,
+    # so it must survive a case-insensitive filesystem and not read as a
+    # flag.
+    def case_only(ss):
+        ss[11]["sample_id"] = ss[12]["sample_id"].swapcase()
+        return ss
+
+    expect_error("ids differing only in case", "differ only in letter case",
+                 mutate_ss=case_only)
+
+    def leading_dash(ss):
+        ss[13]["sample_id"] = "-" + ss[13]["sample_id"]
+        return ss
+
+    expect_error("an id that reads as a command-line flag", "begins with '-'",
+                 mutate_ss=leading_dash)
+
     def sanitise_collision(ss):
         ss[10]["sample_id"] = "iCCH 007"
         ss[11]["sample_id"] = "iCCH/007"

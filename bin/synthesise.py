@@ -1394,6 +1394,10 @@ def main(argv=None) -> int:
         w.writerows(fate_rows)
 
     prep = load_prep(args.prep_dir)
+    # Prep summaries are keyed by the filename-safe id the workflow ran
+    # with, exactly as the counts were; bring them back to the declared
+    # id the same way so the outlier list names samples as declared.
+    restore_declared_ids(prep, args.preflight_dir, args.run_id)
     demux = None
     if args.demux_summary and os.path.exists(args.demux_summary):
         with open(args.demux_summary, encoding="utf-8") as fh:

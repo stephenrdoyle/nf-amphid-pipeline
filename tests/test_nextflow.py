@@ -941,6 +941,22 @@ def test_ids_not_cut_at_a_dot() -> None:
           re.search(r"\bid\s*:\s*[^,\]\n]*\.(simpleName|baseName)\b", probe)
           is not None)
 
+    # And the id must be the SANITISED one. meta.id is interpolated
+    # unquoted into shell commands and names every per-sample file, so
+    # the declared sample_id - free text - must never be what it carries.
+    declared = []
+    for path in nf_files():
+        with open(path, encoding="utf-8") as fh:
+            text = strip_comments(fh.read())
+        for m in re.finditer(r"\bid\s*:\s*row\.sample_id\b", text):
+            declared.append(f"{os.path.relpath(path, ROOT)}: {m.group(0)}")
+    check("meta.id is never the raw declared sample_id", not declared,
+          "; ".join(declared))
+    with open(os.path.join(ROOT, "main.nf"), encoding="utf-8") as fh:
+        main_text = strip_comments(fh.read())
+    check("main.nf takes meta.id from pre-flight's sanitised_id",
+          re.search(r"\bid\s*:\s*row\.sanitised_id\b", main_text) is not None)
+
 
 def main() -> int:
     test_includes_resolve()

@@ -2270,6 +2270,30 @@ def parse_samplesheet(
                 f"sanitise to '{token}' - path names would collide"
             )
 
+    # The sanitised id names every per-sample file, so it must also be
+    # distinct on a case-insensitive filesystem - macOS by default, and
+    # some network shares. S1 and s1 pass the check above and then write
+    # to the same file.
+    folded: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for s in samples:
+        folded[(s.run_id, sanitise_id(s.sample_id).casefold())].add(s.sample_id)
+    for (rid, _), originals in folded.items():
+        if len({sanitise_id(o) for o in originals}) > 1:
+            diag.error(
+                f"samplesheet run '{rid}': sample_ids {sorted(originals)} "
+                "differ only in letter case - on a case-insensitive "
+                "filesystem their files would overwrite each other"
+            )
+
+    # The sanitised id is also passed on the command line as an argument
+    # value (--sample-id S1), where a leading '-' reads as a flag.
+    for s in samples:
+        if sanitise_id(s.sample_id).startswith("-"):
+            diag.error(
+                f"samplesheet run '{s.run_id}': sample_id '{s.sample_id}' "
+                "begins with '-', which a command line reads as an option"
+            )
+
     # -- platform uniformity within a run --------------------------------
     plats: dict[str, set[str]] = defaultdict(set)
     for s in samples:

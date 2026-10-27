@@ -147,8 +147,15 @@ workflow {
     ch_resolved = PREFLIGHT.out.file_resolution
         .splitCsv(header: true, sep: '\t')
         .map { row ->
+            // id is the SANITISED form, not the declared one. It is
+            // interpolated unquoted into shell commands (--sample-id) and
+            // names every per-sample file, so a declared 'S 1' split the
+            // argument and 'A/B' made a directory. Pre-flight has already
+            // refused ids whose sanitised forms collide, and synthesis
+            // restores the declared id through file_resolution.tsv - the
+            // same route the nanopore branch's ids have always taken.
             def meta = [
-                id        : row.sample_id,
+                id        : row.sanitised_id,
                 run_id    : row.run_id,
                 platform  : row.platform,
                 well      : row.well,
