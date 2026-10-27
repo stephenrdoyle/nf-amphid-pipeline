@@ -306,7 +306,12 @@ def call_end(
         expect = start + k * bc.length
         if 0 <= expect and expect + bc.length <= len(read):
             windows.append(read[expect : expect + bc.length])
-        best, best_d = None, bc.max_mismatch + 1
+        # No distance ceiling here: bc.match has already decided what is
+        # acceptable, by tolerance OR by margin. This used to start at
+        # max_mismatch + 1, which silently discarded every hit the margin
+        # rule accepted beyond max_mismatch - so the rule was measured,
+        # reported in the summary as active, and never applied.
+        best, best_d = None, None
         for shift in range(-slack, slack + 1):
             a = expect + shift
             if a < 0 or a + bc.length > len(read):
@@ -315,7 +320,7 @@ def call_end(
             if hit is None:
                 continue
             d = hamming(read[a : a + bc.length], hit)
-            if d < best_d:
+            if best_d is None or d < best_d:
                 best, best_d = hit, d
         calls.append(best)
 

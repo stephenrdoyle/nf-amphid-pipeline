@@ -789,6 +789,12 @@ hopped reads arrive at a rate set by the run rather than by the receiving
 well, and a proportional one, because carryover scales with depth. The
 call records which bound was active.
 
+The proportional rate is estimated only from blanks sequenced to at
+least `--min_depth`. A blank is near-empty by design, and one stray read
+in a 3-read NTC is not a 33% carryover rate - used as one, it would hold
+a 20,000-read sample to 6,667 reads before anything could be detected.
+Shallow blanks still set the absolute floor.
+
 ### The third state
 
 `not_detected` is a claim about the sample. It is only available when the

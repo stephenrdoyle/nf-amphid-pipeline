@@ -228,7 +228,7 @@ def test_detection_limit() -> None:
     }
     for sid, s in samples.items():
         s.sample_id = sid
-    lods = S.detection_limits(samples, ["T1"], 2)
+    lods = S.detection_limits(samples, ["T1"], 2, 100)
     check("the limit is taken from the worst blank, not the average",
           lods["T1"]["max_reads_in_blank"] == 5, str(lods["T1"]))
 
@@ -243,15 +243,43 @@ def test_detection_limit() -> None:
 
     clean = {"B1": sample_with({"T1": 0}, 1000, "neg_ntc")}
     clean["B1"].sample_id = "B1"
-    lods2 = S.detection_limits(clean, ["T1"], 2)
+    lods2 = S.detection_limits(clean, ["T1"], 2, 100)
     lim, basis = S.limit_for("T1", sample_with({"T1": 1}, 1000), lods2)
     check("clean blanks still leave a floor - one read is never a detection",
           lim == 2, f"{lim} ({basis})")
 
-    none = S.detection_limits({}, ["T1"], 2)
+    none = S.detection_limits({}, ["T1"], 2, 100)
     lim, basis = S.limit_for("T2", sample_with({"T2": 1}), none)
     check("with no blanks at all the limit is declared an assumption",
           "assumption" in basis, basis)
+
+    # A near-empty blank must not set a carryover RATE. One hopped read in
+    # a 3-read NTC is 33%, and used as a fraction it held a 20,000-read
+    # sample to 6,667 reads - wiping out real positives on every plate
+    # whose NTCs behaved as NTCs should.
+    shallow = {
+        "B1": sample_with({"T1": 1}, depth=3, stype="neg_ntc"),
+        "B2": sample_with({"T1": 2}, depth=1000, stype="neg_extraction"),
+    }
+    for sid, s_ in shallow.items():
+        s_.sample_id = sid
+    lods3 = S.detection_limits(shallow, ["T1"], 2, 100)
+    check("a shallow blank is left out of the proportional bound",
+          lods3["T1"]["max_fraction_in_blank"] == 2 / 1000
+          and lods3["T1"]["n_blanks_for_fraction"] == 1, str(lods3["T1"]))
+    check("but still counts towards the absolute one",
+          lods3["T1"]["max_reads_in_blank"] == 2
+          and lods3["T1"]["n_blanks"] == 2, str(lods3["T1"]))
+    deep = sample_with({"T1": 100}, depth=20000)
+    lim, basis = S.limit_for("T1", deep, lods3)
+    check("so a deep sample is held to the deep blank's rate, not 33%",
+          lim == 40, f"{lim} ({basis})")
+
+    only_shallow = {"B1": shallow["B1"]}
+    lods4 = S.detection_limits(only_shallow, ["T1"], 2, 100)
+    lim, basis = S.limit_for("T1", deep, lods4)
+    check("with only shallow blanks no proportional bound is invented",
+          lim == 2 and "proportional" not in basis, f"{lim} ({basis})")
 
 
 # --------------------------------------------------------------------------

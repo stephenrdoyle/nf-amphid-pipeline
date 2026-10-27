@@ -1079,12 +1079,20 @@ def test_barcode_diagnostic_discriminates() -> None:
                 w.writerow(["D1", "nanopore", f"S{i}", i7s[i], i5s[i],
                             "unknown"])
 
-        # Both copies carrying the same deletion, and a 4bp positional
+        # Both copies carrying the same insertion, and a 4bp positional
         # shift. 4 is chosen because a shift that is a multiple of the
         # index length lands on the OTHER copy and is silently
         # rescued - which is what the tandem duplication is for, and
         # why an injected shift of 5 did not fail at all.
-        gone = i5s[2][:4] + i5s[2][5:]
+        #
+        # An insertion, not a deletion. A 1bp deletion in both copies
+        # used to fail here, but only because call_end discarded margin
+        # matches; with the margin rule live, slack plus margin recovers
+        # every 1bp deletion to the right well. A mid-index insertion
+        # still defeats Hamming matching at every shift, and is 1 indel
+        # from its index with no competitor, so it remains the class an
+        # indel-aware matcher would add.
+        gone = i5s[2][:4] + "T" + i5s[2][4:]
         recs = []
         for _ in range(100):
             recs.append(("bothindel", cfg["p5_tail"] + gone + gone
@@ -1205,6 +1213,22 @@ def test_barcode_margin_rule() -> None:
                               margin=2, margin_max_dist=2)
     check("the margin does not accept a distant window",
           far.match("AAAAGGGG") is None, str(far.match("AAAAGGGG")))
+
+    # And it must survive into the call the pipeline actually makes.
+    # call_end once kept only hits within max_mismatch, so everything
+    # match() accepted on margin was thrown away one level up: the rule
+    # passed the tests above and never moved a read.
+    anchor = "GATCGGAAGAGCACACGT"
+    two_off = "AAAACCAA"                       # 2 from AAAACCCC, far from the rest
+    read = "CTCTCTCTCT" + anchor + two_off + two_off + "CTCTCTCTCTCTCTCTCTCT"
+    on = dx.call_end(read, anchor, bs, 2, len(read), False)
+    check("a margin match is kept by call_end, not only by match()",
+          on.barcode == "AAAACCCC" and on.reason == "ok",
+          f"{on.barcode} {on.reason}")
+    off_end = dx.call_end(read, anchor, off, 2, len(read), False)
+    check("and with margin 0 call_end declines it, as before",
+          off_end.barcode is None and off_end.reason == "no_copy_matched",
+          f"{off_end.barcode} {off_end.reason}")
 
 
 def test_combination_check() -> None:

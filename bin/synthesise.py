@@ -493,7 +493,8 @@ def calibrate(
 
 
 def detection_limits(
-    samples: dict[str, Sample], seq_ids: list[str], floor: int
+    samples: dict[str, Sample], seq_ids: list[str], floor: int,
+    min_fraction_depth: int,
 ) -> dict[str, dict]:
     """What a well can show while containing nothing.
 
@@ -503,17 +504,25 @@ def detection_limits(
     hopping delivers a roughly fixed number of reads regardless of how deep
     the receiving well is, while carryover and cross-contamination scale
     with it.
+
+    The proportional bound is taken only from blanks sequenced to at least
+    min_fraction_depth. A blank is near-empty by design, and a fraction
+    over a handful of reads is noise rather than a carryover rate: an NTC
+    of 3 reads with 1 hopped read would otherwise read as 33%, and hold a
+    20,000-read sample to 6,667 reads before anything could be detected.
+    Shallow blanks still set the absolute bound - their stray reads are
+    exactly the fixed-count events that bound exists for.
     """
     blanks = [s for s in samples.values() if s.sample_type in NEGATIVE_TYPES]
+    deep = [s for s in blanks if s.depth >= min_fraction_depth and s.depth]
     out: dict[str, dict] = {}
     for sid in seq_ids:
         obs = [s.counts.get(sid, 0) for s in blanks]
-        fracs = [
-            (s.counts.get(sid, 0) / s.depth) if s.depth else 0.0
-            for s in blanks
-        ]
+        fracs = [s.counts.get(sid, 0) / s.depth for s in deep]
         out[sid] = {
             "n_blanks": len(blanks),
+            "n_blanks_for_fraction": len(deep),
+            "min_fraction_depth": min_fraction_depth,
             "max_reads_in_blank": max(obs) if obs else 0,
             "max_fraction_in_blank": max(fracs) if fracs else 0.0,
             "absolute_floor": floor,
@@ -1200,7 +1209,8 @@ def main(argv=None) -> int:
 
     # -- detection limits -------------------------------------------------
     seq_ids = [r["seq_id"] for r in targets + controls]
-    lods = detection_limits(samples, seq_ids, args.absolute_floor)
+    lods = detection_limits(samples, seq_ids, args.absolute_floor,
+                            args.min_depth)
 
     # -- composition, always both denominators ----------------------------
     # Two questions, two denominators, and a switch must not silently
