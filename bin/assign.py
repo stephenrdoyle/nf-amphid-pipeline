@@ -31,9 +31,10 @@ Three things decide the call.
              panel or the library is not what it is believed to be.
 
 Matching is staged for cost, not for accuracy: an exact lookup catches the
-error-free majority, a k-mer prefilter narrows the field to a few plausible
-references, and the exact distance is computed only against those. Every
-read that reaches a call has been scored exactly.
+error-free majority, a k-mer prefilter narrows the field to the plausible
+references (all of them, however many), and the exact distance is
+computed only against those. Every read that reaches a call has been
+scored exactly.
 
 Read accounting is preserved: each input sequence lands in exactly one
 outcome, weighted by its dereplicated count, and the outcomes sum to the
@@ -124,22 +125,46 @@ class Panel:
                 self.kmers[r.sequence[j : j + k]].append(i)
         self.by_id = {r.seq_id: i for i, r in enumerate(refs)}
 
-    def candidates(self, q: str, keep: int = 4) -> list[int]:
+    def candidates(self, q: str, second: str | None = None) -> list[int]:
+        """References worth an exact comparison: every one within the gate.
+
+        There is no cap on how many. A fixed keep-the-top-N used to sit
+        here, and a panel with more than N near-identical haplotypes - the
+        normal state of a well-sampled locus - then decided the call by
+        k-mer count and panel order: the true reference could fall outside
+        the N, and a tie that crossed taxa could be cut down to one taxon
+        and reported as taxon_only rather than ambiguous. Nothing the
+        filter drops is ever measured, so it must not drop a contender.
+
+        `second` is the reverse mate of an unmerged pair, and its k-mers
+        count too. R1 alone covers only one end, and references that share
+        that end - haplotypes of one species often do - all look the same
+        to it; the evidence that separates them is in R2.
+
+        The cost is exact comparisons against every reference within half
+        the best k-mer count: about one per haplotype at the locus, not one
+        per panel entry, since other loci and other species fall far below
+        the gate. Bounded edit distance is banded, so each is roughly
+        read length x (2 x max_d + 1) cells, and it is paid once per
+        dereplicated sequence, not once per read.
+        """
         k = self.k
-        if len(q) < k:
+        seqs = [q] if second is None else [q, revcomp(second)]
+        if all(len(s) < k for s in seqs):
             return list(range(len(self.refs)))
         hits: Counter = Counter()
-        for j in range(0, len(q) - k + 1):
-            for i in self.kmers.get(q[j : j + k], ()):
-                hits[i] += 1
+        for s in seqs:
+            for j in range(0, len(s) - k + 1):
+                for i in self.kmers.get(s[j : j + k], ()):
+                    hits[i] += 1
         if not hits:
             return []
-        top = hits.most_common(1)[0][1]
+        top = max(hits.values())
         # Half the best count is a deliberately loose gate. The filter's job
         # is to avoid comparing against obviously unrelated references, not
         # to pick a winner - anything it discards is never measured, so it
         # must err toward keeping.
-        return [i for i, n in hits.most_common(keep) if n >= top * 0.5]
+        return [i for i, n in hits.items() if n >= top * 0.5]
 
 
 def load_panel(fasta: str, meta_path: str | None) -> list[Ref]:
@@ -235,11 +260,20 @@ def call_sequence(
     # either; every read went to whichever came first. The exact lookup
     # now only guarantees that the matching reference is among the
     # candidates and spares it the alignment.
+    # 0 would make the best reference its own runner-up: _finish keeps as
+    # tied whatever is within min_margin - 1 edits of the best, and with 0
+    # that excludes the best itself, so every read came back `ambiguous`
+    # with nothing tied. A margin of 1 already means "strictly better
+    # wins"; anything weaker would have to break exact ties arbitrarily,
+    # which this module refuses to do.
+    if min_margin < 1:
+        raise ValueError(f"min_margin must be at least 1, got {min_margin}")
+
     exact = panel.exact.get(q) if second is None else None
 
     max_d = max(2, int(len(q) * max_frac))
     scored: list[tuple[int, int]] = []
-    cands = panel.candidates(q)
+    cands = panel.candidates(q, second)
     if exact is not None and exact not in cands:
         cands.append(exact)
     for i in cands:
@@ -406,6 +440,19 @@ def derep_fastq(path: str, ps, cfg: dict) -> tuple[list[tuple[str, int]], int]:
 # --------------------------------------------------------------------------
 
 
+def _at_least_one(text: str) -> int:
+    v = int(text)
+    if v < 1:
+        raise argparse.ArgumentTypeError(
+            f"{v} is below 1. The margin is how far the best fit must beat "
+            "the runner-up; 0 would leave the best fit unable to beat "
+            "itself and every read would be called ambiguous. Use 1 for "
+            "the loosest setting (strictly better wins, exact ties stay "
+            "unresolved)."
+        )
+    return v
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--panel", required=True,
@@ -420,8 +467,10 @@ def main(argv=None) -> int:
     ap.add_argument("--outdir", default="assign")
     ap.add_argument("--max-dist-frac", type=float, default=0.10,
                     help="distance limit as a fraction of read length")
-    ap.add_argument("--min-margin", type=int, default=2,
-                    help="edits by which the best fit must beat the next")
+    ap.add_argument("--min-margin", type=_at_least_one, default=2,
+                    help="edits by which the best fit must beat the next "
+                         "(at least 1: 1 means strictly better wins and only "
+                         "exact ties are unresolved)")
     ap.add_argument("--tag-max-edits", type=int, default=3)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)

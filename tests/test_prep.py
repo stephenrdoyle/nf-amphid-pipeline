@@ -288,8 +288,10 @@ def test_against_truth() -> None:
                 if f is None or r is None:
                     outcome[("no_primer", t["fate"])] += 1
                     continue
-                a1, b1 = P.trim_readthrough(s1[f[1]:], q1[f[1]:], rt1)
-                a2, b2 = P.trim_readthrough(s2[r[1]:], q2[r[1]:], rt2)
+                a1, b1 = P.trim_readthrough(s1[f[1]:], q1[f[1]:], rt1,
+                                            dict(ps.rev)[r[0]])
+                a2, b2 = P.trim_readthrough(s2[r[1]:], q2[r[1]:], rt2,
+                                            dict(ps.fwd)[f[0]])
                 m = P.merge_pair(a1, b1, a2, b2)
                 kind = "merged" if m is not None else "paired"
                 outcome[(kind, t["fate"])] += 1
@@ -477,9 +479,211 @@ def test_primer_collision() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# short inserts: read-through crosses the opposite primer first
+# --------------------------------------------------------------------------
+
+# The real construct, so the junction is the one a MiSeq actually reads.
+OVF = "TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG"
+OVR = "GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG"
+FWD = "GCGTTATTTACCACGAATTGCAG"
+REV = "TATGCTTAAGTTCAGCGGGT"
+# What lies past each overhang (index read primer site and beyond); only
+# its being there matters.
+P7_TAIL = "ATCTCGTATGCCGTCTTCTGCTTG"
+P5_TAIL = "GTGTAGATCTCGGTGGTCGCCGTATCATT"
+
+
+def short_pair(insert: str, read_len: int = 250):
+    """R1 and R2 as sequenced from fwd - insert - rc(rev), primers first."""
+    r1 = (FWD + insert + P.revcomp(REV) + P.revcomp(OVR) + P7_TAIL)[:read_len]
+    r2 = (REV + P.revcomp(insert) + P.revcomp(FWD) + P.revcomp(OVF)
+          + P5_TAIL)[:read_len]
+    return r1, r2
+
+
+def test_readthrough_takes_the_opposite_primer() -> None:
+    """Between a short insert and the adapter sits the opposite primer.
+
+    Trimming at the adapter alone left rc(primer) on every read-through
+    mate: the merge seed then sat on primer, the pair stayed unmerged, and
+    assignment charged each mate ~20 edits for synthesised bases.
+    """
+    print("\nread-through removes the opposite primer too")
+    rng = random.Random(31)
+    rt1, rt2 = P.revcomp(OVR), P.revcomp(OVF)
+
+    insert = "".join(rng.choice("ACGT") for _ in range(150))
+    r1, r2 = short_pair(insert)
+    s1, s2 = r1[len(FWD):], r2[len(REV):]
+    a, qa = P.trim_readthrough(s1, qual(len(s1)), rt1, REV)
+    b, qb = P.trim_readthrough(s2, qual(len(s2)), rt2, FWD)
+    check("R1 read-through is cut where the insert ends",
+          a == insert, f"{len(a)} vs {len(insert)}")
+    check("R2 read-through is cut where the insert ends",
+          b == P.revcomp(insert), f"{len(b)} vs {len(insert)}")
+    m = P.merge_pair(a, qa, b, qb)
+    check("a short insert merges to exactly the insert",
+          m is not None and m[0] == insert,
+          "None" if m is None else f"{len(m[0])} vs {len(insert)}")
+
+    # The read stops a few bases into the adapter: the full junction is
+    # not on the read, only its start.
+    for past in (12, 5, 0):
+        ins = "".join(rng.choice("ACGT") for _ in range(250 - len(FWD)
+                                                     - len(REV) - past))
+        r1, _ = short_pair(ins)
+        s1 = r1[len(FWD):]
+        a, _ = P.trim_readthrough(s1, qual(len(s1)), rt1, REV)
+        check(f"a read ending {past}bp into the adapter loses all of the "
+              "junction", a == ins, f"{len(a)} vs {len(ins)}")
+
+    # ... or inside the primer itself, with only the primer's first bases
+    ins = "".join(rng.choice("ACGT") for _ in range(250 - len(FWD) - 12))
+    r1, _ = short_pair(ins)
+    s1 = r1[len(FWD):]
+    a, _ = P.trim_readthrough(s1, qual(len(s1)), rt1, REV)
+    check("a read ending 12bp into the opposite primer loses those 12bp",
+          a == ins, f"{len(a)} vs {len(ins)}")
+
+    # a degenerate primer has to be reverse-complemented code by code
+    deg = REV[:5] + "Y" + REV[6:]            # REV[5] is T, so Y covers it
+    a, _ = P.trim_readthrough(short_pair(insert)[0][len(FWD):],
+                              qual(250 - len(FWD)), rt1, deg)
+    check("a degenerate opposite primer is still recognised",
+          a == insert, f"{len(a)} vs {len(insert)}")
+
+    # and a read that never ran through must keep every base
+    trimmed = 0
+    for _ in range(3000):
+        s = "".join(rng.choice("ACGT") for _ in range(227))
+        a, _ = P.trim_readthrough(s, qual(len(s)), rt1, REV)
+        trimmed += a != s
+    check("reads with no read-through are not trimmed by chance",
+          trimmed == 0, f"{trimmed} of 3000 trimmed")
+
+    # End to end through prep_sample: a short-amplicon library must merge.
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp, "primers.tsv"), "w") as fh:
+            fh.write(f"name\tdirection\tsequence\nF\tfwd\t{FWD}\n"
+                     f"R\trev\t{REV}\n")
+        recs1, recs2 = [], []
+        for i, L in enumerate((120, 160, 190, 205, 220, 225)):
+            ins = "".join(rng.choice("ACGT") for _ in range(L))
+            r1, r2 = short_pair(ins)
+            recs1.append((f"s{i}", r1, qual(len(r1))))
+            recs2.append((f"s{i}", r2, qual(len(r2))))
+        _write_fastq(os.path.join(tmp, "R1.fastq.gz"), recs1)
+        _write_fastq(os.path.join(tmp, "R2.fastq.gz"), recs2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            P.main(["--r1", os.path.join(tmp, "R1.fastq.gz"),
+                    "--r2", os.path.join(tmp, "R2.fastq.gz"),
+                    "--sample-id", "short", "--min-length", "50",
+                    "--primers", os.path.join(tmp, "primers.tsv"),
+                    "--outdir", tmp, "--quiet"])
+        sj = json.load(open(os.path.join(tmp, "short.prep.json")))
+        fa = read_fasta(os.path.join(tmp, "short.merged.fasta.gz"))
+        lens = sorted(len(v) for v in fa.values())
+        check("every short-amplicon pair merges in prep",
+              sj["fates"]["merged"] == 6, str(sj["fates"]))
+        check("and each merged read is exactly its insert",
+              lens == [120, 160, 190, 205, 220, 225], str(lens))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _write_fastq(path, recs):
+    with gzip.open(path, "wt") as fh:
+        for rid, s, q in recs:
+            fh.write(f"@{rid}\n{s}\n+\n{q}\n")
+
+
+def test_min_overlap_is_honoured() -> None:
+    """--min-overlap 20 must merge a 20bp overlap.
+
+    The 24bp seed has to lie inside R1, so overlaps of 20-23bp were never
+    found and the effective minimum was 24 whatever the option said.
+    """
+    print("\nshort overlaps down to --min-overlap merge")
+    rng = random.Random(41)
+    for ov in (20, 21, 22, 23):
+        amp = "".join(rng.choice("ACGT") for _ in range(500 - ov))
+        m = P.merge_pair(amp[:250], qual(250), P.revcomp(amp[250 - ov:]),
+                         qual(250), min_overlap=20)
+        check(f"a {ov}bp overlap merges to the amplicon",
+              m is not None and m[0] == amp,
+              "None" if m is None else f"{len(m[0])} vs {len(amp)}")
+    amp = "".join(rng.choice("ACGT") for _ in range(481))
+    m = P.merge_pair(amp[:250], qual(250), P.revcomp(amp[231:]), qual(250),
+                     min_overlap=20)
+    check("a 19bp overlap stays below --min-overlap 20", m is None)
+    m = P.merge_pair(amp[:250], qual(250), P.revcomp(amp[231:]), qual(250),
+                     min_overlap=19)
+    check("and merges once --min-overlap allows it",
+          m is not None and m[0] == amp)
+    # one error inside a 20bp overlap is still the same molecule
+    amp = "".join(rng.choice("ACGT") for _ in range(480))
+    r2 = list(P.revcomp(amp[230:]))
+    r2[-5] = "A" if r2[-5] != "A" else "C"
+    m = P.merge_pair(amp[:250], qual(250), "".join(r2), qual(250, 20))
+    check("a 20bp overlap with one error merges toward the better base",
+          m is not None and m[0] == amp,
+          "None" if m is None else f"{len(m[0])}")
+
+
+def test_truncated_mate_is_fatal() -> None:
+    """zip() stopped at the shorter file and the accounting still balanced."""
+    print("\nmate files that end unequally")
+    tmp = tempfile.mkdtemp()
+    try:
+        fwd, rev = "ACGTACGTACGTACGTAAAA", "GGCCGGCCGGCCGGCCGGCC"
+        with open(os.path.join(tmp, "primers.tsv"), "w") as fh:
+            fh.write(f"name\tdirection\tsequence\nF1\tfwd\t{fwd}\n"
+                     f"R1\trev\t{rev}\n")
+        amp = "".join(random.Random(5).choice("ACGT") for _ in range(300))
+        mol = fwd + amp + P.revcomp(rev)
+        r1, r2 = mol[:250], P.revcomp(mol)[:250]
+        recs1 = [(f"x{i}", r1, qual(250)) for i in range(5)]
+        recs2 = [(f"x{i}", r2, qual(250)) for i in range(5)]
+
+        def run(sid, a, b):
+            _write_fastq(os.path.join(tmp, f"{sid}_R1.fastq.gz"), a)
+            _write_fastq(os.path.join(tmp, f"{sid}_R2.fastq.gz"), b)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    P.main(["--r1", os.path.join(tmp, f"{sid}_R1.fastq.gz"),
+                            "--r2", os.path.join(tmp, f"{sid}_R2.fastq.gz"),
+                            "--sample-id", sid,
+                            "--primers", os.path.join(tmp, "primers.tsv"),
+                            "--outdir", tmp, "--quiet"])
+            except SystemExit as e:
+                return str(e)
+            return None
+
+        err = run("t2", recs1, recs2[:3])
+        check("a truncated R2 is fatal", err is not None and "ran out" in err,
+              str(err))
+        err = run("t1", recs1[:3], recs2)
+        check("a truncated R1 is fatal", err is not None and "ran out" in err,
+              str(err))
+        err = run("ok", recs1, recs2)
+        check("complete mate files still run", err is None, str(err))
+        # pre-Casava 1.8 ids carry the mate number on the id itself
+        err = run("old", [(f"x{i}/1", r1, qual(250)) for i in range(5)],
+                  [(f"x{i}/2", r2, qual(250)) for i in range(5)])
+        check("old-style /1 and /2 mate suffixes are mates, not a mismatch",
+              err is None, str(err))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_primer_match()
     test_trim_and_merge()
+    test_readthrough_takes_the_opposite_primer()
+    test_min_overlap_is_honoured()
+    test_truncated_mate_is_fatal()
     test_filters()
     test_primer_collision()
     test_against_truth()

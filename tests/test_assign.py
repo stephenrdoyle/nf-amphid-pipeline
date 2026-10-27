@@ -735,6 +735,84 @@ def test_outputs() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_prefilter_keeps_every_contender() -> None:
+    """The k-mer prefilter used to keep at most four references.
+
+    With five or more near-identical references, panel order then decided
+    which ones were ever measured: a tie across taxa was cut down to one
+    taxon, and an unmerged pair whose R1 fits every haplotype equally lost
+    the one its R2 identified.
+    """
+    print("\nthe prefilter keeps every reference within its gate")
+    rng = random.Random(61)
+    core = "".join(rng.choice("ACGT") for _ in range(360))
+
+    def sub(seq, pos):
+        s = list(seq)
+        s[pos] = "A" if s[pos] != "A" else "G"
+        return "".join(s)
+
+    # Five references one substitution from `core` at five different
+    # places: four of Species_a, and Species_b LAST in panel order, where
+    # a keep-the-first-four filter drops it.
+    refs = [A.Ref(f"Sp_a_h{n}", sub(core, p), "ITS2", "target", "Species_a")
+            for n, p in enumerate((40, 110, 180, 250), 1)]
+    refs.append(A.Ref("Sp_b_h1", sub(core, 320), "ITS2", "target",
+                      "Species_b"))
+    panel = A.Panel(refs)
+    c = A.call_sequence(core, panel, TAG, 0.10, 2, 3)
+    check("a tie across five references is reported in full",
+          set(c.tied) == {r.seq_id for r in refs}, str(c.tied))
+    check("and, crossing taxa, is ambiguous rather than taxon_only",
+          c.outcome == "ambiguous", f"{c.outcome} {c.taxon}")
+
+    # Six haplotypes that share their first 200bp and differ after it.
+    # R1 sits in the shared part, so only R2 tells them apart.
+    head = core[:200]
+    haps = [head + "".join(random.Random(70 + n).choice("ACGT")
+                           for _ in range(160)) for n in range(6)]
+    panel = A.Panel([A.Ref(f"Sp_c_h{n}", h, "ITS2", "target", "Species_c")
+                     for n, h in enumerate(haps)])
+    want = haps[5]
+    c = A.call_sequence(want[:150], panel, TAG, 0.10, 2, 3,
+                        second=revcomp(want[-150:]))
+    check("a pair identified only by R2 reaches its reference",
+          c.outcome == "assigned" and c.seq_id == "Sp_c_h5",
+          f"{c.outcome} {c.seq_id}")
+    check("R2 k-mers count in the prefilter",
+          5 in panel.candidates(want[:150], revcomp(want[-150:])),
+          str(panel.candidates(want[:150], revcomp(want[-150:]))))
+
+
+def test_min_margin_zero_is_refused() -> None:
+    """--min-margin 0 made every read ambiguous with nothing tied: the best
+    reference was not within `< 0` of itself."""
+    print("\n--min-margin below 1 is refused")
+    panel, by_id = toy_panel()
+    h1 = by_id["Sp_a_h1"].sequence
+    try:
+        c = A.call_sequence(h1, panel, TAG, 0.10, 0, 3)
+        check("call_sequence refuses a margin of 0", False,
+              f"returned {c.outcome} tied={c.tied}")
+    except ValueError:
+        check("call_sequence refuses a margin of 0", True)
+    c = A.call_sequence(h1, panel, TAG, 0.10, 1, 3)
+    check("a margin of 1 still assigns an exact read",
+          c.outcome == "assigned" and c.seq_id == "Sp_a_h1", str(c))
+
+    err = io.StringIO()
+    code = None
+    try:
+        with contextlib.redirect_stderr(err):
+            A.main(["--panel", "x.fasta", "--sample-id", "s",
+                    "--merged", "x.fasta", "--min-margin", "0"])
+    except SystemExit as e:
+        code = e.code
+    check("--min-margin 0 is a usage error with a reason",
+          code == 2 and "ambiguous" in err.getvalue(),
+          f"exit {code}: {err.getvalue().strip()[-120:]}")
+
+
 def main() -> int:
     test_bounded_edit()
     test_calls()
@@ -742,6 +820,8 @@ def main() -> int:
     test_tag_unobservable()
     test_exact_hits_face_the_margin()
     test_both_mates_must_fit()
+    test_prefilter_keeps_every_contender()
+    test_min_margin_zero_is_refused()
     test_preflight_catches_it()
     test_tag_under_a_primer()
     test_outputs()

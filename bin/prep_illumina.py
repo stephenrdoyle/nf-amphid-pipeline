@@ -19,8 +19,9 @@ Five things happen, in this order:
                     reference is trimmed to match (preflight writes
                     reference.insert.fasta for exactly this).
   3. read-through - when the insert is shorter than the read, the read runs
-                    off the end of the molecule and into the opposite
-                    adapter. That adapter is removed.
+                    off the end of the insert, through the opposite primer
+                    and into the opposite adapter. Both are removed, so the
+                    read stops where the insert does.
   4. merge        - overlapping mates are collapsed into one sequence, with
                     disagreements resolved by quality.
   5. dereplicate  - identical sequences are collapsed to one record with a
@@ -34,7 +35,9 @@ requirement the nanopore demultiplexer applies to its two ends, for the same
 reason - one end can be wrong, two ends being wrong the same way is rare.
 
 Read accounting is preserved: every input pair ends in exactly one bucket,
-and the buckets sum to the input.
+and the buckets sum to the input. The input itself is checked too: R1 and
+R2 must hold the same reads in the same order and end together, or the run
+stops - pairs lost before the funnel are invisible to the funnel's sums.
 
 Standard library only.
 """
@@ -67,6 +70,8 @@ FATES = (
     "no_primer",
     "too_short",
     "low_quality",
+    # Never produced. Kept so every prep.json carries the same keys, which
+    # synthesise.py reads by name; see FATE_MEANING for why.
     "length_mismatch",
 )
 
@@ -76,7 +81,11 @@ FATE_MEANING = {
     "no_primer": "neither orientation opened with a primer pair",
     "too_short": "insert shorter than the minimum after trimming",
     "low_quality": "expected errors above the threshold",
-    "length_mismatch": "mates overlapped in two places, or disagreed too much",
+    "length_mismatch": (
+        "reserved, always 0 - mates whose overlap disagrees are kept as "
+        "pairs, because a disagreeing seed hit on a long amplicon is far "
+        "more often a chance match than evidence the pair is bad"
+    ),
 }
 
 
@@ -85,24 +94,155 @@ FATE_MEANING = {
 # --------------------------------------------------------------------------
 
 
-def trim_readthrough(seq: str, qual: str, adapter: str, max_edits: int = 3):
-    """Remove adapter the read has run into past the end of a short insert.
+# Complement of every IUPAC code, so a degenerate primer can be turned
+# round. ampseqlib.revcomp maps ACGTN only and would leave a Y in place
+# where an R belongs - the right letter for the forward strand and the
+# wrong one for the reverse, which is exactly the strand needed here.
+_IUPAC_COMP = str.maketrans(
+    "ACGTURYSWKMBDHVNacgturyswkmbdhvn",
+    "TGCAAYRSWMKVHDBNtgcaayrswmkvhdbn",
+)
 
-    Only the first 20bp of the adapter is searched for. The read may stop
-    part way through it, and requiring the whole thing would miss exactly
-    the shortest inserts - the ones that ran furthest into it.
+
+def revcomp_iupac(seq: str) -> str:
+    return seq.translate(_IUPAC_COMP)[::-1]
+
+
+# The shortest read tail accepted as the START of the read-through junction
+# when the read stops before the junction is complete. Ten bases with the
+# error allowance below is a chance match about once in 10^5 reads, and
+# what such a chance match costs is a few bases off the end of one mate -
+# bases the other mate still covers wherever the pair overlaps.
+MIN_PARTIAL_JUNCTION = 10
+
+
+def trim_readthrough(
+    seq: str, qual: str, adapter: str, opposite_primer: str = "",
+    max_edits: int = 3, primer_edits: int = 2,
+):
+    """Remove everything past the end of the insert when the read runs off it.
+
+    When the insert is shorter than the read, the read does not run
+    straight from template into adapter. The molecule is
+
+        fwd primer - insert - rc(rev primer) - rc(rev overhang) - ...
+
+    so R1 runs through the reverse-complemented OPPOSITE primer before it
+    reaches any adapter (and R2 likewise through rc(fwd primer)). Cutting
+    at the adapter alone leaves that primer on the read: the merge seed
+    then lands on primer rather than insert, the pair falls through to
+    `paired`, and assignment charges each mate twenty-odd edits for
+    synthesised bases - enough to leave the shortest amplicons unmatched.
+
+    So the thing searched for is the junction itself: rc(opposite primer)
+    followed by the first 20bp of the adapter, and the read is cut where
+    the junction starts, i.e. where the insert ends. Which opposite primer
+    is known - it is the one matched at the start of the other mate, the
+    same molecule seen from the other end - so the junction is one
+    sequence, not a search over the primer set. Searching for primer and
+    adapter together is also more specific than either alone: ~40bp with
+    the adapter's and the primer's edit allowance combined.
+
+    A read can also stop part way into the junction - in the primer, or a
+    few bases into the adapter - in which case the whole junction is not
+    there to be found. The tail of the read is then tested against the
+    START of the junction, held to the same error rate per base (not the
+    same absolute allowance, which over ten bases would accept almost
+    anything) and at least MIN_PARTIAL_JUNCTION bases long. A read that
+    stops fewer than that many bases past the insert keeps them; that is
+    a handful of bases, and the alternative - trimming any read whose last
+    few bases happen to resemble a primer - would shorten reads that never
+    ran through at all.
+
+    Without `opposite_primer` this is the old adapter-only search, with
+    the same partial-tail rule.
     """
-    probe = adapter[:20]
-    if len(seq) < 20:
+    junction = revcomp_iupac(opposite_primer) + adapter[:20]
+    # Myers' matcher packs the pattern into one 64-bit word.
+    junction = junction[:64]
+    m = len(junction)
+    if not m or not seq:
         return seq, qual
-    hit = find_anchor_cost(seq, probe, max_edits)
+    budget = max_edits + (primer_edits if opposite_primer else 0)
+
+    hit = find_anchor_cost(seq, junction, budget)
+    if hit is not None:
+        start = hit[0]
+        return seq[:start], qual[:start]
+
+    # Partial junction at the read end. Only the last m bases can hold it,
+    # and the read is padded with N - which the matcher accepts as any
+    # base - so the part of the junction beyond the read end costs nothing.
+    # The padding stops MIN_PARTIAL_JUNCTION short of the full junction, so
+    # at least that many real bases must take part.
+    tail_from = max(0, len(seq) - m)
+    tail = seq[tail_from:]
+    pad = m - MIN_PARTIAL_JUNCTION
+    if pad <= 0 or len(tail) < MIN_PARTIAL_JUNCTION:
+        return seq, qual
+    hit = find_anchor_cost(tail + "N" * pad, junction, budget)
     if hit is None:
         return seq, qual
-    start = hit[0]
-    if start < 20:
-        # The whole read is adapter; leave it to the length filter.
-        return seq[:start], qual[:start]
-    return seq[:start], qual[:start]
+    start, end, cost = hit
+    if end <= len(tail):
+        # A complete junction inside the tail would have been found above;
+        # this is a weaker duplicate of that search, not a partial.
+        return seq, qual
+    covered = len(tail) - start
+    if covered < MIN_PARTIAL_JUNCTION or cost > (budget * covered) // m:
+        return seq, qual
+    cut = tail_from + start
+    return seq[:cut], qual[:cut]
+
+
+# The merge seed: rc(R2)'s first SEED_LEN bases located in R1 within
+# SEED_EDITS. Overlaps shorter than the seed are tested at the same error
+# rate per base (see _overlap_offsets).
+SEED_LEN = 24
+SEED_EDITS = 3
+
+
+def _overlap_offsets(r1: str, rc2: str, min_overlap: int):
+    """Candidate offsets of rc(R2) against R1, most likely first.
+
+    An offset k >= 0 means rc(R2) starts at R1[k] - the ordinary overlap.
+    k < 0 means rc(R2) starts -k bases BEFORE R1 does: a dovetail, which
+    only happens when both reads ran a few bases past the insert into the
+    junction (too few for trim_readthrough to recognise safely), so each
+    mate's overhang beyond the other is read-through, not template.
+
+    Three searches, cheapest-to-trust first:
+
+      seed      rc2[:24] found anywhere in R1 - every overlap of 24bp or
+                more, with indels tolerated in the seed.
+      short     overlaps from 23bp down to min_overlap, tested directly at
+                the end of R1. The seed has to fit inside R1, so it can
+                never find these; without this --min-overlap quietly meant
+                max(24, min_overlap). Worse, an overlap of 21-23bp could be
+                "found" by the seed with its last bases scored as
+                deletions, at an offset a few bases off - which then fails
+                verification - so this is tried even when the seed hit.
+                There are at most a few lengths to try, each one ungapped
+                comparison, so it costs almost nothing.
+      dovetail  R1's first 24bp found inside rc(R2).
+
+    The allowance everywhere is the seed's own error rate, 3 in 24, scaled
+    to the length compared. Each candidate is still verified in full by the
+    caller, so a wrong candidate costs a comparison, not a bad merge.
+    """
+    probe = rc2[: min(SEED_LEN, len(rc2))]
+    hit = find_anchor_cost(r1, probe, SEED_EDITS)
+    if hit is not None:
+        yield hit[0]
+    for L in range(min(len(probe) - 1, len(r1), len(rc2)), min_overlap - 1, -1):
+        mism = sum(1 for x, y in zip(r1[len(r1) - L:], rc2[:L]) if x != y)
+        if mism <= (SEED_EDITS * L) // SEED_LEN:
+            yield len(r1) - L
+            break
+    if hit is None:
+        hit = find_anchor_cost(rc2, r1[: min(SEED_LEN, len(r1))], SEED_EDITS)
+        if hit is not None and hit[0] > 0:
+            yield -hit[0]
 
 
 def merge_pair(
@@ -116,7 +256,8 @@ def merge_pair(
     whole overlap ungapped. Approximate for the seed, exact-offset for the
     verification: Illumina indels are rare enough that a gapped overlap is
     better left unmerged than patched over, and a pair that fails here is
-    kept rather than thrown away.
+    kept rather than thrown away. The candidate offsets, including overlaps
+    too short for the seed and dovetailed mates, are in _overlap_offsets.
 
     Disagreements are resolved by quality, and the merged base takes the
     higher score only where the mates agree. Where they disagree the score
@@ -127,25 +268,24 @@ def merge_pair(
     if len(r1) < min_overlap or len(rc2) < min_overlap:
         return None
 
-    probe = rc2[: min(24, len(rc2))]
-    hit = find_anchor_cost(r1, probe, 3)
-    if hit is None:
-        return None
-    k = hit[0]
-    overlap = min(len(r1) - k, len(rc2))
-    if overlap < min_overlap:
+    for k in _overlap_offsets(r1, rc2, min_overlap):
+        # Align the two on molecule coordinates: R1 from i1, rc(R2) from i2.
+        i1, i2 = (k, 0) if k >= 0 else (0, -k)
+        overlap = min(len(r1) - i1, len(rc2) - i2)
+        if overlap < min_overlap:
+            continue
+        a, b = r1[i1 : i1 + overlap], rc2[i2 : i2 + overlap]
+        diff = sum(1 for x, y in zip(a, b) if x != y)
+        if diff > max_diff_frac * overlap:
+            continue
+        break
+    else:
         return None
 
-    a, b = r1[k : k + overlap], rc2[:overlap]
-    diff = sum(1 for x, y in zip(a, b) if x != y)
-    if diff > max_diff_frac * overlap:
-        return None
-
-    out_s, out_q = [r1[:k]], [q1[:k]]
     cons, consq = [], []
     for i in range(overlap):
         x, y = a[i], b[i]
-        qx, qy = ord(q1[k + i]) - 33, ord(rq2[i]) - 33
+        qx, qy = ord(q1[i1 + i]) - 33, ord(rq2[i2 + i]) - 33
         if x == y:
             cons.append(x)
             consq.append(chr(33 + min(41, qx + qy)))
@@ -155,11 +295,14 @@ def merge_pair(
         else:
             cons.append(y)
             consq.append(chr(33 + max(2, qy - qx)))
-    out_s.append("".join(cons))
-    out_q.append("".join(consq))
-    out_s.append(rc2[overlap:])
-    out_q.append(rq2[overlap:])
-    return "".join(out_s), "".join(out_q)
+    if k < 0:
+        # Dovetail: the molecule is exactly the overlap. What either mate
+        # has beyond it is junction it ran into, so both overhangs go.
+        return "".join(cons), "".join(consq)
+    return (
+        r1[:k] + "".join(cons) + rc2[overlap:],
+        q1[:k] + "".join(consq) + rq2[overlap:],
+    )
 
 
 # --------------------------------------------------------------------------
@@ -182,20 +325,66 @@ class PrepResult:
     noprimer: Counter = field(default_factory=Counter)
 
 
+def _mate_id(rid: str) -> str:
+    """The read id with any old-style /1 or /2 mate suffix removed.
+
+    Current Illumina headers carry the mate number after a space, which
+    open_reads already drops; pre-Casava 1.8 files put it on the id itself,
+    and comparing those verbatim would call every pair out of step.
+    """
+    return rid[:-2] if rid.endswith(("/1", "/2")) else rid
+
+
+def paired_reads(r1_path: str, r2_path: str):
+    """Yield ((id, seq, qual), (id, seq, qual)) mate by mate, refusing to
+    pair reads that are not mates.
+
+    zip() would stop at the shorter file without a word. A truncated R2 -
+    an interrupted copy, a full disk - then drops every pair past the
+    break, and because the dropped pairs never enter the funnel the read
+    accounting still balances: the one check meant to catch lost reads
+    is blind to exactly this loss. So both files must run out together.
+    """
+    end = object()
+    it1, it2 = open_reads(r1_path), open_reads(r2_path)
+    n = 0
+    while True:
+        a, b = next(it1, end), next(it2, end)
+        if a is end and b is end:
+            return
+        if a is end or b is end:
+            short, other = (r1_path, r2_path) if a is end else (r2_path, r1_path)
+            raise SystemExit(
+                f"{short} ran out after {n:,} reads while {other} still has "
+                "reads - one mate file is truncated or the two are not a "
+                "pair. Re-fetch or regenerate the files; nothing past the "
+                "break could be paired."
+            )
+        if _mate_id(a[0]) != _mate_id(b[0]):
+            raise SystemExit(
+                f"R1/R2 out of step at {a[0]} vs {b[0]} - the files are not "
+                "in the same order, which no downstream step can detect"
+            )
+        n += 1
+        yield a, b
+
+
 def prep_sample(r1_path: str, r2_path: str, ps: PrimerSet, cfg: dict, args) -> PrepResult:
     res = PrepResult()
     rt_r1 = revcomp(cfg["pcr1_overhang_rev"])
     rt_r2 = revcomp(cfg["pcr1_overhang_fwd"])
+    # Primer sequence by name, for the read-through junction: the primer
+    # matched at the start of one mate is the one whose reverse complement
+    # the other mate runs into. First entry wins on a duplicated name, as
+    # the primer set itself would have no way to tell them apart either.
+    fwd_seq: dict[str, str] = {}
+    rev_seq: dict[str, str] = {}
+    for name, p in ps.fwd:
+        fwd_seq.setdefault(name, p)
+    for name, p in ps.rev:
+        rev_seq.setdefault(name, p)
 
-    for (rid1, s1, q1), (rid2, s2, q2) in zip(
-        open_reads(r1_path), open_reads(r2_path)
-    ):
-        if rid1 != rid2:
-            raise SystemExit(
-                f"R1/R2 out of step at {rid1} vs {rid2} - the files are not "
-                "in the same order, which no downstream step can detect"
-            )
-
+    for (rid1, s1, q1), (rid2, s2, q2) in paired_reads(r1_path, r2_path):
         # 1. orient
         f = ps.match(s1, "fwd")
         r = ps.match(s2, "rev")
@@ -214,9 +403,12 @@ def prep_sample(r1_path: str, r2_path: str, ps: PrimerSet, cfg: dict, args) -> P
         s2, q2 = s2[r[1] :], q2[r[1] :]
         res.primer_pairs[f"{f[0]}/{r[0]}"] += 1
 
-        # 3. adapter read-through
-        s1, q1 = trim_readthrough(s1, q1, rt_r1)
-        s2, q2 = trim_readthrough(s2, q2, rt_r2)
+        # 3. read-through: R1 runs into rc(the reverse primer R2 opened
+        # with) and then the reverse adapter, R2 the mirror image.
+        s1, q1 = trim_readthrough(s1, q1, rt_r1, rev_seq.get(r[0], ""),
+                                  primer_edits=ps.max_edits)
+        s2, q2 = trim_readthrough(s2, q2, rt_r2, fwd_seq.get(f[0], ""),
+                                  primer_edits=ps.max_edits)
 
         if len(s1) < args.min_length or len(s2) < args.min_length:
             res.counts["too_short"] += 1
@@ -277,7 +469,10 @@ def main(argv=None) -> int:
     ap.add_argument("--assay")
     ap.add_argument("--outdir", default="prep")
     ap.add_argument("--min-length", type=int, default=100)
-    ap.add_argument("--min-overlap", type=int, default=20)
+    ap.add_argument(
+        "--min-overlap", type=int, default=20,
+        help="shortest mate overlap that is merged; shorter stays a pair",
+    )
     ap.add_argument("--max-diff", type=float, default=0.25)
     ap.add_argument(
         "--max-ee", type=float, default=2.0,
