@@ -417,8 +417,12 @@ synthesis is built on standards and plasmids this protocol does not have.
   presence table and prevalence; then off-target, naming depth and every
   call.
 
-Release note for vespa-18s-refdb: v0.4.0's `taxonomy.tsv` has one row
-whose domain is the literal `domain` and nine with no domain.
+Release note for vespa-18s-refdb: v0.4.0's `taxonomy.tsv` has nine
+records with no taxonomy at all - members whose labels disagree across
+kingdoms, mostly a genome assembly carrying another organism's 18S.
+They are listed, with the other record problems found from VESPA's data,
+in the feedback written for that repository
+(`amplicon_sequencing/vespa_public/refdb_feedback/`).
 
 ### 11.5 Illumina
 
@@ -494,8 +498,10 @@ VESPA's DADA2 + assignTaxonomy + BLAST calls, not accuracy):
   (plants + invertebrates), 0.6 (fungi), 0.8 (host), 1.1 (helminths) and
   2.1 (protozoa) points on average; 2x150 windows within 0.1-3.4. Helminth
   genera: 18 of VESPA's 23 calls found - the misses are *Onchocerca* (3,
-  called *Dirofilaria*, same family; the release holds one *Onchocerca*
-  record with no species) and trace *Ascaris* (2). Protozoan genera: 25
+  called *Dirofilaria*: the one sample with filarioid reads, Human04,
+  matches *D. immitis* exactly over 450bp; the release's *Onchocerca*
+  record merges *O. volvulus* and *O. cervicalis*) and trace *Ascaris*
+  (2). Protozoan genera: 25
   of 50; the misses are mostly *Iodamoeba*, *Endolimax* and
   *Chilomastix*, all in the release but at 90-96% (or further) to these
   samples' reads, so reported as "unclassified, NN% to X" - VESPA's names
