@@ -104,6 +104,31 @@ def orient(r1, r2, ps):
     return None
 
 
+_LOW_BITS: dict[int, int] = {}
+
+
+def as_int(s: str) -> int:
+    return int.from_bytes(s.encode("ascii"), "big")
+
+
+def hamming_int(x: int, y: int, n: int) -> int:
+    """Mismatches between two equal-length strings given as as_int().
+
+    Python compares 450-character strings a character at a time; the
+    denoiser does that hundreds of thousands of times per sample. XOR of
+    the bytes as one integer, folded so each differing byte leaves one
+    bit, counts the same thing in C - ~30x faster, same answer.
+    """
+    m = _LOW_BITS.get(n)
+    if m is None:
+        m = _LOW_BITS[n] = int.from_bytes(b"\x01" * n, "big")
+    z = x ^ y
+    z |= z >> 4
+    z |= z >> 2
+    z |= z >> 1
+    return bin(z & m).count("1")
+
+
 class Denoiser:
     """UNOISE-style denoising over fixed-length pairs (module docstring).
 
@@ -119,6 +144,7 @@ class Denoiser:
                  min_size: int = 2):
         self.D, self.alpha, self.min_size = max_diffs, alpha, min_size
         self.centroids: list[str] = []
+        self.cint: list[int] = []
         self.size: list[int] = []
         self.index: dict = defaultdict(list)
 
@@ -131,23 +157,86 @@ class Denoiser:
         """(centroid, mismatches) of the closest centroid within D, the
         most abundant on a tie; None when there is none."""
         seen, best = set(), None
+        si, n = as_int(s), len(s)
         for key in self._pieces(s):
             for c in self.index.get(key, ()):
                 if c in seen:
                     continue
                 seen.add(c)
-                t = self.centroids[c]
-                d = sum(1 for x, y in zip(s, t) if x != y)
+                d = hamming_int(si, self.cint[c], n)
                 if d <= self.D and (best is None or (d, -self.size[c])
                                     < (best[1], -self.size[best[0]])):
                     best = (c, d)
         return best
+
+    def _add(self, s: str, n: int) -> int:
+        c = len(self.centroids)
+        self.centroids.append(s)
+        self.cint.append(as_int(s))
+        self.size.append(n)
+        for key in self._pieces(s):
+            self.index[key].append(c)
+        return c
+
+    def rescue(self, left: Counter, member: dict) -> int:
+        """Second chance for sequences no centroid took.
+
+        A rare taxon with error-prone reads - AT-rich, long homopolymers,
+        read in a 2x300 run's noisy R2 tails - can have no read seen twice:
+        every one is unique, none may stand on its own, and the whole taxon
+        went unclustered. Found on VESPA's human samples, where Endolimax
+        nana carried 1.5% of a sample's pairs and vanished. So among the
+        leftovers, the sequence with the most others within D mismatches
+        founds a cluster of them if there are at least min_size + 1, and the
+        cluster's sequence is their per-position majority - a consensus,
+        as on nanopore, so no single read's errors become the call. One
+        greedy pass, densest first. Returns reads still unclustered.
+        """
+        seqs = list(left)
+        # D + 2 pieces, so a neighbour within D shares at least TWO of them
+        # exactly; requiring two before comparing at all is what keeps
+        # this affordable on 40,000 leftovers, where one shared piece -
+        # a conserved stretch - made nearly every pair a candidate.
+        def pieces2(x):
+            n, k = len(x), self.D + 2
+            cuts = [n * i // k for i in range(k + 1)]
+            return [(n, i, x[cuts[i]:cuts[i + 1]]) for i in range(k)]
+        idx: dict = defaultdict(list)
+        for i, x in enumerate(seqs):
+            for key in pieces2(x):
+                idx[key].append(i)
+        ints = [as_int(x) for x in seqs]
+        near: dict[int, set] = {}
+        for i, x in enumerate(seqs):
+            shared = Counter(j for key in pieces2(x) for j in idx[key])
+            L = len(x)
+            near[i] = {j for j, k in shared.items() if k >= 2 and
+                       hamming_int(ints[i], ints[j], L) <= self.D}
+        # One greedy pass, densest neighbourhood first (weights taken once,
+        # not re-scored after every cluster, which was quadratic).
+        weight = {i: sum(left[seqs[j]] for j in near[i]) for i in near}
+        alive = set(range(len(seqs)))
+        for best in sorted(alive, key=lambda i: (-weight[i], i)):
+            if best not in alive or weight[best] < self.min_size + 1:
+                continue
+            group = near[best] & alive
+            reads = sum(left[seqs[j]] for j in group)
+            if reads < self.min_size + 1:
+                continue
+            cols = zip(*(seqs[j] for j in group))
+            cons = "".join(Counter(col).most_common(1)[0][0] for col in cols)
+            c = self._add(cons, reads)
+            for j in group:
+                member[seqs[j]] = c
+            alive -= group
+        return sum(left[seqs[j]] for j in alive)
 
     def run(self, counts: Counter) -> tuple[dict, int]:
         """Map every unique to a centroid index; unclustered reads are
         counted, not mapped. Returns (unique -> centroid, unclustered)."""
         member: dict[str, int] = {}
         unclustered = 0
+        left: Counter = Counter()
         for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
             near = self.nearest(s)
             if n >= self.min_size:
@@ -156,17 +245,49 @@ class Denoiser:
                     if n <= self.size[c] / 2 ** (self.alpha * d + 1):
                         member[s] = c
                         continue
-                c = len(self.centroids)
-                self.centroids.append(s)
-                self.size.append(n)
-                for key in self._pieces(s):
-                    self.index[key].append(c)
-                member[s] = c
+                member[s] = self._add(s, n)
             elif near is not None:
                 member[s] = near[0]
             else:
-                unclustered += n
+                left[s] += n
+        left = self.absorb_far(left, member)
+        unclustered = self.rescue(left, member)
         return member, unclustered
+
+    def absorb_far(self, left: Counter, member: dict) -> Counter:
+        """Leftovers within 2D of a surviving sequence join it.
+
+        Most of what no centroid took within D is not a rare taxon but a
+        noisy copy of an abundant one - a 2x300 run's R2 tail can carry a
+        dozen errors. On VESPA's largest sample that was 41,000 reads, and
+        searching them against each other for rescue() took over ten
+        minutes. Against the few hundred surviving sequences it takes
+        seconds, and what is left for rescue() is what it is for: reads
+        far from everything found so far."""
+        if not self.centroids or not left:
+            return left
+        D2 = 2 * self.D
+        def pieces(x):
+            n, k = len(x), D2 + 1
+            cuts = [n * i // k for i in range(k + 1)]
+            return [(n, i, x[cuts[i]:cuts[i + 1]]) for i in range(k)]
+        idx: dict = defaultdict(list)
+        for c, x in enumerate(self.centroids):
+            for key in pieces(x):
+                idx[key].append(c)
+        rest: Counter = Counter()
+        for s, n in left.items():
+            best = None
+            si, L = as_int(s), len(s)
+            for c in {c for key in pieces(s) for c in idx.get(key, ())}:
+                d = hamming_int(si, self.cint[c], L)
+                if d <= D2 and (best is None or d < best[0]):
+                    best = (d, c)
+            if best is None:
+                rest[s] = n
+            else:
+                member[s] = best[1]
+        return rest
 
 
 def main(argv=None) -> int:
@@ -190,9 +311,10 @@ def main(argv=None) -> int:
                     help="expected errors allowed over both windows")
     ap.add_argument("--min-size", type=int, default=2,
                     help="reads a sequence needs to stand on its own")
-    ap.add_argument("--max-diffs", type=int, default=3,
+    ap.add_argument("--max-diffs", type=int, default=None,
                     help="mismatches within which error copies and rare "
-                    "sequences are joined to a more abundant one")
+                    "sequences are joined to a more abundant one (default: "
+                    "1.5%% of the sequence, at least 3)")
     ap.add_argument("--alpha", type=float, default=2.0)
     ap.add_argument("--lca-margin", type=float, default=0.005)
     ap.add_argument("--floors", default=",".join(
@@ -264,7 +386,13 @@ def main(argv=None) -> int:
     centroids: list[tuple[str, str, int]] = []
     unclustered = 0
     for shape, cnt in sorted(by_shape.items()):
-        dn = Denoiser(args.max_diffs, args.alpha, args.min_size)
+        # The radius grows with the sequence: three mismatches is 1% of a
+        # 2x150 pair's 260bp, but 0.7% of 450bp from 2x300 reads, whose
+        # R2 tails err far more - and there a fixed three left 28% of the
+        # VESPA pairs unclustered against 9% at 2x150.
+        D = args.max_diffs if args.max_diffs is not None else \
+            max(3, round(0.015 * (shape[0] + shape[1])))
+        dn = Denoiser(D, args.alpha, args.min_size)
         member, lost = dn.run(cnt)
         unclustered += lost
         size = Counter()
@@ -453,7 +581,9 @@ def main(argv=None) -> int:
         "clusters": len(rows),
         "haplotype_splits": 0,
         "settings": {"window_r1": w1, "window_r2": w2, "max_ee": args.max_ee,
-                     "min_size": args.min_size, "max_diffs": args.max_diffs,
+                     "min_size": args.min_size,
+                     "max_diffs": args.max_diffs if args.max_diffs is not None
+                     else "1.5% of length, at least 3",
                      "alpha": args.alpha, "floors": floors,
                      "lca_margin": args.lca_margin,
                      "resolution_table": os.path.basename(rpath)

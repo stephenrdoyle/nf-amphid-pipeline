@@ -436,8 +436,19 @@ nanopore route's shape, so synthesis and the report read either platform.
 - **Denoised, not consensus-built.** Illumina's error is in the counting,
   not the bases: UNOISE-style, a sequence d mismatches from a more
   abundant one and at most 1/2^(2d+1) of its abundance is its error copy;
-  sequences seen once join the nearest survivor within 3 mismatches or
-  stay unclustered. Candidates are found exactly by pigeonhole pieces.
+  sequences seen once join the nearest survivor within the radius or
+  stay unclustered. The radius is 1.5% of the sequence, at least 3
+  mismatches: a fixed 3 left 28% of VESPA's 2x300 pairs unclustered,
+  against 9% at 2x150. Candidates are found exactly by pigeonhole pieces,
+  and mismatches are counted with integer XOR (same answer, ~30x faster).
+- **Leftovers.** What no sequence took within the radius first joins one
+  within twice it (noisy copies of abundant taxa - 2x300 R2 tails), then a
+  rescue pass clusters the rest among themselves: the leftover with the
+  most others within the radius founds a cluster of them, its sequence
+  their per-position majority. A rare taxon whose error-prone reads never
+  repeat exactly (VESPA's *Endolimax*) otherwise vanished whole. On the
+  largest VESPA sample (224k pairs) unclustered pairs fell from 41k to
+  10k and the sample takes ~5 minutes.
 - **Classified as a pair.** Each window is mapped (minimap2 `-x sr`,
   secondary hits within half the best score); a record counts when both
   windows hit it in a pair's shape (R1 forward from its start, R2 reverse
@@ -456,6 +467,11 @@ nanopore route's shape, so synthesis and the report read either platform.
   |---|---|---|---|
   | 0.995 / 0.99 (nanopore's) | 0.83 | 0.16 | 0.18 |
   | **0.997 / 0.995** | 0.81 | **0.09** | **0.17** |
+
+  At 250x200 windows (2x301 reads, `--illumina 301 --windows 250x200`)
+  the same floors are again best: present taxa 0.95 at the deepest rank,
+  wrong on missing species 0.12 and on missing genera 0.18 - so one set
+  of Illumina floors serves both read lengths.
 
   17-19% of present taxa stop above species whatever the floor: the
   windows do not separate them from a relative in the database - the

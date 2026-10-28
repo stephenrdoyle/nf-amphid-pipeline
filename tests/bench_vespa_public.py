@@ -22,6 +22,15 @@ against a known input.
 give on the 2x150 runs this pipeline is set up for. 250x200 uses most of
 the 2x301 reads.
 
+The NHP sample names in the Source Data are NOT the BioProject's: NHP11
+here matches the paper's "NHP39" to within 1% in every category, and its
+own namesake not at all (the human names do match). So the NHP
+correspondence is inferred: each BioProject sample is paired one to one
+with the paper's sample whose category profile, helminth genera and
+protozoa genera fit it best (a greedy matching over all pairs, closest
+first), and the pairing is written out with its distance - a pair whose
+distance is large is a guess, and is flagged.
+
 Comparison is at GENUS: VESPA names some taxa to species and some to
 genus, and this pipeline stops where its floors say; a genus is the
 deepest level both can be read at for every taxon. A VESPA taxon counts
@@ -121,7 +130,7 @@ def vespa_tables(path: str) -> dict:
                 vals = {}
                 for name, v in zip(head[2:], r[2:]):
                     name = name.strip()
-                    if not name or name == "TOTAL":
+                    if not name or name == "TOTAL" or name in NOT_A_TAXON:
                         continue
                     try:
                         vals[name] = float(v)
@@ -134,6 +143,10 @@ def vespa_tables(path: str) -> dict:
             v["Protozoa"] = v.pop("Environmental protozoa", 0) + \
                 v.pop("Parasitic protozoa", 0)
     return out
+
+
+# Columns of VESPA's composition tables that are bins, not taxa.
+NOT_A_TAXON = {"Environmental prots", "Environmental protozoa"}
 
 
 def genus_of(name: str) -> str:
@@ -169,6 +182,40 @@ def ours(outdir: str, sid: str, host_clade: str, min_rel: float) -> dict:
     return {"groups": groups, "genera": genera, "total": tot}
 
 
+def profile_distance(o, sid_v, vespa) -> float:
+    """How unlike a BioProject sample (our result) and a paper sample are:
+    total absolute difference in category shares, plus the share of the
+    helminth and protozoa genera found by one and not the other."""
+    v = vespa["groups"].get(sid_v, {})
+    tot = sum(o["groups"][c] for c in CATS) or 1
+    d = sum(abs(o["groups"][c] / tot - v.get(c, 0)) for c in CATS)
+    for panel in ("helminths", "protozoa"):
+        vg = {genus_of(n) for n, x in vespa[panel].get(sid_v, {}).items() if x > 0}
+        og = set(o["genera"])
+        if vg:
+            d += len(vg - og) / len(vg) * 0.5
+    return d
+
+
+def remap(runs, vespa, out, min_rel) -> dict:
+    """BioProject NHP sample -> (paper NHP sample, distance), one to one,
+    closest pairs first. Human samples keep their names."""
+    mine = {sid: ours(out, sid, "Craniata", min_rel) for sid in runs
+            if sid.startswith("NHP")}
+    theirs = [s for s in vespa["groups"] if s.startswith("NHP")]
+    pairs = sorted((profile_distance(o, t, vespa), sid, t)
+                   for sid, o in mine.items() for t in theirs)
+    got, used = {}, set()
+    for d, sid, t in pairs:
+        if sid in got or t in used:
+            continue
+        got[sid] = (t, d)
+        used.add(t)
+    for sid in runs:
+        got.setdefault(sid, (sid, 0.0))
+    return got
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--reads", required=True)
@@ -182,8 +229,11 @@ def main(argv=None) -> int:
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--min-rel", type=float, default=0.001)
+    ap.add_argument("--no-remap", action="store_true",
+                    help="trust the NHP names as given")
     args = ap.parse_args(argv)
 
+    ap_remap = not args.no_remap
     with open(args.filereport) as fh:
         runs = {r["sample_alias"]: r["run_accession"]
                 for r in csv.DictReader(fh, delimiter="\t")}
@@ -202,13 +252,22 @@ def main(argv=None) -> int:
             for sid in ex.map(run_one, jobs):
                 pass
         out = os.path.join(args.outdir, tag)
+        name = {sid: sid for sid in runs}
+        if ap_remap:
+            name = remap(runs, vespa, out, args.min_rel)
+            with open(os.path.join(args.outdir, f"{tag}.nhp_mapping.tsv"), "w") as fh:
+                fh.write("bioproject_sample\tpaper_sample\tdistance\n")
+                for sid in sorted(name, key=lambda x: (x[:3], int(re.sub(r"\D", "", x)))):
+                    fh.write(f"{sid}\t{name[sid][0]}\t{name[sid][1]:.3f}\n")
+            name = {sid: v[0] for sid, v in name.items()}
         rows, agree = [], Counter()
+        missed: dict = defaultdict(Counter)
         diffs = defaultdict(list)
         for sid in sorted(runs):
             o = ours(out, sid, "Craniata", args.min_rel)
-            v = vespa["groups"].get(sid)
+            v = vespa["groups"].get(name[sid])
             tot = sum(o["groups"][c] for c in CATS) or 1
-            row = {"sample": sid}
+            row = {"sample": sid, "paper_sample": name[sid]}
             for c in CATS:
                 row[f"ours {c}"] = o["groups"][c] / tot
                 row[f"vespa {c}"] = (v or {}).get(c, "")
@@ -216,12 +275,17 @@ def main(argv=None) -> int:
                     diffs[c].append(o["groups"][c] / tot - v.get(c, 0))
             row["ours unassigned"] = o["groups"]["unassigned"] / o["total"]
             for panel in ("helminths", "protozoa"):
-                vt = vespa[panel].get(sid, {})
+                vt = vespa[panel].get(name[sid], {})
                 vg = {genus_of(n) for n, x in vt.items() if x > 0}
                 og = set(o["genera"])
                 both = vg & og
-                agree[f"{panel}: VESPA genera"] += len(vg)
-                agree[f"{panel}: also found here"] += len(both)
+                # Human names are the paper's own; NHP names are inferred
+                # (remap), so the two cohorts are scored apart.
+                cohort = "human" if sid.startswith("Human") else "nhp"
+                agree[f"{cohort} {panel}: VESPA genera"] += len(vg)
+                agree[f"{cohort} {panel}: also found here"] += len(both)
+                for gname in vg - og:
+                    missed[f"{cohort} {panel}"][gname] += 1
                 row[f"{panel} VESPA only"] = ",".join(sorted(vg - og))
                 row[f"{panel} found"] = ",".join(sorted(both))
             rows.append(row)
@@ -233,7 +297,9 @@ def main(argv=None) -> int:
         mad = {c: sum(abs(x) for x in d) / len(d) for c, d in diffs.items() if d}
         summary[tag] = {"samples": len(rows),
                         "mean_abs_diff_in_category_share": mad,
-                        "genus_agreement": dict(agree)}
+                        "genus_agreement": dict(agree),
+                        "missed_genera": {k: dict(v.most_common())
+                                          for k, v in missed.items()}}
         print(tag, json.dumps(summary[tag], indent=1))
     with open(os.path.join(args.outdir, "summary.json"), "w") as fh:
         json.dump(summary, fh, indent=2)
