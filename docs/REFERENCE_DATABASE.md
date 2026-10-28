@@ -1,8 +1,8 @@
 # Design note: assignment against a reference database
 
-**Status: the nanopore route is implemented** (`--reference_database`,
-2026-10-28; §11 records what was decided and why). Illumina, synthesis
-and the report for this mode are not built yet.
+**Status: the nanopore route is implemented end to end** - assignment,
+synthesis and report (`--reference_database`, 2026-10-28; §11 records
+what was decided and why). The Illumina route is not built yet.
 
 Today the pipeline is given a reference panel - a short, curated list of
 targets - and every read is assigned competitively to whichever target it
@@ -208,7 +208,7 @@ best hit's identity, from leave-out simulations at consensus error rates
    4 (§11.2).
 4. ~~Nanopore consensus~~ - built (§11), validated on simulation; still
    needs a characterised nanopore sample.
-5. Synthesis and report for database mode (§§6-7): not built.
+5. ~~Synthesis and report for database mode (§§6-7)~~ - built (§11.4).
 
 ## 10. Open questions
 
@@ -367,3 +367,39 @@ may honestly reach; wrong = deeper than that, or a wrong name):
 **Decided (2026-10-28): genus raised to 0.99.** Species stays at 0.995
 until a real nanopore run shows how much residual error consensus
 carries; 0.997 would cut wrong calls on missing species from 15% to 9%.
+
+### 11.4 Synthesis and report
+
+Database mode has its own pair, `bin/synthesise_db.py` and
+`bin/report_db.py` (sharing the panel report's style), because the panel
+synthesis is built on standards and plasmids this protocol does not have.
+
+- **Unit.** Relative 18S abundance - each call's share of its well's
+  classified (clustered) reads - and the words say so on every page.
+- **Rank.** Calls stay at the rank they reached. A species call and a
+  genus call in one genus are separate rows; nothing is rolled up.
+- **Calls** (`synthesis/db_calls.tsv`): the panel's blank-derived limit,
+  per (rank, taxon): more reads than any blank showed (absolute), more
+  than the largest share of any blank at least `--min_depth` deep
+  (proportional), and at least `--absolute_floor`; then at least
+  `--db_min_rel_abundance` (0.1%) of the well. A well under `--min_depth`
+  classified reads calls nothing (`low_depth`). Without blanks the limit
+  is the fixed floor and every row says that is an assumption.
+- **Off-target** (`synthesis/db_wells.tsv`), from the PR2 lineage of each
+  call's best hit: bacteria and archaea (domain), organelles (PR2's
+  `Eukaryota:plas`, `:mito`, `:nucl`, `:apic`, `:chro`), fungi
+  (subdivision Fungi), host (`--db_host_clade`, Craniata - vertebrates -
+  by default), plus the unclassified share and reads by rank reached.
+- **Predicted amplification:** a detected call whose best hit is classed
+  `near_3prime` in `primer_fit.tsv` is flagged in the table and listed in
+  the report.
+- **Internal adapters:** `db_run_qc.json` carries the splitter's cut count
+  and the demultiplexer's internal-adapter quarantine (§3), with the
+  mask's size, and the report puts them before the results.
+- **Cohort:** a sample with demultiplexed reads but no assignment stops
+  synthesis; a well with no reads is reported empty.
+- The report puts the release, the blanks, depth, internal adapters and
+  primer-fit warnings before the composition.
+
+Release note for vespa-18s-refdb: v0.4.0's `taxonomy.tsv` has one row
+whose domain is the literal `domain` and nine with no domain.

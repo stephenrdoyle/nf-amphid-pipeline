@@ -364,8 +364,11 @@ What changes:
   second haplotypes are split off by linkage, and each consensus is
   named only down to the rank its identity supports. Output is in
   `assign_db/` (§5).
-- **Synthesis and the report are not built for this mode yet.** The run
-  ends after assignment, and says so.
+- **Synthesis and the report are database mode's own** (§5): relative
+  18S abundance at the rank each call reached, judged against the run's
+  blanks and `--db_min_rel_abundance`, with off-target fractions
+  (bacteria and archaea, organelles, fungi, host) per well and the
+  release version on every row. No copies, no plasmid checks.
 
 Nanopore only so far. Needs minimap2 (§1.1).
 
@@ -452,6 +455,8 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_min_cluster_reads` | `5` | reads a group needs for a consensus of its own; smaller groups' reads are still counted |
 | `--db_lca_margin` | `0.005` | database hits within this fraction of the best alignment score take part in the LCA |
 | `--db_floors` | `species=0.995,genus=0.99,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
+| `--db_min_rel_abundance` | `0.001` | a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
+| `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
 
 ### 3.7 Control plasmids
 
@@ -603,6 +608,12 @@ reproducibility choice, not a dependency.
     <sample>.taxa.tsv           reads per taxon at the rank reached
     <sample>.consensus.fasta
     <sample>.assign_db.json     read accounting, settings, release version
+  synthesis/                    in database mode:
+    db_calls.tsv                one row per sample x taxon at the rank
+                                reached: share, call, limit, identity
+    db_wells.tsv                per well: read funnel, off-target and
+                                unclassified fractions, reads by rank
+    db_run_qc.json              release, blanks, internal adapter rates
   synthesis/
     calls.tsv                   the results table
     calibration.tsv             per-well internal control
@@ -644,6 +655,20 @@ to X`, which is what a gap in the database looks like.
 belong to taxa with too few reads here for a consensus
 (`--db_min_cluster_reads`) and are not classified - one read is not
 enough to say what it is.
+
+### Reading `synthesis/db_calls.tsv` (database mode)
+
+One row per sample and taxon at the rank reached. `call` is `detected`
+(beats the blanks and is at least `--db_min_rel_abundance` of the well),
+`below_blanks`, `below_floor`, or `low_depth` (the well has fewer than
+`--min_depth` classified reads). `limit_reads` is the fewest reads that
+beat the blanks and `limit_basis` says how it was set; with no blanks on
+the plate it is the fixed floor, and says so. `offtarget` names the
+group a call belongs to (bacteria_archaea, organelle, fungi, host), and
+`primer_fit` carries the release's prediction for its best hit -
+`near_3prime` means its share may be held down by the PCR.
+`db_wells.tsv` gives each well's funnel, off-target and unclassified
+fractions, and reads by rank reached.
 
 ### Reading `calls.tsv`
 

@@ -27,11 +27,11 @@
  "files": {
   "anchor_lookalikes.tsv": "83cc8a3ebe2a71f05da33774eeca740757ba160a739c50b2f422ff1f367b37a3",
   "conflicts.tsv": "2a1fcc86813d2483c9f736245c02246673be832889d87891b380c4e4163ad71b",
-  "members.tsv": "983cbf4df2392b39f285cfe78d9c02b97c9443a00a2f4ee176f4269a69bea7f1",
+  "members.tsv": "5590daacc644c8aaddb419ae89252ce21e5bb3f75673844a11072273df0ac16b",
   "primer_fit.tsv": "0e09820c562623fa449523fd300a4aa80bc4e894ee3ad02cc5408a980c8910b2",
   "refdb.fasta": "cf6cc9e923a87b368efeb6e36a51b063269495a40b4899693f32edb90dbedd2d",
   "resolution_illumina_150x150.tsv": "3d62b8a7368c270cee87645a14d8f75a57acdaba0da96585bbf5d67ace340ff4",
   "resolution_nanopore.tsv": "3d62b8a7368c270cee87645a14d8f75a57acdaba0da96585bbf5d67ace340ff4",
-  "taxonomy.tsv": "dad6c8af272c02a8bee6add210ff920a447c4d0e3c7064b84054ef15493cf71a"
+  "taxonomy.tsv": "0171953f51a53dd37e136779642d401ebbd5ae8d4825ca58eaa537ef2fcd6016"
  }
 }

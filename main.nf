@@ -19,6 +19,8 @@ include { NANOPORE_PATH  } from './subworkflows/local/nanopore'
 include { ASSIGN         } from './modules/local/assign'
 include { DB_INDEX       } from './modules/local/db_index'
 include { ASSIGN_DB      } from './modules/local/assign_db'
+include { SYNTHESISE_DB  } from './modules/local/synthesise_db'
+include { REPORT_DB      } from './modules/local/report_db'
 include { SYNTHESISE     } from './modules/local/synthesise'
 include { CALIBRATE_MOCKS} from './modules/local/calibrate_mocks'
 include { COMPARE_RUNS   } from './modules/local/compare_runs'
@@ -307,15 +309,31 @@ workflow {
             DB_INDEX.out.index,
             ch_primers,
         )
-        // Synthesis and the report for database mode are not built yet:
-        // the per-sample cluster and taxon tables in assign_db/ are the
-        // result. Said at the end of the run, so nobody waits for a
-        // report that will not come.
-        ASSIGN_DB.out.summary.collect().subscribe { files ->
-            log.info "\nDatabase mode: ${files.size()} sample(s) assigned. " +
-                     "Per-sample clusters and taxa are in ${params.outdir}/assign_db/; " +
-                     "synthesis and the report are not built for database mode yet."
-        }
+        // Run-level synthesis and the report, database mode's own: no
+        // standards or plasmids to calibrate against, so relative 18S
+        // abundance at the rank each call reached, judged against the
+        // blanks, with off-target fractions per well.
+        ch_run_id_db = ch_resolved.map { meta, files -> meta.run_id }.first()
+        SYNTHESISE_DB(
+            ch_run_id_db,
+            ASSIGN_DB.out.clusters.collect(),
+            ASSIGN_DB.out.summary.collect(),
+            // Database mode is nanopore only (pre-flight refuses Illumina
+            // runs), so these always exist - no placeholder needed.
+            NANOPORE_PATH.out.summary,
+            NANOPORE_PATH.out.split,
+            PREFLIGHT.out.dir,
+            ch_database,
+        )
+        // Every file report_db.py reads, as for the panel report.
+        // tests/test_nextflow.py::test_db_report_gets_what_it_reads.
+        REPORT_DB(
+            ch_run_id_db,
+            SYNTHESISE_DB.out.calls
+                .mix(SYNTHESISE_DB.out.wells,
+                     SYNTHESISE_DB.out.qc)
+                .collect(),
+        )
     } else {
         ASSIGN(
             ch_seqs,

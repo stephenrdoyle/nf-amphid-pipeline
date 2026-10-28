@@ -4,7 +4,7 @@ V4_0f2c1bced76f	fixture	FX00001.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda
 V4_20e44c62af79	fixture	FX00002.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Enoplea;Trichuridae;Trichuris;Trichuris_ovis	kept
 V4_2571bee74b41	fixture	FX00003.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Chromadorea;Trichostrongylidae;Haemonchus;Haemonchus_contortus	kept
 V4_47fcd2a31883	fixture	FX00004.1	Eukaryota;TSAR;Alveolata;Apicomplexa;Conoidasida;Eimeriorina;Eimeriidae;Eimeria;Eimeria_acervulina	kept
-V4_4ed75976b7dc	fixture	FX00005.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Chordata;Mammalia;Bovidae;Ovis;Ovis_aries	kept
+V4_4ed75976b7dc	fixture	FX00005.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Craniata;Mammalia;Bovidae;Ovis;Ovis_aries	kept
 V4_5445d2bc368c	fixture	FX00006.1	Bacteria;Proteobacteria;Gammaproteobacteria;Enterobacterales;Enterobacterales_X;Enterobacteriaceae;Enterobacteriaceae_X;Escherichia;Escherichia_coli	kept
 V4_707618696355	fixture	FX00007.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Platyhelminthes;Trematoda;Fasciolidae;Fasciola;Fasciola_hepatica	kept
 V4_730f71443231	fixture	FX00008.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Platyhelminthes;Trematoda;Fasciolidae;Fasciola;Fasciola_gigantica	kept
@@ -20,4 +20,4 @@ V4_ce50eea1115e	fixture	FX00017.1	Eukaryota;TSAR;Alveolata;Apicomplexa;Conoidasi
 V4_dcf1452f5cbe	fixture	FX00018.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Chromadorea;Trichostrongylidae;Ostertagia;Ostertagia_leptospicularis	kept
 V4_dd062ddd91c2	fixture	FX00019.1	Eukaryota;Obazoa;Opisthokonta;Fungi;Ascomycota;Saccharomycetes;Saccharomycetaceae;Saccharomyces;Saccharomyces_cerevisiae	kept
 V4_e8664b719b57	fixture	FX00020.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Chromadorea;Trichostrongylidae;Trichostrongylus;Trichostrongylus_axei	kept
-V4_fb73087c6f4a	fixture	FX00021.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Chordata;Mammalia;Bovidae;Bos;Bos_taurus	kept
+V4_fb73087c6f4a	fixture	FX00021.1	Eukaryota;Obazoa;Opisthokonta;Metazoa;Craniata;Mammalia;Bovidae;Bos;Bos_taurus	kept

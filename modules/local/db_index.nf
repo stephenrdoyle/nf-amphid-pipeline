@@ -1,6 +1,9 @@
 process DB_INDEX {
     tag "${database.name}"
     label 'process_single'
+    // Not a result: ~120 MB for a full release, rebuilt in seconds, and
+    // useless without the release beside it. Kept out of --outdir.
+    publishDir params.outdir, enabled: false
 
     // No container is declared for the database-mode processes. They need
     // python3 AND minimap2 in one image, and the pipeline does not yet
