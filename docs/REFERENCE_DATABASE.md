@@ -484,6 +484,33 @@ nanopore route's shape, so synthesis and the report read either platform.
   has nine, unresolved conflicts) is left out of the LCA rather than
   vetoing it - on both platforms.
 
+**Against VESPA's published results** (`tests/bench_vespa_public.py`;
+BioProject PRJNA944233, 2x301 MiSeq, 12 human and 40 NHP samples; the
+mock communities' reads were not deposited, so this is agreement with
+VESPA's DADA2 + assignTaxonomy + BLAST calls, not accuracy):
+
+- *Human samples* (the paper's names match the BioProject's), 250x200
+  windows: organism-group shares agree to within 0.1 (bacteria), 0.2
+  (plants + invertebrates), 0.6 (fungi), 0.8 (host), 1.1 (helminths) and
+  2.1 (protozoa) points on average; 2x150 windows within 0.1-3.4. Helminth
+  genera: 18 of VESPA's 23 calls found - the misses are *Onchocerca* (3,
+  called *Dirofilaria*, same family; the release holds one *Onchocerca*
+  record with no species) and trace *Ascaris* (2). Protozoan genera: 25
+  of 50; the misses are mostly *Iodamoeba*, *Endolimax* and
+  *Chilomastix*, all in the release but at 90-96% (or further) to these
+  samples' reads, so reported as "unclassified, NN% to X" - VESPA's names
+  there likely came from its NCBI BLAST fallback.
+- *NHP samples*: the paper's NHP numbers are not the BioProject's (our
+  NHP11 matches the paper's "NHP39" within 1% in every category). The
+  benchmark infers the pairing from profiles, which makes any NHP
+  agreement partly circular; no conclusion is drawn from it without a
+  sample key from the authors.
+- 3-6% of passing pairs unclustered; 50-70 s per sample (median), the
+  largest (224k pairs) ~5-8 minutes, one core.
+- SRA-Lite keeps two quality values; its "failed read" mark falls
+  unevenly - 57% of *Endolimax* pairs against ~13% overall in one sample -
+  so on public SRA-Lite data the quality filter is itself a taxon bias.
+
 Release notes for vespa-18s-refdb found on the way: `V4_ef59fbd391ef`
 (PR2 `QJVE01000361.1.1814_U`, labelled *Arthrobacter stackebrandtii*)
 is human 18S - a bacterial assembly carrying host contamination - and
