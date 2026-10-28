@@ -376,7 +376,7 @@ def build(args) -> str:
     body = "\n".join(P)
     return ("<!doctype html>\n<html lang='en'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>{esc(run_id)} — nf-helminth-amplicon (database mode)</title>"
+            f"<title>{esc(run_id)} — amphid (database mode)</title>"
             f"<style>{CSS}</style></head><body><div class='wrap'>{body}"
             "</div></body></html>\n")
 

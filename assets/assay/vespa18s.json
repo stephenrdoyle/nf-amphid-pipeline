@@ -1,7 +1,7 @@
 {
   "_comment": [
     "Assay definition for the VESPA 18S V4 protocol (Owens et al. 2024,",
-    "Nat Commun 15:402) run through nf-helminth-amplicon's database mode.",
+    "Nat Commun 15:402) run through amphid's database mode.",
     "",
     "The library is the same two-step Nextera construct as ampseq_helminth,",
     "with the same tandem-duplicated AMPSEQ indices, so the library and",
