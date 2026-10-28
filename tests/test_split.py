@@ -921,6 +921,215 @@ def test_panel_lookalikes_are_not_junctions() -> None:
           call0.tier == "E", call0.tier)
 
 
+REAL_READS = ("/Users/sd21/Documents/WORK/informatics_workbook/"
+              "amplicon_sequencing/nextflow_testing/run/fastq_pass")
+REAL_LOOKALIKES = ("/Users/sd21/Documents/WORK/informatics_workbook/"
+                   "amplicon_sequencing/nextflow_testing/results-field/"
+                   "preflight/anchor_lookalikes.tsv")
+
+
+def _reference_scan_hits(seq, a5, a7, edits, mask=None):
+    """The splitter's anchor scan as it was before seed-and-verify, kept
+    verbatim as the standard the fast scan is held to: find_anchor_leftmost
+    across every remainder of the read, and a mask that aligns every
+    look-alike context with find_anchor_cost."""
+    from ampseqlib import find_anchor_cost, find_anchor_leftmost
+
+    def scan_all(text, pattern, max_edits, limit=24):
+        hits, off = [], 0
+        while len(hits) < limit and off < len(text):
+            h = find_anchor_leftmost(text[off:], pattern, max_edits)
+            if h is None:
+                break
+            s, e, _c = h
+            hits.append((off + s, off + e))
+            off += max(e, s + 1)
+        return hits
+
+    def covers(read, start, end):
+        for ctx in mask.contexts:
+            lo = max(0, start - len(ctx))
+            hi = min(len(read), end + len(ctx))
+            h = find_anchor_cost(read[lo:hi], ctx, max(4, len(ctx) // 8))
+            if h is not None and lo + h[0] < end and lo + h[1] > start:
+                return True
+        return False
+
+    hits = []
+    for kind, pat in (("5+", a5), ("7+", a7),
+                      ("5-", dx.revcomp(a5)), ("7-", dx.revcomp(a7))):
+        for s, e in scan_all(seq, pat, edits):
+            if mask and covers(seq, s, e):
+                continue
+            hits.append((s, e, kind))
+    hits.sort()
+    kept = []
+    for h in hits:
+        if kept and h[0] < kept[-1][1]:
+            continue
+        kept.append(h)
+    return kept
+
+
+def _real_reads(per_file: int) -> list[str]:
+    seqs = []
+    for path in sorted(glob.glob(os.path.join(REAL_READS, "*.fastq.gz"))):
+        with gzip.open(path, "rt") as fh:
+            for i, line in enumerate(fh):
+                if i % 4 == 1:
+                    seqs.append(line.strip())
+                if i >= 4 * per_file:
+                    break
+    return seqs
+
+
+def test_seeded_scan_matches_reference() -> None:
+    """Seed-and-verify finds exactly the anchors the full alignment did.
+
+    Aligning every base of every read four times over, and every
+    look-alike context at every hit, was two-thirds of a laptop run. The
+    splitter now aligns only near exact pieces of the pattern, which by
+    the pigeonhole argument cannot miss a copy within tolerance - but a
+    cut placed one base differently is a different output, so the claim
+    is checked hit for hit against the old scan: same (start, end, kind)
+    list, same order, with and without the look-alike mask.
+    """
+    print("\nseeded anchor scan matches the full alignment")
+    import time
+    import ampseqlib as al
+    cfg = sc.load_assay(ASSAY)
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+    rc = dx.revcomp
+    rng = random.Random(1428)
+
+    def rand(n):
+        return "".join(rng.choice("ACGT") for _ in range(n))
+
+    def idx():
+        return rand(8)
+
+    def mutate(seq, n, near=None):
+        # Substitutions, insertions and deletions, optionally aimed at a
+        # stretch (an anchor) so that tolerance edges are exercised.
+        s = list(seq)
+        for _ in range(n):
+            if not s:
+                break
+            if near is not None and near[1] > near[0]:
+                j = rng.randrange(max(0, near[0] - 2),
+                                  min(len(s), near[1] + 2))
+            else:
+                j = rng.randrange(len(s))
+            op = rng.random()
+            if op < 0.4:
+                s[j] = rng.choice("ACGT")
+            elif op < 0.7:
+                s.insert(j, rng.choice("ACGT"))
+            else:
+                del s[j]
+        return "".join(s)
+
+    # The primitive first, against the matchers it stands in for, across
+    # tolerances and on texts dense with near-copies.
+    bad = []
+    for _ in range(3000):
+        k = rng.choice((0, 1, 2, 3))
+        pat = rng.choice((a5, a7, rc(a5), rc(a7), rand(rng.randint(4, 20))))
+        text = "".join(rng.choice((rand(rng.randint(0, 12)),
+                                   mutate(pat, rng.randint(0, 3))))
+                       for _ in range(rng.randint(0, 6)))
+        search = al.SeededAnchorScan(pat, k)
+        hits, off = [], 0
+        while off < len(text):
+            h = al.find_anchor_leftmost(text[off:], pat, k)
+            if h is None:
+                break
+            hits.append((off + h[0], off + h[1]))
+            off += max(h[1], h[0] + 1)
+        if search.scan(text, 10 ** 6) != hits:
+            bad.append(("scan", pat, k, text))
+        if search.best(text) != al.find_anchor_cost(text, pat, k):
+            bad.append(("best", pat, k, text))
+    check("SeededAnchorScan.scan and .best agree with find_anchor_leftmost "
+          "and find_anchor_cost on 3000 near-copy texts",
+          not bad, str(bad[:3]))
+
+    # The real look-alike, and a mask built the way pre-flight builds it.
+    site = "GCCCCCTAGATCGACGGCAGCGGCAGTCGACTAG"   # T. incognita, as found
+    incog = rand(320) + site + rand(120)
+    lk = al.find_anchor_lookalikes(
+        [("T_incognita", incog)],
+        {"i5_inner_anchor": a5, "i7_inner_anchor": a7},
+        al.LOOKALIKE_MAX_EDITS)
+    mask = al.LookalikeMask(r["context"] for r in lk)
+    check("the T. incognita look-alike is in the mask", bool(mask))
+
+    def unit():
+        insert = incog if rng.random() < 0.3 else rand(rng.randint(150, 500))
+        m = sim.build_molecule(insert, idx(), idx(), 2, cfg)
+        return rc(m) if rng.random() < 0.5 else m
+
+    reads = []
+    for _ in range(1500):
+        kind = rng.random()
+        if kind < 0.45:          # concatemers, either way round
+            seq = "".join(unit() for _ in range(rng.randint(1, 4)))
+        elif kind < 0.6:         # inverted joins: a unit and its reverse
+            u = unit()
+            seq = u + rc(u)[rng.randint(0, 60):]
+        elif kind < 0.7:         # a truncated fragment on either side
+            u = unit()
+            seq = u[rng.randint(0, len(u) // 2):] + unit() \
+                + unit()[:rng.randint(0, 200)]
+        elif kind < 0.8:         # short reads, down to nothing
+            seq = unit()[:rng.randint(0, 40)] if rng.random() < 0.5 \
+                else mutate(rng.choice((a5, a7, rc(a5), rc(a7))), 1)
+        elif kind < 0.9:         # the look-alike itself, noisy
+            seq = rand(rng.randint(0, 50)) + mutate(site, rng.randint(0, 4)) \
+                + rand(rng.randint(0, 50))
+        else:                    # an ambiguity code: the unseeded path
+            u = unit()
+            j = rng.randrange(len(u))
+            seq = u[:j] + rng.choice("NRY") + u[j + 1:]
+        # Errors everywhere, and more aimed at the anchors.
+        seq = mutate(seq, rng.randint(0, len(seq) // 60 + 1))
+        for a in (a5, a7, rc(a5), rc(a7)):
+            p = seq.find(a[2:10])
+            if p >= 0 and rng.random() < 0.6:
+                seq = mutate(seq, rng.randint(1, 3), (p - 2, p + 12))
+        reads.append(seq)
+
+    diff = []
+    for seq in reads:
+        for m in (None, mask):
+            if sc.scan_hits(seq, a5, a7, 2, m) != \
+                    _reference_scan_hits(seq, a5, a7, 2, m):
+                diff.append(seq)
+    n_hits = sum(len(_reference_scan_hits(s, a5, a7, 2, mask)) for s in reads)
+    check(f"{len(reads)} simulated reads ({n_hits} anchor hits): identical "
+          "hits with and without the mask", not diff,
+          f"{len(diff)} differ, e.g. {diff[:1]}")
+
+    # Real reads, when the reference run is on this machine.
+    if not os.path.isdir(REAL_READS) or not glob.glob(
+            os.path.join(REAL_READS, "*.fastq.gz")):
+        print("  skip real reads: not on this machine")
+        return
+    real = _real_reads(1000)
+    rmask = al.LookalikeMask.load(REAL_LOOKALIKES) \
+        if os.path.exists(REAL_LOOKALIKES) else mask
+    t0 = time.time()
+    want = [_reference_scan_hits(s, a5, a7, 2, rmask) for s in real]
+    t1 = time.time()
+    got = [sc.scan_hits(s, a5, a7, 2, rmask) for s in real]
+    t2 = time.time()
+    n_diff = sum(a != b for a, b in zip(want, got))
+    check(f"{len(real)} real reads ({sum(map(len, want))} anchor hits): "
+          "identical hits", n_diff == 0, f"{n_diff} differ")
+    print(f"       full alignment {len(real) / (t1 - t0):.0f} reads/s, "
+          f"seeded {len(real) / (t2 - t1):.0f} reads/s (one core)")
+
+
 def main() -> int:
     test_earlier_worse_anchor_is_not_skipped()
     test_split_accounting()
@@ -933,6 +1142,7 @@ def main() -> int:
     test_sharded_matches_whole_run()
     test_cutting_preserves_indices()
     test_panel_lookalikes_are_not_junctions()
+    test_seeded_scan_matches_reference()
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

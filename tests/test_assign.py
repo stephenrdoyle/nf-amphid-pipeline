@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import glob
+import gzip
 import importlib.util
 import io
 import json
@@ -56,7 +57,7 @@ P = _load("prep_illumina", "bin/prep_illumina.py")
 pf = _load("preflight", "bin/preflight.py")
 sim = _load("simulate", "bin/simulate.py")
 sys.path.insert(0, os.path.join(ROOT, "bin"))
-from ampseqlib import bounded_edit, revcomp  # noqa: E402
+from ampseqlib import _bounded_edit_dp, bounded_edit, revcomp  # noqa: E402
 
 sys.path.insert(0, HERE)
 import make_fixtures as mf  # noqa: E402
@@ -64,6 +65,12 @@ import make_fixtures as mf  # noqa: E402
 INDEX_MAP = os.path.join(ROOT, "assets", "index_map.tsv")
 ASSAY = os.path.join(ROOT, "assets", "assay", "ampseq_helminth.json")
 TAG = json.load(open(ASSAY))["control_tag"]["sequence"]
+# Real nanopore data from a field test run, used when present to check
+# bounded_edit on the comparisons assignment actually makes. Absent on any
+# other machine, and the check skips itself.
+REAL = ("/Users/sd21/Documents/WORK/informatics_workbook/amplicon_sequencing/"
+        "nextflow_testing")
+REAL_READS = 2000
 
 PASS, FAIL = [], []
 
@@ -139,6 +146,123 @@ def test_bounded_edit() -> None:
     check("an unrelated sequence exceeds the bound",
           bounded_edit(a, "TTTT" * 20, 5) == 6)
     check("identical sequences are distance zero", bounded_edit(a, a, 5) == 0)
+
+
+def _edit_profile(rng, seq: str, n: int, ops: str, alphabet: str) -> str:
+    """n edits of the kinds in ops, anywhere including either end."""
+    s = list(seq)
+    for _ in range(n):
+        op = rng.choice(ops)
+        if op == "i" or not s:
+            s.insert(rng.randrange(len(s) + 1), rng.choice(alphabet))
+        elif op == "s":
+            s[rng.randrange(len(s))] = rng.choice(alphabet)
+        else:
+            s.pop(rng.randrange(len(s)))
+    return "".join(s)
+
+
+def test_bounded_edit_matches_the_dp() -> None:
+    """bounded_edit is a bit-parallel rewrite of the banded DP it replaced,
+    for speed only, so the claim to test is not "it computes edit distance"
+    but "it returns exactly what the old code returned" - including the
+    capped value, the uncapped len(b) of an empty a in free-suffix mode,
+    and everything the band and the early exits decide. The old code is
+    kept as _bounded_edit_dp and is the oracle here."""
+    print("\nbounded edit distance: bit-parallel against the old DP")
+    rng = random.Random(20261028)
+    bad: list[str] = []
+    n = 0
+
+    def same(a: str, b: str, md: int, free: bool) -> None:
+        nonlocal n
+        n += 1
+        got = bounded_edit(a, b, md, free_b_suffix=free)
+        want = _bounded_edit_dp(a, b, md, free_b_suffix=free)
+        if got != want and len(bad) < 5:
+            bad.append(f"len {len(a)}/{len(b)} max_d {md} free {free}: "
+                       f"{got} != {want}")
+
+    profiles = ("s", "id", "sid")
+    for k in range(2000):
+        alphabet = "ACGTN" if k % 4 == 0 else "ACGT"
+        la = rng.randrange(0, 601) if k % 5 else rng.randrange(0, 8)
+        a = "".join(rng.choice(alphabet) for _ in range(la))
+        kind = k % 7
+        if kind == 0:
+            b = a                                   # identical
+        elif kind == 1:                             # unrelated
+            b = "".join(rng.choice(alphabet)
+                        for _ in range(rng.randrange(0, 601)))
+        else:
+            ne = rng.randrange(0, max(2, la // 8))
+            b = _edit_profile(rng, a, ne, profiles[kind % 3], alphabet)
+        if kind == 6 and a:
+            # a mate: a read off the start of b, which runs on past it
+            cut = rng.randrange(1, len(a) + 1)
+            a = _edit_profile(rng, a[:cut], rng.randrange(0, 4), "sid",
+                              alphabet)
+        if rng.random() < 0.5:
+            a, b = b, a
+        for md in {rng.randrange(0, 61), rng.randrange(0, 8),
+                   max(2, int(len(a) * 0.10))}:
+            same(a, b, md, False)
+            same(a, b, md, True)
+    # every pair of short strings over a small alphabet, every budget -
+    # the edges (empty, one base, all N) are where a rewrite slips
+    short = [""] + [x + y for x in "ACN" for y in ("", "A", "C", "N")]
+    short += ["ACNA", "NNNN", "CAAC", "AAAAA"]
+    for a in short:
+        for b in short:
+            for md in range(0, 7):
+                same(a, b, md, False)
+                same(a, b, md, True)
+    check("identical to the old DP on random and edge-case inputs",
+          not bad, f"{n} compared; e.g. " + "; ".join(bad))
+
+    # Every comparison made while assigning real reads, when the field test
+    # data is on this machine: the inputs the rewrite has to be right on.
+    reads_dir = os.path.join(REAL, "results-field-fast", "demux", "reads")
+    insert = os.path.join(REAL, "results-field-fast", "preflight",
+                          "reference.insert.fasta")
+    primers = os.path.join(REAL, "primers.tsv")
+    if not all(os.path.exists(p) for p in (reads_dir, insert, primers)):
+        print(f"  skip real-read comparisons: no data at {REAL}")
+        return
+    wells = sorted(glob.glob(os.path.join(reads_dir, "*.fastq.gz")))[:: 30]
+    panel = A.Panel(A.load_panel(insert, None))
+    ps = A.load_primers(primers)
+    cfg = P.load_assay(ASSAY)
+    seen: list[tuple[str, str, int, bool]] = []
+
+    def record(a, b, md, free_b_suffix=False):
+        seen.append((a, b, md, free_b_suffix))
+        return bounded_edit(a, b, md, free_b_suffix=free_b_suffix)
+
+    real = A.bounded_edit
+    A.bounded_edit = record
+    tmp = tempfile.mkdtemp()
+    try:
+        for path in wells:
+            head = os.path.join(tmp, "head.fastq")
+            with gzip.open(path, "rt") as fh, open(head, "w") as out:
+                for i, line in enumerate(fh):
+                    if i >= 4 * REAL_READS:
+                        break
+                    out.write(line)
+            uniq, _ = A.derep_fastq(head, ps, cfg)
+            for seq, _n in uniq:
+                A.call_sequence(seq, panel, TAG, 0.10, 2, 3)
+    finally:
+        A.bounded_edit = real
+        shutil.rmtree(tmp, ignore_errors=True)
+    bad.clear()
+    n = 0
+    for a, b, md, free in seen:
+        same(a, b, md, free)
+    check(f"identical to the old DP on every comparison made assigning "
+          f"{REAL_READS} reads from each of {len(wells)} real wells",
+          n > 0 and not bad, f"{n} compared; e.g. " + "; ".join(bad))
 
 
 # --------------------------------------------------------------------------
@@ -815,6 +939,7 @@ def test_min_margin_zero_is_refused() -> None:
 
 def main() -> int:
     test_bounded_edit()
+    test_bounded_edit_matches_the_dp()
     test_calls()
     test_chimera_is_assigned_not_ambiguous()
     test_tag_unobservable()
