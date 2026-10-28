@@ -30,13 +30,31 @@ JUDGED AGAINST THE BLANKS AND A RELATIVE FLOOR
     thousand. Without blanks the limit is the fixed floor, and every call
     says it is an assumption.
 
-OFF-TARGET
-    What the primers also amplify, as fractions of each well's clustered
-    reads, from the PR2 lineage of each call's best hit: bacteria and
-    archaea (domain), organelle 18S/16S (PR2's 'Eukaryota:plas' and its
-    kin), fungi (subdivision Fungi), and host (a clade named by
-    --host-clade, Craniata by default - the vertebrates). VESPA reports
-    the same split, so the numbers are comparable.
+ORGANISM GROUPS
+    Every call is put in one group, the way VESPA reports (Owens et al.
+    2024, Figs 3-5): first every well as shares of all its classified
+    reads by group - what the primers amplified, target or not - then
+    each target group on its own, shares recalculated within the group,
+    so a helminth composition is not squashed flat by a well that is 90%
+    host. The groups, from the PR2 lineage down to the rank the call
+    REACHED (a call that stopped at domain cannot be placed in a group,
+    and is 'unassigned' rather than guessed), first match wins:
+
+      bacteria_archaea  domain Bacteria or Archaea
+      organelle         PR2's organelle domains (Eukaryota:plas, :mito...)
+      host              --host-clade anywhere (Craniata: vertebrates)
+      helminths         class Nematoda, Platyhelminthes or Acanthocephala
+      microsporidia     order Microsporida
+      fungi             subdivision Fungi
+      invertebrates     any other Metazoa (arthropods, mites, annelids...)
+      plants            supergroup Archaeplastida (land plants and algae)
+      protists          any other eukaryote - Apicomplexa, Amoebozoa,
+                        Metamonada, Blastocystis, ciliates...
+      unassigned        not placed deep enough to say
+
+    helminths, protists and microsporidia are the TARGET groups - what
+    the protocol is for; the rest are off-target, reported as fractions
+    of each well, as VESPA does.
 
 PREDICTED AMPLIFICATION
     The release's primer_fit.tsv says how well the primers fit each
@@ -75,21 +93,46 @@ CALL_MEANING = {
                  "nothing in it is called",
 }
 
-OFFTARGET = ("bacteria_archaea", "organelle", "fungi", "host")
+GROUPS = ("helminths", "protists", "microsporidia", "host", "fungi",
+          "plants", "invertebrates", "bacteria_archaea", "organelle",
+          "unassigned")
+TARGET_GROUPS = ("helminths", "protists", "microsporidia")
+OFFTARGET = tuple(g for g in GROUPS if g not in TARGET_GROUPS
+                  and g != "unassigned")
+HELMINTH_CLASSES = {"Nematoda", "Platyhelminthes", "Acanthocephala"}
 
 
-def offtarget_class(lineage: list[str], host_clade: str) -> str:
-    """Which off-target group a best hit's lineage falls in, or ''."""
-    dom = lineage[0] if lineage else ""
+def organism_group(lineage: list[str], host_clade: str) -> str:
+    """The reporting group of a call, from its lineage down to the rank
+    it reached (module docstring). 'unassigned' when that lineage stops
+    too high to tell."""
+    lin = lineage + [""] * (len(RANKS) - len(lineage))
+    dom, sup, sub, cls, order = lin[0], lin[1], lin[3], lin[4], lin[5]
     if dom in ("Bacteria", "Archaea"):
         return "bacteria_archaea"
     if dom.startswith("Eukaryota:"):
         return "organelle"
-    if len(lineage) > 3 and lineage[3] == "Fungi":
-        return "fungi"
-    if host_clade and host_clade in lineage:
+    if dom != "Eukaryota":
+        return "unassigned"
+    if host_clade and host_clade in lin:
         return "host"
-    return ""
+    if cls in HELMINTH_CLASSES:
+        return "helminths"
+    if order == "Microsporida":
+        return "microsporidia"
+    if sub == "Fungi":
+        return "fungi"
+    if sub == "Metazoa":
+        # a Metazoa call that stopped above class could still be a
+        # helminth: not placed
+        return "invertebrates" if cls else "unassigned"
+    if sup == "Archaeplastida":
+        return "plants"
+    if sup == "Obazoa":
+        # Choanoflagellates, apusomonads and the like are protists; an
+        # Obazoa call that stopped above subdivision could be an animal.
+        return "protists" if sub else "unassigned"
+    return "protists" if sup else "unassigned"
 
 
 class Well:
@@ -124,21 +167,20 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
     for c in w.clusters:
         key = (c["rank"], c["taxon"], c["label"])
         a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
-                                 "lineage": c["lineage"], "best_hits": [],
-                                 "off": ""})
+                                 "lineage": c["lineage"], "best_hits": []})
         a["reads"] += int(c["reads"])
         a["clusters"] += 1
         a["identity"] = max(a["identity"], float(c["identity"] or 0))
         a["best_hits"].append(c["best_hit"])
-        a["off"] = a["off"] or offtarget_class(
-            c["best_hit_lineage"].split(";"), host_clade)
     out = []
     for (rank, taxon, label), a in agg.items():
         fits = sorted({primer_fit.get(h, "") for h in a["best_hits"]} - {""})
         out.append({"rank": rank, "taxon": taxon, "label": label,
                     "reads": a["reads"], "clusters": a["clusters"],
                     "identity": a["identity"], "lineage": a["lineage"],
-                    "offtarget": a["off"],
+                    "group": organism_group(
+                        [x for x in a["lineage"].split(";")] if a["lineage"]
+                        else [], host_clade),
                     "primer_fit": ",".join(fits)})
     return out
 
@@ -234,10 +276,14 @@ def main(argv=None) -> int:
     call_cols = ["run_id", "sample_id", "sample_type", "rank", "taxon",
                  "label", "reads", "rel_abundance", "call", "limit_reads",
                  "limit_basis", "identity", "clusters", "lineage",
-                 "offtarget", "primer_fit", "database_version"]
+                 "group", "group_reads", "group_share", "primer_fit",
+                 "database_version"]
     calls = []
     for sid in sorted(wells):
         w = wells[sid]
+        in_group = Counter()
+        for r in rows[sid]:
+            in_group[r["group"]] += r["reads"]
         for r in sorted(rows[sid], key=lambda r: -r["reads"]):
             rel = r["reads"] / w.depth if w.depth else 0.0
             lim = limits.get((r["rank"], r["taxon"]))
@@ -271,7 +317,12 @@ def main(argv=None) -> int:
                 "reads": r["reads"], "rel_abundance": f"{rel:.6f}",
                 "call": call, "limit_reads": limit, "limit_basis": basis,
                 "identity": f"{r['identity']:.4f}", "clusters": r["clusters"],
-                "lineage": r["lineage"], "offtarget": r["offtarget"],
+                "lineage": r["lineage"], "group": r["group"],
+                "group_reads": in_group[r["group"]],
+                # The share within its group, as VESPA's helminth-only and
+                # protozoa-only panels show it.
+                "group_share": f"{r['reads'] / in_group[r['group']]:.6f}"
+                if in_group[r["group"]] else "",
                 "primer_fit": r["primer_fit"], "database_version": version})
     with open(os.path.join(args.outdir, "db_calls.tsv"), "w",
               encoding="utf-8") as fh:
@@ -284,7 +335,9 @@ def main(argv=None) -> int:
                  "no_primer", "too_short", "unclustered", "clustered",
                  "clusters", "haplotype_splits", "detected_taxa",
                  "unclassified_fraction"] + \
-        [f"{k}_fraction" for k in OFFTARGET] + \
+        [f"{g}_reads" for g in GROUPS] + \
+        [f"{g}_fraction" for g in GROUPS] + \
+        [f"{g}_richness" for g in TARGET_GROUPS] + \
         [f"rank_{r}" for r in ("species", "genus", "family", "above")] + \
         ["database_version"]
     wells_out = []
@@ -295,8 +348,7 @@ def main(argv=None) -> int:
         unclass = 0
         ranks = Counter()
         for r in rows[sid]:
-            if r["offtarget"]:
-                off[r["offtarget"]] += r["reads"]
+            off[r["group"]] += r["reads"]
             if r["label"].startswith("unclassified"):
                 unclass += r["reads"]
             ranks[r["rank"] if r["rank"] in ("species", "genus", "family")
@@ -313,7 +365,13 @@ def main(argv=None) -> int:
             "detected_taxa": sum(1 for c in calls if c["sample_id"] == sid
                                  and c["call"] == "detected"),
             "unclassified_fraction": f"{unclass / d:.4f}",
-            **{f"{k}_fraction": f"{off[k] / d:.4f}" for k in OFFTARGET},
+            **{f"{g}_reads": off[g] for g in GROUPS},
+            **{f"{g}_fraction": f"{off[g] / d:.4f}" for g in GROUPS},
+            # Detected taxa per target group: VESPA's richness.
+            **{f"{g}_richness": sum(1 for c in calls if c["sample_id"] == sid
+                                    and c["group"] == g
+                                    and c["call"] == "detected")
+               for g in TARGET_GROUPS},
             **{f"rank_{k}": ranks[k] for k in ("species", "genus", "family",
                                                "above")},
             "database_version": version})
@@ -322,6 +380,39 @@ def main(argv=None) -> int:
         wr = writer(fh, well_cols)
         wr.writeheader()
         wr.writerows(wells_out)
+
+    # Prevalence per taxon: samples it was detected in, of the samples
+    # that could detect anything (not blanks, not low depth).
+    tested = [w.sid for w in wells.values()
+              if w.sample_type not in NEGATIVE_TYPES
+              and w.depth >= args.min_depth]
+    prev: dict = {}
+    for c in calls:
+        if c["sample_id"] not in tested:
+            continue
+        k = (c["group"], c["rank"], c["taxon"], c["label"])
+        p = prev.setdefault(k, {"detected": 0, "max_share": 0.0})
+        if c["call"] == "detected":
+            p["detected"] += 1
+            p["max_share"] = max(p["max_share"], float(c["group_share"] or 0))
+    with open(os.path.join(args.outdir, "db_prevalence.tsv"), "w",
+              encoding="utf-8") as fh:
+        wr = writer(fh, ["group", "rank", "taxon", "label", "samples_detected",
+                         "samples_tested", "prevalence",
+                         "max_share_in_group", "database_version"])
+        wr.writeheader()
+        for (g, rank, taxon, label), p in sorted(
+                prev.items(), key=lambda kv: (GROUPS.index(kv[0][0]),
+                                              -kv[1]["detected"], kv[0][2])):
+            if not p["detected"]:
+                continue
+            wr.writerow({"group": g, "rank": rank, "taxon": taxon,
+                         "label": label, "samples_detected": p["detected"],
+                         "samples_tested": len(tested),
+                         "prevalence": f"{p['detected'] / len(tested):.4f}"
+                         if tested else "",
+                         "max_share_in_group": f"{p['max_share']:.4f}",
+                         "database_version": version})
 
     split = {}
     if args.split_summary and os.path.exists(args.split_summary):
@@ -347,6 +438,9 @@ def main(argv=None) -> int:
                                      .get("floors") for w in wells.values()
                                      if w.summary), None)},
         "call_meaning": CALL_MEANING,
+        "groups": {"order": list(GROUPS), "target": list(TARGET_GROUPS),
+                   "helminth_classes": sorted(HELMINTH_CLASSES)},
+        "samples_tested": len(tested),
         "calls": dict(Counter(c["call"] for c in calls)),
         "negatives": {
             "n": len(blanks),

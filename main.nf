@@ -331,6 +331,7 @@ workflow {
             ch_run_id_db,
             SYNTHESISE_DB.out.calls
                 .mix(SYNTHESISE_DB.out.wells,
+                     SYNTHESISE_DB.out.prevalence,
                      SYNTHESISE_DB.out.qc)
                 .collect(),
         )

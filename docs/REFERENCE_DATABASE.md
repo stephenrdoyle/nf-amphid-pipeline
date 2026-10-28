@@ -385,11 +385,22 @@ synthesis is built on standards and plasmids this protocol does not have.
   `--db_min_rel_abundance` (0.1%) of the well. A well under `--min_depth`
   classified reads calls nothing (`low_depth`). Without blanks the limit
   is the fixed floor and every row says that is an assumption.
-- **Off-target** (`synthesis/db_wells.tsv`), from the PR2 lineage of each
-  call's best hit: bacteria and archaea (domain), organelles (PR2's
-  `Eukaryota:plas`, `:mito`, `:nucl`, `:apic`, `:chro`), fungi
-  (subdivision Fungi), host (`--db_host_clade`, Craniata - vertebrates -
-  by default), plus the unclassified share and reads by rank reached.
+- **Organism groups**, reported the way VESPA reports them (Owens et al.
+  2024, Figs 3-5): each well's classified reads by group first, then each
+  *target* group on its own with shares recalculated within the group, a
+  presence table per taxon and sample, and prevalence and richness. The
+  group comes from the PR2 lineage down to the rank the call *reached* -
+  a call that stopped at domain is `unassigned`, not guessed - first
+  match wins: bacteria and archaea (domain); organelles (PR2's
+  `Eukaryota:plas`, `:mito`, `:nucl`, `:apic`, `:chro`); host
+  (`--db_host_clade`, Craniata - vertebrates - by default); **helminths**
+  (class Nematoda, Platyhelminthes or Acanthocephala); **microsporidia**
+  (order Microsporida); fungi (subdivision Fungi); other invertebrates
+  (any other Metazoa); plants (supergroup Archaeplastida); **protists**
+  (any other eukaryote). The bold three are the target groups.
+  `db_calls.tsv` carries each call's group and its share within the
+  group; `db_wells.tsv` reads, fractions and target-group richness per
+  well; `db_prevalence.tsv` samples detected per taxon.
 - **Predicted amplification:** a detected call whose best hit is classed
   `near_3prime` in `primer_fit.tsv` is flagged in the table and listed in
   the report.
@@ -399,7 +410,10 @@ synthesis is built on standards and plasmids this protocol does not have.
 - **Cohort:** a sample with demultiplexed reads but no assignment stops
   synthesis; a well with no reads is reported empty.
 - The report puts the release, the blanks, depth, internal adapters and
-  primer-fit warnings before the composition.
+  primer-fit warnings first; then all reads by group; then helminths,
+  protists and microsporidia, each with its within-group composition,
+  presence table and prevalence; then off-target, naming depth and every
+  call.
 
 Release note for vespa-18s-refdb: v0.4.0's `taxonomy.tsv` has one row
 whose domain is the literal `domain` and nine with no domain.

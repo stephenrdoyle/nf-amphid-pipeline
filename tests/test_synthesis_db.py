@@ -7,7 +7,8 @@ Built on hand-written assignment outputs rather than a pipeline run, so
 each rule is tested where it can be seen to fire: a taxon in a blank
 must be beaten, not merely matched; a call under the relative floor is
 not a detection; a shallow well calls nothing; the off-target groups
-come from the PR2 lineage; no blanks is said, not hidden; a sample that
+come from the PR2 lineage, and each target group is reported within
+itself as VESPA does; no blanks is said, not hidden; a sample that
 had reads and no assignment stops the run.
 
 Run: python3 tests/test_synthesis_db.py
@@ -247,9 +248,76 @@ def test_no_blanks_and_cohort() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_groups() -> None:
+    print("\norganism groups, as VESPA reports them")
+    g = syn.organism_group
+    L = lambda x: x.split(";")
+    cases = [
+        ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Chromadorea", "helminths"),
+        ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Platyhelminthes", "helminths"),
+        ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Acanthocephala;X;Y", "helminths"),
+        ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Craniata;Craniata_X;Mammalia", "host"),
+        ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Arthropoda;Arachnida", "invertebrates"),
+        ("Eukaryota;Obazoa;Opisthokonta;Metazoa", "unassigned"),
+        ("Eukaryota;Obazoa;Opisthokonta;Fungi;Opisthosporidia;Microsporida", "microsporidia"),
+        ("Eukaryota;Obazoa;Opisthokonta;Fungi;Ascomycota", "fungi"),
+        ("Eukaryota;Obazoa;Opisthokonta;Choanoflagellata", "protists"),
+        ("Eukaryota;Obazoa", "unassigned"),
+        ("Eukaryota;TSAR;Alveolata;Apicomplexa;Conoidasida", "protists"),
+        ("Eukaryota;Excavata;Metamonada;Fornicata", "protists"),
+        ("Eukaryota;Archaeplastida;Streptophyta", "plants"),
+        ("Eukaryota", "unassigned"),
+        ("Bacteria;Proteobacteria", "bacteria_archaea"),
+        ("Eukaryota:plas;Archaeplastida", "organelle"),
+        ("", "unassigned"),
+    ]
+    bad = [(lin, want, g(L(lin) if lin else [], "Craniata"))
+           for lin, want in cases if g(L(lin) if lin else [], "Craniata") != want]
+    check(f"{len(cases)} lineages put in the right group", not bad, str(bad))
+
+    tmp = tempfile.mkdtemp()
+    try:
+        wells = {
+            "S1": [cluster("S1", 1, "bt", 900), cluster("S1", 2, "hc", 75),
+                   cluster("S1", 3, "tg", 25, rank="family", ident="0.9600")],
+            "S2": [cluster("S2", 1, "hc", 400), cluster("S2", 2, "ec", 100)],
+        }
+        calls, w, qc = run(write_case(tmp, wells,
+                                      {"S1": "unknown", "S2": "unknown"}))
+        c = call_of(calls, "S1", "Haemonchus_contortus")
+        check("a helminth's share is recalculated within the helminths",
+              c["group"] == "helminths" and c["group_reads"] == "100"
+              and abs(float(c["group_share"]) - 0.75) < 1e-6
+              and abs(float(c["rel_abundance"]) - 0.075) < 1e-6, str(c))
+        check("helminth reads and richness per well",
+              w["S1"]["helminths_reads"] == "100"
+              and w["S1"]["helminths_richness"] == "2"
+              and w["S1"]["host_reads"] == "900", str(w["S1"]))
+        with open(os.path.join(tmp, "synthesis", "db_prevalence.tsv")) as fh:
+            prev = {r["taxon"]: r for r in csv.DictReader(fh, delimiter="\t")}
+        hc = prev.get("Haemonchus_contortus", {})
+        check("prevalence counts the samples a taxon was detected in",
+              hc.get("samples_detected") == "2" and hc.get("samples_tested")
+              == "2" and hc.get("group") == "helminths", str(hc))
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        doc = open(out).read()
+        check("the report has a section per target group, and a presence "
+              "table", all(f"id='{x}'" in doc for x in
+                           ("groups", "helminths", "protists",
+                            "microsporidia", "offtarget"))
+              and "Presence by sample" in doc
+              and "No protists were classified" in doc)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
+    test_groups()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

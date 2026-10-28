@@ -17,6 +17,7 @@ process SYNTHESISE_DB {
     output:
     path "synthesis/db_calls.tsv"   , emit: calls
     path "synthesis/db_wells.tsv"   , emit: wells
+    path "synthesis/db_prevalence.tsv", emit: prevalence
     path "synthesis/db_run_qc.json" , emit: qc
     path "versions.yml"             , emit: versions
 
@@ -49,7 +50,7 @@ process SYNTHESISE_DB {
     stub:
     """
     mkdir -p synthesis
-    touch synthesis/db_calls.tsv synthesis/db_wells.tsv
+    touch synthesis/db_calls.tsv synthesis/db_wells.tsv synthesis/db_prevalence.tsv
     echo '{"run_id":"${run_id}"}' > synthesis/db_run_qc.json
     touch versions.yml
     """

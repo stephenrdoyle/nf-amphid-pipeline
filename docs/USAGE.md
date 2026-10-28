@@ -610,9 +610,12 @@ reproducibility choice, not a dependency.
     <sample>.assign_db.json     read accounting, settings, release version
   synthesis/                    in database mode:
     db_calls.tsv                one row per sample x taxon at the rank
-                                reached: share, call, limit, identity
-    db_wells.tsv                per well: read funnel, off-target and
-                                unclassified fractions, reads by rank
+                                reached: share, call, limit, identity,
+                                organism group, share within the group
+    db_wells.tsv                per well: read funnel, reads and fractions
+                                per organism group, target-group richness,
+                                reads by rank
+    db_prevalence.tsv           per taxon: samples detected of samples tested
     db_run_qc.json              release, blanks, internal adapter rates
   synthesis/
     calls.tsv                   the results table
@@ -663,12 +666,17 @@ One row per sample and taxon at the rank reached. `call` is `detected`
 `below_blanks`, `below_floor`, or `low_depth` (the well has fewer than
 `--min_depth` classified reads). `limit_reads` is the fewest reads that
 beat the blanks and `limit_basis` says how it was set; with no blanks on
-the plate it is the fixed floor, and says so. `offtarget` names the
-group a call belongs to (bacteria_archaea, organelle, fungi, host), and
+the plate it is the fixed floor, and says so. `group` is the organism
+group, as VESPA reports them - helminths, protists and microsporidia (the
+targets), host, fungi, plants, invertebrates, bacteria_archaea, organelle,
+or unassigned - and `group_share` the call's share within its group, so
+a helminth composition is not flattened by a well that is mostly host.
+The groups are defined in docs/REFERENCE_DATABASE.md §11.4. And
 `primer_fit` carries the release's prediction for its best hit -
 `near_3prime` means its share may be held down by the PCR.
-`db_wells.tsv` gives each well's funnel, off-target and unclassified
-fractions, and reads by rank reached.
+`db_wells.tsv` gives each well's funnel, reads and fractions per group,
+target-group richness and reads by rank reached; `db_prevalence.tsv`
+how many samples each taxon was detected in.
 
 ### Reading `calls.tsv`
 
