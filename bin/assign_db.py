@@ -508,6 +508,16 @@ def deepest_named(lineage: dict) -> str:
     return ""
 
 
+# PR2 fills ranks that have no name with its parent's name and an _X per
+# level (Chromadorea_X, Craniata_XX), and leaves a species unnamed as
+# Genus_sp.
+_PLACEHOLDER = re.compile(r"_X+$")
+
+
+def is_placeholder(name: str) -> bool:
+    return bool(_PLACEHOLDER.search(name or ""))
+
+
 def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
     """(taxon at the rank reached, label for the report).
 
@@ -515,15 +525,46 @@ def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
     the consensus cleared no floor that would let it be named: it is
     "unclassified, NN% to X", where X is the best hit's genus (or its
     deepest named rank) - so a gap in the database reads as a gap, and
-    how far off the nearest record is stays on the page."""
+    how far off the nearest record is stays on the page.
+
+    Where the name at the rank reached is one of PR2's placeholders, the
+    label says what it means instead of repeating it. "Chromadorea_X" in
+    a report reads as a taxon; it is "no family name recorded, somewhere
+    in Chromadorea" - on a real VESPA run it was mostly Haemonchus at
+    100%, stopped at family by a tie with a second genus, and the label
+    said nothing a reader could use. Now: "Chromadorea, unnamed family
+    (nearest Haemonchus)". The taxon column keeps PR2's name, so tables
+    still join on it.
+
+    And a call stopped above family by a TIE between records - the floors
+    let it through, the LCA did not - is "X, unresolved below <rank>
+    (NN% to Y)", not "unclassified": the database holds the sequence and
+    cannot choose between records, which is not the same as a gap.""" 
     lin = tax.get(call["best_hit"], {})
     d = call["depth"]
     taxon = lin.get(RANKS[d], "") if d >= 0 else ""
-    if d >= label_depth:
-        return taxon, taxon
     near = lin.get("genus") or deepest_named(lin) or call["best_hit"] or "nothing"
+    if d >= label_depth:
+        if not is_placeholder(taxon):
+            return taxon, taxon
+        named = next((lin.get(RANKS[k]) for k in range(d - 1, -1, -1)
+                      if lin.get(RANKS[k]) and not is_placeholder(lin.get(RANKS[k]))),
+                     "")
+        nearest = "" if not near or is_placeholder(near) or near == named \
+            else f" (nearest {near})"
+        return taxon, f"{named or taxon}, unnamed {RANKS[d]}{nearest}"
     if not call["best_hit"]:
         return taxon, "unclassified, no database hit"
+    if call.get("lca_depth", -2) == d and d >= 0:
+        # Not stopped by an identity floor but by records disagreeing
+        # (or the two halves of a pair pointing at different ones):
+        # the database has the sequence, it cannot say which it is.
+        # "Unclassified" would claim a gap that is not there.
+        named = next((lin.get(RANKS[k]) for k in range(d, -1, -1)
+                      if lin.get(RANKS[k]) and not is_placeholder(lin.get(RANKS[k]))),
+                     taxon)
+        return taxon, (f"{named}, unresolved below {RANKS[d]} "
+                       f"({100 * call['identity']:.0f}% to {near})")
     return taxon, f"unclassified, {100 * call['identity']:.0f}% to {near}"
 
 
@@ -609,6 +650,12 @@ def main(argv=None) -> int:
                     help="a read is counted to a consensus unless its own "
                     "database hit scores more than this much better "
                     "(minimap2 alignment score)")
+    ap.add_argument("--primer-max-edits", type=int, default=3,
+                    help="edits allowed when finding each primer (panel mode "
+                    "uses 2). 3, because the degenerate VESPA reverse primer "
+                    "meets most bacterial 16S at three: at 2 a fifth of a "
+                    "real run's reads - nearly all off-target 16S - were "
+                    "dropped as no_primer instead of counted as bacteria")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args(argv)
     t0 = time.time()
@@ -630,7 +677,9 @@ def main(argv=None) -> int:
                   merge_edits=args.merge_edits, split=not args.no_split)
     mm = Minimap2(args.minimap2, args.threads)
 
-    reads, fate = trim_reads(args.reads, load_primers(args.primers))
+    primers = load_primers(args.primers)
+    primers.max_edits = args.primer_max_edits
+    reads, fate = trim_reads(args.reads, primers)
     tmp = tempfile.mkdtemp(prefix=f"assign_db_{sid}_", dir=args.outdir)
     clusters: list[dict] = []
     db_primary: dict[str, dict] = {}

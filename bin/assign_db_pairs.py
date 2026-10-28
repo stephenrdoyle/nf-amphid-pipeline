@@ -338,6 +338,9 @@ def main(argv=None) -> int:
                     "sequences are joined to a more abundant one (default: "
                     "1.5%% of the sequence, at least 3)")
     ap.add_argument("--alpha", type=float, default=2.0)
+    ap.add_argument("--primer-max-edits", type=int, default=3,
+                    help="edits allowed when finding each primer (see "
+                    "assign_db.py)")
     ap.add_argument("--lca-margin", type=float, default=0.005)
     ap.add_argument("--floors", default=",".join(
         f"{k}={v}" for k, v in ILLUMINA_FLOORS.items()),
@@ -358,6 +361,7 @@ def main(argv=None) -> int:
     tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"))
     floors = adb.parse_floors(args.floors)
     ps = load_primers(args.primers)
+    ps.max_edits = args.primer_max_edits
     cfg = load_assay(args.assay)
     # The adapter a read runs into past the insert: from R1, the reverse
     # overhang's reverse complement; from R2, the forward one's. Without

@@ -306,6 +306,25 @@ def test_lca_and_floors() -> None:
     check("no hit at all", adb.label_for(c, tax, 6)[1] ==
           "unclassified, no database hit")
 
+    # PR2 placeholders are explained, not repeated; a tie is not a gap
+    ptax = {"H": dict(zip(al.RANKS, "Eukaryota;Obazoa;Opisthokonta;Metazoa;"
+                          "Nematoda;Chromadorea;Chromadorea_X;Haemonchus;"
+                          "Haemonchus_contortus".split(";")))}
+    taxon, label = adb.label_for({"best_hit": "H", "depth": 6, "lca_depth": 6,
+                                  "identity": 1.0}, ptax, 6)
+    check("a placeholder family is labelled by its named parent and the "
+          "nearest genus", taxon == "Chromadorea_X" and label ==
+          "Chromadorea, unnamed family (nearest Haemonchus)", label)
+    taxon, label = adb.label_for({"best_hit": "H", "depth": 5, "lca_depth": 5,
+                                  "identity": 1.0}, ptax, 6)
+    check("stopped above family by a tie: unresolved, not unclassified",
+          label == "Chromadorea, unresolved below order (100% to Haemonchus)",
+          label)
+    taxon, label = adb.label_for({"best_hit": "H", "depth": 5, "lca_depth": 8,
+                                  "identity": 0.9}, ptax, 6)
+    check("stopped above family by the floors: unclassified",
+          label == "unclassified, 90% to Haemonchus", label)
+
 
 def test_floor_parsing() -> None:
     print("\nfloor parsing")
@@ -333,6 +352,23 @@ def test_trim_reads() -> None:
         reads, fate = adb.trim_reads(fq, ps)
     check("both orientations trimmed to the insert, forward strand",
           reads.get("r0") == ins and reads.get("r1") == ins, str(reads)[:80])
+    # three edits in the reverse primer: found at the database-mode
+    # tolerance, not at the panel's two
+    with tempfile.TemporaryDirectory() as tmp:
+        fq = os.path.join(tmp, "r3.fastq")
+        rev = fx.REV_TEMPLATE
+        bad = "A" + rev[1:5] + ("T" if rev[5] != "T" else "G") + rev[6:10] \
+            + ("C" if rev[10] != "C" else "G") + rev[11:]
+        bad = ("G" if bad[0] != "G" else "C") + bad[1:]
+        amp3 = fx.FWD[1] + ins + al.revcomp(bad)
+        with open(fq, "w") as fh:
+            fh.write(f"@x\n{amp3}\n+\n{'5' * len(amp3)}\n")
+        ps2 = al.PrimerSet(fwd=[fx.FWD], rev=[fx.REV])
+        r2, f2 = adb.trim_reads(fq, ps2)
+        ps3 = al.PrimerSet(fwd=[fx.FWD], rev=[fx.REV], max_edits=3)
+        r3, f3 = adb.trim_reads(fq, ps3)
+    check("a primer three edits off is found at max_edits 3, not at 2",
+          f2["no_primer"] == 1 and r3.get("x") == ins, f"{f2} {f3}")
     check("reads without primers, or too short, are counted out",
           fate["no_primer"] == 1 and fate["too_short"] == 1
           and fate["reads_in"] == 4, str(fate))

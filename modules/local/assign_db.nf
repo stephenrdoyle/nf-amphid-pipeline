@@ -31,7 +31,8 @@ process ASSIGN_DB {
         --sample-id ${meta.id} \\
         --threads ${task.cpus} \\
         --min-cluster-reads ${params.db_min_cluster_reads} \\
-        --lca-margin ${params.db_lca_margin} \\
+        --lca-margin ${params.db_lca_margin} \
+        --primer-max-edits ${params.db_primer_max_edits} \\
         --floors '${params.db_floors}' \\
         --outdir assign_db
 

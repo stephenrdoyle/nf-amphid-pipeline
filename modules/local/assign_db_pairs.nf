@@ -39,7 +39,8 @@ process ASSIGN_DB_PAIRS {
         --threads ${task.cpus} \\
         ${w1} ${w2} \\
         --max-ee ${params.max_ee} \\
-        --lca-margin ${params.db_lca_margin} \\
+        --lca-margin ${params.db_lca_margin} \
+        --primer-max-edits ${params.db_primer_max_edits} \\
         --floors '${params.db_floors_illumina}' \\
         --outdir assign_db
 
