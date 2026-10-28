@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Assay definition for nf-helminth-amplicon.",
+    "Assay definition for amphid.",
     "",
     "This file holds what makes an assay a particular assay: the control tag,",
     "the library construct, the index primer set, and the tolerances tuned",

@@ -1,4 +1,4 @@
-# Subject metadata for nf-helminth-amplicon.
+# Subject metadata for amphid.
 #
 # SEPARATE FROM THE SAMPLESHEET, DELIBERATELY. A samplesheet row is a
 # LIBRARY: which index went in which well, frozen at prep, validated

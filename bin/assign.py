@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Competitive assignment for nf-helminth-amplicon.
+Competitive assignment for amphid.
 
 Both platforms converge here. A read is scored against the whole panel at
 once - targets, tagged control decoys, quantification spike-ins and vector

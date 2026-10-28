@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run-level synthesis for nf-helminth-amplicon.
+Run-level synthesis for amphid.
 
 Counts become calls here, and this is the step where a pipeline most easily
 starts asserting more than it measured. Three decisions are made, and each

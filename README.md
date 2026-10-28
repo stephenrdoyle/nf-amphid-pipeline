@@ -1,4 +1,7 @@
-# nf-helminth-amplicon
+# amphid
+
+*Amphids are the paired sensory organs either side of a nematode's head;
+"amphi-" is "both", for the two platforms this pipeline reads.*
 
 <p align="center">
   <img src="docs/images/metro_map.svg" alt="Metro map: pre-flight feeds an Illumina line (merge pairs, trim primers, max-EE filter, dereplicate) and a nanopore line (list batch files, split concatemers per file, sum split summaries, demultiplex); both converge on competitive assignment, synthesis and the HTML report, with optional mock calibration and cross-run comparison." width="100%">

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Read simulator for nf-helminth-amplicon.
+Read simulator for amphid.
 
 Emits FASTQ plus a per-read truth table: which sample a read came from,
 which reference sequence, and what was done to it. Almost nothing downstream

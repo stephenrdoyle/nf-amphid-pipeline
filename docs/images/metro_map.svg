@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 580" width="1500" height="580" role="img" aria-labelledby="t d">
-  <title id="t">nf-helminth-amplicon metro map</title>
+  <title id="t">amphid metro map</title>
   <desc id="d">Pre-flight validation feeds two lines: Illumina (prep per sample) and nanopore (list batch files, split concatemers per file, sum split summaries, demultiplex). Both converge on competitive assignment, then run synthesis and the HTML report. Mock calibration and cross-run comparison are optional.</desc>
   <style>
     .bg { fill: #ffffff; }
@@ -36,7 +36,7 @@
   <rect class="bg" x="0" y="0" width="1500" height="580" rx="12"/>
 
   <!-- title -->
-  <text class="txt title" x="36" y="50">nf-helminth-amplicon</text>
+  <text class="txt title" x="36" y="50">amphid</text>
   <text class="txt muted sub" x="36" y="74">Amplicon panel analysis for Illumina and nanopore: competitive assignment against a reference panel with spike-in standards and tagged control plasmids</text>
 
   <!-- ===== inputs ===== -->

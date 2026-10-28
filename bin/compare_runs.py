@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cross-run and paired-platform comparison for nf-helminth-amplicon.
+Cross-run and paired-platform comparison for amphid.
 
 The same sample can appear twice: as a replicate on another plate, or
 sequenced on both Illumina and nanopore from the same library. Either way

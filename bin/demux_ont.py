@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Nanopore demultiplexing for nf-helminth-amplicon.
+Nanopore demultiplexing for amphid.
 
 The nanopore runs sequence Illumina libraries, so this is in-line barcode
 demultiplexing on reads carrying full Nextera adapter structure - not
