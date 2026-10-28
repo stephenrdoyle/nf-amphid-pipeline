@@ -14,21 +14,31 @@ process PREFLIGHT {
     path primers
     path mocks
     path metadata
+    // A vespa-18s-refdb release directory in database mode; the
+    // NO_DATABASE placeholder otherwise. In database mode `reference` is
+    // the NO_REFERENCE placeholder instead: one or the other, never both.
+    path database
 
     output:
     path "preflight"                          , emit: dir
-    path "preflight/reference.fasta"          , emit: fasta
+    // Panel outputs. Optional in database mode ONLY, where there is no
+    // panel to write them from - the condition is the parameter, not a
+    // blanket optional, so a panel run that fails to produce the trimmed
+    // panel still stops here rather than skipping assignment.
+    path "preflight/reference.fasta"          , emit: fasta, optional: params.reference_database != null
     // The primer-trimmed panel: reads arrive with their primers removed,
-    // so this is what assignment competes them against. NOT optional.
+    // so this is what assignment competes them against. NOT optional in
+    // panel mode.
     // It used to be, and a missing one left ASSIGN with an empty input,
     // so every sample skipped assignment and the run printed Complete.
     // main.nf now requires --primers, and preflight.py fails when the
     // primers locate nowhere, so its absence here is a bug worth a stop.
-    path "preflight/reference.insert.fasta"   , emit: insert_fasta
+    path "preflight/reference.insert.fasta"   , emit: insert_fasta, optional: params.reference_database != null
     // Adapter-anchor near-copies inside the panel's own amplicons. The
     // splitter and demultiplexer read it so those reads are not cut in
     // two or quarantined as chimeras. Always written, header-only when
-    // the panel has none.
+    // the panel has none. In database mode it is the release's own mask,
+    // copied here unchanged so everything downstream reads one path.
     path "preflight/anchor_lookalikes.tsv"    , emit: lookalikes
     path "preflight/tag_report.tsv"           , emit: tag_report
     path "preflight/tag_report.txt"           , emit: tag_report_txt
@@ -73,6 +83,10 @@ process PREFLIGHT {
     def exp_tag   = params.expected_tag  != null ? "--expected-tag '${params.expected_tag}'" : ''
     def reps      = params.barcode_repeats != null ? "--barcode-repeats ${params.barcode_repeats}" : ''
     def prim      = !primers.name.startsWith('NO_') ? "--primers ${primers}" : ''
+    def ref_arg   = !reference.name.startsWith('NO_')
+        ? "--reference ${reference}" : ''
+    def db_arg    = !database.name.startsWith('NO_')
+        ? "--reference-database ${database}" : ''
     def mock_arg  = !mocks.name.startsWith('NO_') ? "--mocks ${mocks}" : ''
     def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null
@@ -81,7 +95,7 @@ process PREFLIGHT {
         ? "--min-index-edit ${params.min_index_edit}" : ''
     """
     preflight.py \\
-        --reference ${reference} \\
+        ${ref_arg} ${db_arg} \\
         --samplesheet ${samplesheet} \\
         ${manifest_arg} \\
         --index-map ${index_map} \\
@@ -140,6 +154,10 @@ process PREFLIGHT {
     def exp_tag   = params.expected_tag  != null ? "--expected-tag '${params.expected_tag}'" : ''
     def reps      = params.barcode_repeats != null ? "--barcode-repeats ${params.barcode_repeats}" : ''
     def prim      = !primers.name.startsWith('NO_') ? "--primers ${primers}" : ''
+    def ref_arg   = !reference.name.startsWith('NO_')
+        ? "--reference ${reference}" : ''
+    def db_arg    = !database.name.startsWith('NO_')
+        ? "--reference-database ${database}" : ''
     def mock_arg  = !mocks.name.startsWith('NO_') ? "--mocks ${mocks}" : ''
     def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null
@@ -148,7 +166,7 @@ process PREFLIGHT {
         ? "--min-index-edit ${params.min_index_edit}" : ''
     """
     preflight.py \\
-        --reference ${reference} \\
+        ${ref_arg} ${db_arg} \\
         --samplesheet ${samplesheet} \\
         ${manifest_arg} \\
         --index-map ${index_map} \\
