@@ -329,3 +329,33 @@ permissive: 17-37% of consensus sequences from missing genera were still
 named a wrong genus. `tests/bench_db_floors.py` reruns the calibration
 on a larger leave-out simulation through `bin/assign_db.py` itself, with
 floors off, and reports a grid of floor values.
+
+**Larger leave-out run (2026-10-28).** v0.4.0 with 100 genera and 150
+species held out, 150 samples of four sources each (two present, one
+missing species, one missing genus; 20-400 reads each, `nanopore_hac`
+errors), 649 consensus sequences of which one matched no source.
+Share of consensus sequences per outcome (deepest = the deepest rank it
+may honestly reach; wrong = deeper than that, or a wrong name):
+
+| floors (species / genus) | present: deepest / wrong | missing species: deepest / higher / wrong | missing genus: deepest / higher / wrong |
+|---|---|---|---|
+| 0.990 / 0.98 | 0.98 / 0 | 0.16 / 0.62 / 0.22 | 0.57 / 0.16 / 0.27 |
+| **0.995 / 0.98** (default) | 0.98 / 0 | 0.24 / 0.62 / **0.15** | 0.57 / 0.16 / **0.27** |
+| 0.995 / 0.99 | 0.98 / 0 | 0.18 / 0.68 / 0.14 | 0.64 / 0.16 / 0.20 |
+| 0.997 / 0.99 | 0.98 / 0 | 0.24 / 0.68 / 0.09 | 0.64 / 0.16 / 0.20 |
+
+(full grid in the benchmark's `floors.tsv`). Read with care:
+
+- **Present taxa are untouched by every floor tried**, because simulated
+  consensus is exact (identity 1.000). Real consensus will carry some
+  residual error, which is what a floor of 0.997 (~1.6 differences over
+  550bp) would start to cost; that needs a characterised nanopore run.
+- **Raising the genus floor to 0.99 is free here and cuts wrong calls on
+  missing genera from 27% to 20%** - and moves them to *family* (deepest
+  0.57 → 0.64), which is the honest answer.
+- What remains wrong does not respond to floors: missing taxa with a
+  relative >99% identical over V4. That is the resolution limit, and the
+  identity column beside each call is how it stays visible.
+
+The defaults are unchanged pending a decision; the evidence points to
+genus 0.99, and species 0.997 if real consensus error allows it.
