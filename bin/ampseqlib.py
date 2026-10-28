@@ -218,6 +218,223 @@ def find_anchor(text: str, pattern: str, max_edits: int) -> tuple[int, int] | No
 
 
 # --------------------------------------------------------------------------
+# seed-and-verify: the same answers as the matchers above, sooner
+# --------------------------------------------------------------------------
+#
+# The splitter runs find_anchor_leftmost four times across every read, and
+# the look-alike mask runs find_anchor_cost once per known look-alike at
+# every hit. Both are pure-Python loops over every base, and on a real
+# MinION run together they were two-thirds of the pipeline's runtime -
+# about 35 hours on a laptop for one flow cell.
+#
+# Almost all of those bases are nowhere near a match, and that can be
+# known without aligning them. Cut the pattern into max_edits + 1 pieces:
+# an alignment with at most max_edits edits cannot touch every piece, so
+# at least one piece appears in the text EXACTLY (the pigeonhole
+# argument). str.find locates pieces at C speed, and every end position
+# whose cost could be within tolerance lies within max_edits of where
+# that piece's alignment would put the pattern's end. Only those short
+# stretches are handed to the bit-parallel alignment.
+#
+# The answers are not approximations of the old ones; they are the old
+# ones. An alignment of an m-base pattern ending at j with cost c <= k
+# starts no earlier than j - m - k, so running Myers from there (or from
+# the caller's own left edge, if that is later) gives every within-
+# tolerance cost exactly, and a cost above tolerance stays above it.
+# Only ends whose cost is within tolerance ever decide a result, so
+# visiting nothing else changes nothing.
+#
+# The argument needs exact matching to mean equality, which IUPAC codes
+# break: an N in a read matches anything. A pattern or text that holds
+# any code other than A, C, G and T goes the old way. Basecallers emit
+# neither, so that path is for completeness, not for speed.
+
+_AMBIGUOUS_CODES = tuple(c for c in IUPAC if c not in "ACGT")
+
+
+def is_plain_acgt(text: str) -> bool:
+    """True when no character of `text` is an IUPAC code other than A, C,
+    G or T - so an exact substring match is the only kind possible.
+
+    Characters outside IUPAC altogether (lower case, gaps) match nothing
+    in the aligners either, so they do not disqualify a text.
+    """
+    return not any(c in text for c in _AMBIGUOUS_CODES)
+
+
+def seed_pieces(pattern: str, max_edits: int) -> list[tuple[int, str]] | None:
+    """`pattern` cut into max_edits + 1 contiguous pieces, as (offset,
+    piece), or None where the pigeonhole argument does not hold.
+    """
+    m, n = len(pattern), max_edits + 1
+    if max_edits < 0 or m < n or set(pattern) - set("ACGT"):
+        return None
+    cuts = [m * i // n for i in range(n + 1)]
+    return [(cuts[i], pattern[cuts[i]:cuts[i + 1]]) for i in range(n)]
+
+
+def _pattern_masks(pattern: str) -> dict[str, int]:
+    # Built exactly as find_anchor_cost builds its own.
+    base: dict[str, int] = {"A": 0, "C": 0, "G": 0, "T": 0}
+    for i, c in enumerate(pattern):
+        for b in IUPAC.get(c, ""):
+            base[b] |= 1 << i
+    return {
+        code: (base["A"] if "A" in bases else 0)
+        | (base["C"] if "C" in bases else 0)
+        | (base["G"] if "G" in bases else 0)
+        | (base["T"] if "T" in bases else 0)
+        for code, bases in IUPAC.items()
+    }
+
+
+class SeededAnchorScan:
+    """One pattern, searched seed-and-verify.
+
+    scan() gives what calling find_anchor_leftmost on each remainder in
+    turn gives - the splitter's anchor scan - and best() gives what
+    find_anchor_cost gives - the look-alike mask's test. Neither aligns
+    more of the text than the seeds point at.
+    """
+
+    def __init__(self, pattern: str, max_edits: int):
+        self.pattern, self.k, self.m = pattern, max_edits, len(pattern)
+        self.seeds = seed_pieces(pattern, max_edits) if self.m <= 64 else None
+        self.peq = _pattern_masks(pattern)
+
+    def candidate_ends(self, text: str) -> list[list[int]]:
+        """Sorted, disjoint [lo, hi] ranges of 1-based end positions
+        holding every end whose cost could be within tolerance."""
+        m, k, n = self.m, self.k, len(text)
+        spans = []
+        for a, piece in self.seeds:
+            shift = m - a
+            i = text.find(piece)
+            while i >= 0:
+                spans.append((i + shift - k, i + shift + k))
+                i = text.find(piece, i + 1)
+        spans.sort()
+        merged: list[list[int]] = []
+        for lo, hi in spans:
+            lo, hi = max(lo, 1), min(hi, n)
+            if lo > hi:
+                continue
+            if merged and lo <= merged[-1][1] + 1:
+                if hi > merged[-1][1]:
+                    merged[-1][1] = hi
+            else:
+                merged.append([lo, hi])
+        return merged
+
+    def _costs(self, text: str, w: int, stop: int) -> list[int]:
+        """Myers from a fresh start at text[w], as find_anchor_leftmost
+        runs it; the cost at each end j in w+1..stop, at index j - w - 1.
+        """
+        peq, m = self.peq, self.m
+        full = (1 << m) - 1
+        top = 1 << (m - 1)
+        pv, mv, score = full, 0, m
+        out = []
+        for c in text[w:stop]:
+            eq = peq.get(c, 0)
+            xv = eq | mv
+            xh = ((((eq & pv) + pv) ^ pv) | eq) & full
+            ph = (mv | ~(xh | pv)) & full
+            mh = pv & xh
+            if ph & top:
+                score += 1
+            elif mh & top:
+                score -= 1
+            ph = (ph << 1) & full
+            mh = (mh << 1) & full
+            pv = (mh | ~(xv | ph)) & full
+            mv = ph & xv
+            out.append(score)
+        return out
+
+    def best(self, text: str,
+             plain: bool | None = None) -> tuple[int, int, int] | None:
+        """What find_anchor_cost(text, pattern, k) returns: the lowest-cost
+        end within tolerance, the earliest on a tie, as (start, end, cost).
+        """
+        m, k = self.m, self.k
+        if plain is None:
+            plain = is_plain_acgt(text)
+        if self.seeds is None or not plain:
+            return find_anchor_cost(text, self.pattern, k)
+        best_end, best_cost = -1, k + 1
+        for lo, hi in self.candidate_ends(text):
+            w = max(0, lo - m - k)
+            costs = self._costs(text, w, hi)
+            for j in range(lo, hi + 1):
+                if costs[j - w - 1] < best_cost:
+                    best_end, best_cost = j, costs[j - w - 1]
+        if best_end < 0:
+            return None
+        return max(0, best_end - m), best_end, best_cost
+
+    def scan(self, text: str, limit: int = 24,
+             plain: bool | None = None) -> list[tuple[int, int]]:
+        """(start, end) of every non-overlapping occurrence, left to right,
+        exactly as the loop
+
+            off = 0
+            while len(hits) < limit and off < len(text):
+                s, e, _ = find_anchor_leftmost(text[off:], pattern, k)
+                hits.append((off + s, off + e)); off += max(e, s + 1)
+
+        would give. `plain` is is_plain_acgt(text), if already known.
+        """
+        m, k, n = self.m, self.k, len(text)
+        if plain is None:
+            plain = is_plain_acgt(text)
+        if self.seeds is None or not plain:
+            hits, off = [], 0
+            while len(hits) < limit and off < n:
+                h = find_anchor_leftmost(text[off:], self.pattern, k)
+                if h is None:
+                    break
+                hits.append((off + h[0], off + h[1]))
+                off += max(h[1], h[0] + 1)
+            return hits
+
+        ranges = self.candidate_ends(text)
+        hits: list[tuple[int, int]] = []
+        off, r = 0, 0
+        while len(hits) < limit and off < n and r < len(ranges):
+            lo, hi = ranges[r]
+            if hi <= off:
+                r += 1
+                continue
+            # find_anchor_leftmost(text[off:]) sees no base before off, so
+            # neither may the alignment here.
+            lo = max(lo, off + 1)
+            w = max(off, lo - m - k)
+            costs = self._costs(text, w, min(n, hi + k))
+            first = -1
+            for j in range(lo, hi + 1):
+                if costs[j - w - 1] <= k:
+                    first = j
+                    break
+            if first < 0:
+                r += 1
+                continue
+            # find_anchor_leftmost's settling window: the lowest cost in
+            # the next k columns, earliest on a tie. Columns outside every
+            # candidate range cost more than k and never win.
+            best_end, best_cost = first, costs[first - w - 1]
+            for j in range(first + 1, min(first + k, n) + 1):
+                c = costs[j - w - 1]
+                if c < best_cost:
+                    best_end, best_cost = j, c
+            start = max(off, best_end - m)
+            hits.append((start, best_end))
+            off = max(best_end, start + 1)
+            # The same range may hold the next copy; look again from off.
+        return hits
+
+
+# --------------------------------------------------------------------------
 # primers
 # --------------------------------------------------------------------------
 
@@ -441,6 +658,9 @@ class LookalikeMask:
                 rc = revcomp(c)
                 if rc not in self.contexts:
                     self.contexts.append(rc)
+        # One seeded search per context, at the tolerance covers() uses.
+        self.searches = [SeededAnchorScan(c, max(4, len(c) // 8))
+                         for c in self.contexts]
 
     @classmethod
     def load(cls, path: str | None) -> "LookalikeMask":
@@ -457,11 +677,20 @@ class LookalikeMask:
         The context is sought in a stretch of read around the hit, at a
         nanopore-sized error budget (one edit in eight); a match counts
         when it overlaps the hit.
+
+        Most hits are real adapters, so most contexts are absent, and each
+        used to cost a full alignment of the stretch around the hit. The
+        alignment is now seed-and-verify (SeededAnchorScan.best): a stretch
+        holding no exact piece of a context cannot match it and is passed
+        over, and one that does is aligned only near those pieces. The
+        answer is find_anchor_cost's, unchanged.
         """
-        for ctx in self.contexts:
+        widest = max(map(len, self.contexts), default=0)
+        plain = is_plain_acgt(read[max(0, start - widest):end + widest])
+        for ctx, search in zip(self.contexts, self.searches):
             lo = max(0, start - len(ctx))
             hi = min(len(read), end + len(ctx))
-            h = find_anchor_cost(read[lo:hi], ctx, max(4, len(ctx) // 8))
+            h = search.best(read[lo:hi], plain)
             if h is not None and lo + h[0] < end and lo + h[1] > start:
                 return True
         return False

@@ -54,7 +54,8 @@ from concurrent.futures import ProcessPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
     LookalikeMask,
-    find_anchor_leftmost,
+    SeededAnchorScan,
+    is_plain_acgt,
     load_assay,
     open_reads,
     read_run_metadata,
@@ -98,7 +99,18 @@ OPENS = ("5+", "7-")
 CLOSES = ("7+", "5-")
 
 
-def scan_all(text: str, pattern: str, max_edits: int, limit: int = 24):
+_SCANNERS: dict = {}
+
+
+def _scanner(pattern: str, max_edits: int) -> SeededAnchorScan:
+    key = (pattern, max_edits)
+    if key not in _SCANNERS:
+        _SCANNERS[key] = SeededAnchorScan(pattern, max_edits)
+    return _SCANNERS[key]
+
+
+def scan_all(text: str, pattern: str, max_edits: int, limit: int = 24,
+             plain: bool | None = None):
     """Every non-overlapping occurrence, left to right.
 
     Each search asks for the FIRST copy in the remainder, not the best
@@ -110,17 +122,14 @@ def scan_all(text: str, pattern: str, max_edits: int, limit: int = 24):
     cannot fire, and demultiplexing reads A's i5 with B's i7 - the
     hybrid pair this whole stage exists to prevent. Nanopore puts an
     error in a 14bp anchor often enough that this was not a corner case.
+
+    The search is find_anchor_leftmost on each remainder in turn, but
+    run seed-and-verify (ampseqlib.SeededAnchorScan): only the stretches
+    holding an exact piece of the anchor are aligned. Aligning every base
+    four times over made this stage two-thirds of a laptop run. The hits
+    are the same ones; tests/test_split.py holds the old loop and checks.
     """
-    hits = []
-    off = 0
-    while len(hits) < limit and off < len(text):
-        h = find_anchor_leftmost(text[off:], pattern, max_edits)
-        if h is None:
-            break
-        s, e, _c = h
-        hits.append((off + s, off + e))
-        off += max(e, s + 1)
-    return hits
+    return _scanner(pattern, max_edits).scan(text, limit, plain)
 
 
 def scan_hits(seq: str, a5: str, a7: str, edits: int,
@@ -131,10 +140,11 @@ def scan_hits(seq: str, a5: str, a7: str, edits: int,
     spelled out inside an amplicon's own insert - is not an adapter and
     is dropped. Cutting there split every read of that amplicon in two.
     """
+    plain = is_plain_acgt(seq)
     hits = []
     for kind, pat in (("5+", a5), ("7+", a7),
                       ("5-", revcomp(a5)), ("7-", revcomp(a7))):
-        for s, e in scan_all(seq, pat, edits):
+        for s, e in scan_all(seq, pat, edits, plain=plain):
             if mask and mask.covers(seq, s, e):
                 continue
             hits.append((s, e, kind))
