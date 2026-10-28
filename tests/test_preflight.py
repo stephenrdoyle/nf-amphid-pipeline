@@ -2253,6 +2253,178 @@ def test_anchor_lookalikes_in_the_panel() -> None:
               for r in rows1), str(len(rows1)))
     check("and it warns without blocking the run", code1 == 0, str(code1))
 
+
+def test_reference_database_mode() -> None:
+    """--reference-database: the release is validated, not trusted.
+
+    The release format is the contract with vespa-18s-refdb, and each
+    clause the pipeline relies on is checked: files present and
+    unchanged since the build, primers the run's own, anchors the
+    assay's. The release's look-alike mask becomes pre-flight's
+    anchor_lookalikes.tsv, unchanged, so the splitter and demultiplexer
+    use it exactly as they would a panel's. And the parts of a panel run
+    that need control plasmids or standards are refused by name.
+    """
+    print("\nreference database mode")
+    import json as _json
+    import random as _random
+    import make_db_fixture as fx
+
+    def mm2_dir():
+        for d in os.environ.get("PATH", "").split(os.pathsep) + [
+                os.path.expanduser("~/bin")]:
+            if d and os.path.isfile(os.path.join(d, "minimap2")):
+                return d
+        return None
+
+    have_mm2 = mm2_dir()
+    tmp = tempfile.mkdtemp()
+    old_path = os.environ.get("PATH", "")
+    try:
+        if have_mm2:
+            os.environ["PATH"] = have_mm2 + os.pathsep + old_path
+        rel = os.path.join(tmp, "release")
+        species = fx.build_tree(_random.Random(3))
+        fx.write_release(rel, species)
+        primers = os.path.join(tmp, "primers.tsv")
+        fx.write_primers(primers)
+        i7, i5 = mf.load_index_map(INDEX_MAP)
+        sheet = mf.build_samplesheet(i7, i5, 6, 2, "DB01", "nanopore")
+        ss = os.path.join(tmp, "samplesheet.tsv")
+        mf.write_samplesheet(sheet, ss)
+        os.makedirs(os.path.join(tmp, "run"))
+        with open(os.path.join(tmp, "run", "r.fastq"), "w") as fh:
+            fh.write("@r\nACGT\n+\nIIII\n")
+        runs = os.path.join(tmp, "runs.tsv")
+        mf.write_runs(runs, "DB01", "nanopore", os.path.join(tmp, "run"))
+        assay = os.path.join(ROOT, "assets", "assay", "vespa18s.json")
+
+        def go(*extra, release=rel, prim=primers, sheet_path=ss,
+               runs_path=runs, assay_path=assay, label="o"):
+            out = os.path.join(tmp, label)
+            args = ["--samplesheet", sheet_path, "--runs", runs_path,
+                    "--index-map", INDEX_MAP, "--assay", assay_path,
+                    "--outdir", out, *extra]
+            if release:
+                args += ["--reference-database", release]
+            if prim:
+                args += ["--primers", prim]
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = pf.main(args)
+            with open(os.path.join(out, "preflight_summary.json")) as fh:
+                summ = _json.load(fh)
+            return code, summ, out
+
+        if not have_mm2:
+            print("  skip happy path: minimap2 not on this machine")
+        else:
+            code, summ, out = go()
+            check("a valid release passes", code == 0,
+                  str(summ["errors"]))
+            check("the summary records database mode and the release "
+                  "version", summ["mode"] == "database"
+                  and summ["reference_database"]["version"] ==
+                  "fixture-0.1.0"
+                  and summ["reference_database"]["minimap2"])
+            with open(os.path.join(rel, "anchor_lookalikes.tsv")) as a, \
+                    open(os.path.join(out, "anchor_lookalikes.tsv")) as b:
+                check("the release's look-alike mask becomes pre-flight's, "
+                      "byte for byte", a.read() == b.read())
+            check("no panel outputs are invented",
+                  not os.path.exists(os.path.join(out,
+                                                  "reference.insert.fasta")))
+            check("no mock warning about plasmid composition in database "
+                  "mode", not any("plasmid composition" in w
+                                  for w in summ["warnings"]))
+
+        def errs(summ, text):
+            return any(text in e for e in summ["errors"])
+
+        # wrong primers
+        bad = os.path.join(tmp, "bad_primers.tsv")
+        with open(bad, "w") as fh:
+            fh.write("name\tdirection\tsequence\nF\tfwd\tAGCAGCCGCGGTAATTCA\n"
+                     f"R\trev\t{fx.REV[1]}\n")
+        code, summ, _ = go(prim=bad, label="p")
+        check("primers that are not the release's are refused",
+              code == 1 and errs(summ, "does not match reference database"),
+              str(summ["errors"]))
+        code, summ, _ = go(prim=None, label="p0")
+        check("--primers is required in database mode", code == 1
+              and errs(summ, "requires --primers"), str(summ["errors"]))
+
+        # a file changed since the build
+        edited = os.path.join(tmp, "edited")
+        shutil.copytree(rel, edited)
+        with open(os.path.join(edited, "refdb.fasta"), "a") as fh:
+            fh.write(">V4_extra\nACGTACGT\n")
+        code, summ, _ = go(release=edited, label="e")
+        check("a release edited after its build is refused", code == 1
+              and errs(summ, "differ from the hashes"), str(summ["errors"]))
+
+        # a required file missing
+        gone = os.path.join(tmp, "gone")
+        shutil.copytree(rel, gone)
+        os.remove(os.path.join(gone, "taxonomy.tsv"))
+        code, summ, _ = go(release=gone, label="g")
+        check("a release missing taxonomy.tsv is refused", code == 1
+              and errs(summ, "taxonomy.tsv is missing"), str(summ["errors"]))
+        code, summ, _ = go(release=os.path.join(tmp, "nowhere"), label="n")
+        check("a release path that does not exist is refused", code == 1
+              and errs(summ, "not a directory"))
+
+        # anchors not the assay's
+        with open(assay) as fh:
+            a = _json.load(fh)
+        a["library"]["i5_inner_anchor"] = "TCGTCGGCAGCGTA"
+        other = os.path.join(tmp, "other_assay.json")
+        with open(other, "w") as fh:
+            _json.dump(a, fh)
+        code, summ, _ = go(assay_path=other, label="a")
+        check("a release built for other anchors is refused", code == 1
+              and errs(summ, "look-alike mask was built for i5_inner_anchor"),
+              str(summ["errors"]))
+
+        # what the protocol cannot do
+        code, summ, _ = go("--spiked", label="s")
+        check("--spiked is refused: no standards in this protocol",
+              code == 1 and errs(summ, "--spiked with --reference_database"))
+        code, summ, _ = go("--reference", os.path.join(ROOT, "tests", "data",
+                                                    "reference.tsv"),
+                           label="b")
+        check("--reference and --reference-database together are refused",
+              code == 1 and errs(summ, "are alternatives"))
+        ill = os.path.join(tmp, "runs_il.tsv")
+        mf.write_runs(ill, "DB01", "illumina", os.path.join(tmp, "run"))
+        il_sheet = os.path.join(tmp, "ss_il.tsv")
+        mf.write_samplesheet([{**r, "platform": "illumina"} for r in sheet],
+                             il_sheet)
+        code, summ, _ = go(runs_path=ill, sheet_path=il_sheet, label="i")
+        check("an Illumina run is refused until that route exists",
+              code == 1 and errs(summ, "only the nanopore route"),
+              str(summ["errors"]))
+
+        # no negative controls: warned, not refused
+        noneg = os.path.join(tmp, "ss_noneg.tsv")
+        mf.write_samplesheet([{**r, "sample_type": "unknown"} for r in sheet],
+                             noneg)
+        code, summ, _ = go(sheet_path=noneg, label="nn")
+        check("no negative controls is a warning, not a stop",
+              any("no negative controls" in w for w in summ["warnings"])
+              and (code == 0 or not have_mm2), str(summ["errors"]))
+
+        # no minimap2
+        os.environ["PATH"] = os.pathsep.join(
+            d for d in old_path.split(os.pathsep)
+            if not os.path.isfile(os.path.join(d, "minimap2")))
+        code, summ, _ = go(label="m")
+        check("no minimap2 on the PATH is caught here, by name", code == 1
+              and errs(summ, "needs minimap2"), str(summ["errors"]))
+    finally:
+        os.environ["PATH"] = old_path
+        shutil.rmtree(tmp, ignore_errors=True)
+
 def main() -> int:
     test_resolved_paths_are_usable()
     test_swapped_index_columns()
@@ -2280,6 +2452,7 @@ def main() -> int:
     test_index_length_reaches_the_splitter()
     test_spiked_needs_standards()
     test_anchor_lookalikes_in_the_panel()
+    test_reference_database_mode()
     test_relative_input_dir()
     test_excel_bom()
     test_illumina_file_matching()

@@ -17,17 +17,21 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    LOOKALIKE_MAX_EDITS, delimiter_for, find_anchor_cost,
-    find_anchor_lookalikes, sanitise_id,
+    LOOKALIKE_COLUMNS, LOOKALIKE_MAX_EDITS, RANKS, REFDB_EXPECTED,
+    REFDB_REQUIRED, delimiter_for, find_anchor_cost, find_anchor_lookalikes,
+    load_release_manifest, release_version, sanitise_id,
 )
 from ampseqlib import load_assay as library_config  # noqa: E402
 from itertools import product
@@ -1831,6 +1835,265 @@ def check_anchor_lookalikes(entries: list, assay_path: str | None,
     return rows
 
 
+# --------------------------------------------------------------------------
+# reference database mode
+# --------------------------------------------------------------------------
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def minimap2_version(diag: Diagnostics | None = None) -> str:
+    """minimap2's version, or '' (with an error) when it cannot be run.
+
+    Database mode is the one route with an external dependency, so its
+    absence is caught here, before an hour of splitting, rather than by
+    the first assignment task."""
+    exe = shutil.which("minimap2")
+    if not exe:
+        if diag is not None:
+            diag.error(
+                "--reference_database needs minimap2, and there is none on "
+                "the PATH. Install it (docs/USAGE.md, field setup) or put "
+                "its directory on the PATH")
+        return ""
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True,
+                             text=True, timeout=30)
+        return out.stdout.strip() or out.stderr.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        if diag is not None:
+            diag.error(f"minimap2 at {exe} would not run: {exc}")
+        return ""
+
+
+def check_reference_database(release: str, primers: dict,
+                             assay_path: str | None, outdir: str,
+                             diag: Diagnostics) -> dict:
+    """Validate a vespa-18s-refdb release and adopt its look-alike mask.
+
+    The release format is the contract between the two repositories
+    (docs/REFERENCE_DATABASE.md, section 4.1), so every part of it the
+    pipeline relies on is checked here rather than trusted:
+
+      * the files are all there, and unchanged since the build - each is
+        hashed against manifest.json, so a release edited by hand, or
+        half-copied to a laptop, is refused rather than half-used;
+      * its primers are the run's primers. The inserts are trimmed at
+        those primers; reads trimmed at different ones would be compared
+        against sequences of a different extent, and every identity -
+        the number each rank's floor is tested against - would be off;
+      * its anchors are the assay's. The release's look-alike mask was
+        searched for these anchors; a mask for different ones protects
+        nothing;
+      * the mask is in pre-flight's own columns, because it is copied to
+        preflight/anchor_lookalikes.tsv and the splitter and the
+        demultiplexer read it from there exactly as they read a panel's.
+
+    Returns what the results record about the release.
+    """
+    info: dict = {"path": os.path.abspath(release)}
+    if not os.path.isdir(release):
+        diag.error(f"--reference_database: not a directory: {release}")
+        return info
+    try:
+        man = load_release_manifest(release)
+    except ValueError as exc:
+        diag.error(f"--reference_database: {exc}")
+        return info
+    info["version"] = release_version(man)
+    info["name"] = man.get("name", "")
+    info["built"] = man.get("built", "")
+    info["code_commit"] = man.get("code_commit", "")
+    info["marker"] = man.get("marker", "")
+    if not man.get("version"):
+        diag.warn(f"reference database {release}: manifest.json has no "
+                  "'version'; results will carry its name instead")
+
+    missing = [f for f in REFDB_REQUIRED
+               if not os.path.isfile(os.path.join(release, f))]
+    for f in missing:
+        diag.error(f"reference database {info['version']}: {f} is missing")
+    for f in REFDB_EXPECTED:
+        if not os.path.isfile(os.path.join(release, f)):
+            diag.warn(f"reference database {info['version']}: {f} is "
+                      "missing (not read by the pipeline, but part of the "
+                      "release format)")
+
+    # Integrity. Hashing ~120 MB takes well under a second.
+    hashes = man.get("files") or {}
+    if not hashes:
+        diag.warn(f"reference database {info['version']}: manifest.json "
+                  "lists no file hashes, so the release cannot be checked "
+                  "for changes since it was built")
+    bad = []
+    for name, want in sorted(hashes.items()):
+        path = os.path.join(release, name)
+        if os.path.isfile(path) and _sha256(path) != str(want).lower():
+            bad.append(name)
+    if bad:
+        diag.error(
+            f"reference database {info['version']}: {', '.join(bad)} "
+            "differ from the hashes in manifest.json - the release has "
+            "been changed since it was built, or copied incompletely")
+    info["files_verified"] = sorted(set(hashes) - set(bad))
+
+    # Primers.
+    mp = man.get("primers") or {}
+    want = {d: str((mp.get(k) or {}).get("sequence", "")).upper()
+            for d, k in (("fwd", "forward"), ("rev", "reverse"))}
+    info["primers"] = {d: {"name": (mp.get(k) or {}).get("name", ""),
+                           "sequence": want[d]}
+                       for d, k in (("fwd", "forward"), ("rev", "reverse"))}
+    if not all(want.values()):
+        diag.error(f"reference database {info['version']}: manifest.json "
+                   "does not give both primers, so it cannot be checked "
+                   "against --primers")
+    elif primers:
+        for d in ("fwd", "rev"):
+            have = {seq for _n, seq in primers.get(d, [])}
+            if want[d] not in have:
+                diag.error(
+                    f"--primers does not match reference database "
+                    f"{info['version']}: its {d} primer is {want[d]}, and "
+                    f"--primers has {', '.join(sorted(have)) or 'none'}. "
+                    "The inserts were trimmed at the release's primers, so "
+                    "reads must be trimmed at the same ones")
+            elif len(have) > 1:
+                diag.warn(
+                    f"--primers has {len(have)} {d} primers; a database "
+                    f"release is one marker, and only {want[d]} belongs "
+                    "to it")
+    else:
+        diag.error("--reference_database requires --primers, to check they "
+                   "are the primers the release was trimmed at")
+
+    # Anchors.
+    cfg = library_config(assay_path)
+    anchors = man.get("anchors") or {}
+    info["anchors"] = anchors
+    for name in ("i5_inner_anchor", "i7_inner_anchor"):
+        mine = str(cfg.get(name, "")).upper()
+        theirs = str(anchors.get(name, "")).upper()
+        if not theirs:
+            diag.error(f"reference database {info['version']}: manifest.json "
+                       f"gives no {name}, so its look-alike mask cannot be "
+                       "matched to the assay")
+        elif theirs != mine:
+            diag.error(
+                f"reference database {info['version']}: its look-alike mask "
+                f"was built for {name} {theirs}, but the assay's is {mine}. "
+                "It would protect sites of an anchor this library does not "
+                "use and miss the ones it does")
+    lk_edits = man.get("lookalike_max_edits")
+    if lk_edits is not None and int(lk_edits) != LOOKALIKE_MAX_EDITS:
+        diag.warn(
+            f"reference database {info['version']}: look-alikes were "
+            f"searched at {lk_edits} edits, pre-flight searches at "
+            f"{LOOKALIKE_MAX_EDITS}")
+
+    # The mask, adopted as pre-flight's own output.
+    src = os.path.join(release, "anchor_lookalikes.tsv")
+    dst = os.path.join(outdir, "anchor_lookalikes.tsv")
+    if os.path.isfile(src):
+        with open(src, encoding="utf-8") as fh:
+            head = fh.readline().rstrip("\r\n").split("\t")
+        if head != LOOKALIKE_COLUMNS:
+            diag.error(
+                f"reference database {info['version']}: anchor_lookalikes.tsv "
+                f"has columns {head}, not pre-flight's {LOOKALIKE_COLUMNS}")
+        else:
+            shutil.copyfile(src, dst)
+            with open(dst, encoding="utf-8") as fh:
+                info["lookalikes"] = sum(1 for _ in fh) - 1
+
+    # Records: the FASTA and the taxonomy must describe the same ids.
+    fasta = os.path.join(release, "refdb.fasta")
+    tax = os.path.join(release, "taxonomy.tsv")
+    if os.path.isfile(fasta) and os.path.isfile(tax):
+        with open(fasta, encoding="utf-8") as fh:
+            ids = {ln[1:].split()[0] for ln in fh if ln.startswith(">")}
+        with open(tax, encoding="utf-8") as fh:
+            rdr = csv.reader(fh, delimiter="\t")
+            head = next(rdr, [])
+            tids = {r[0] for r in rdr if r}
+        lacking = [r for r in ["id"] + RANKS if r not in head]
+        if lacking:
+            diag.error(f"reference database {info['version']}: taxonomy.tsv "
+                       f"lacks column(s) {', '.join(lacking)}")
+        untaxed = ids - tids
+        if untaxed:
+            diag.error(
+                f"reference database {info['version']}: {len(untaxed)} "
+                f"refdb.fasta record(s) have no taxonomy row, e.g. "
+                f"{sorted(untaxed)[0]}")
+        info["records"] = len(ids)
+        n = (man.get("counts") or {}).get("records")
+        if n is not None and int(n) != len(ids):
+            diag.error(
+                f"reference database {info['version']}: manifest.json says "
+                f"{n} records, refdb.fasta holds {len(ids)}")
+    return info
+
+
+def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
+    """What database mode cannot do yet, or cannot do at all.
+
+    The VESPA protocol it exists for has no control plasmids and no
+    quantification standards (docs/REFERENCE_DATABASE.md, section 6), so
+    the parts of a panel run built on them are refused by name rather
+    than left to fail later on an empty table."""
+    if args.spiked:
+        diag.error(
+            "--spiked with --reference_database: database mode has no "
+            "quantification standards to calibrate against. Its output is "
+            "relative 18S abundance; drop --spiked")
+    if args.mocks:
+        diag.error(
+            "--mocks with --reference_database: mock compositions are "
+            "declared in panel targets, and database mode has no panel. "
+            "Not supported yet")
+    ill = sorted(r.run_id for r in runs.values() if r.platform == "illumina")
+    if ill:
+        diag.error(
+            f"--reference_database: run(s) {', '.join(ill)} are Illumina, "
+            "and only the nanopore route of database mode is built so far "
+            "(docs/REFERENCE_DATABASE.md, section 9)")
+
+
+def check_database_samples(samples: list, diag: Diagnostics) -> None:
+    """The samplesheet, read for a run with no control wells.
+
+    With no standards and no tagged plasmids, the negative controls are
+    the only defence left against contamination and cross-talk - which is
+    why the design note asks database mode to require them. Warned rather
+    than refused for now: refusing to analyse reads already on disk helps
+    nobody, and the report says which calls had no blank to be judged
+    against."""
+    types = Counter(s.sample_type for s in samples)
+    if not (types.get("neg_extraction") or types.get("neg_ntc")):
+        diag.warn(
+            "database mode: no negative controls (neg_extraction or "
+            "neg_ntc) on the plate. With no control plasmids or "
+            "standards, blanks are the only measure of contamination and "
+            "cross-talk, and no call on this run can be judged against one")
+    if types.get("mock"):
+        diag.warn(
+            f"database mode: {types['mock']} mock well(s). A mock's "
+            "composition is declared in panel targets, which database mode "
+            "does not have; they are classified like any other sample")
+    for s in samples:
+        if s.expected_taxa:
+            diag.warn(
+                f"samplesheet '{s.sample_id}': expected_taxa is not checked "
+                "in database mode (it names panel targets)")
+
+
 def write_combined_fasta(entries: list[RefEntry], outdir: str) -> str:
     """One index for everything. The point of competitive mapping is that a
     read chooses between targets, decoys, quants and vector."""
@@ -2394,7 +2657,8 @@ def check_expected_taxa(samples: list, entries: list, diag: Diagnostics) -> None
 
 
 def parse_samplesheet(
-    path: str, runs: dict[str, Run], im: IndexMap, diag: Diagnostics
+    path: str, runs: dict[str, Run], im: IndexMap, diag: Diagnostics,
+    database: bool = False,
 ) -> list[Sample]:
     rows = read_table(path, diag, "samplesheet")
     needed = {"run_id", "platform", "sample_id", "index_i7", "index_i5", "sample_type"}
@@ -2518,7 +2782,9 @@ def parse_samplesheet(
                 "threshold can be derived, so calls will fall back to the "
                 "configured default and be flagged as such"
             )
-        if "mock" not in types:
+        # A mock is a well of known plasmid composition, which database
+        # mode does not have (check_database_samples says so instead).
+        if "mock" not in types and not database:
             diag.warn(
                 f"run '{rid}': no mock sample - no well of known plasmid "
                 "composition, so nothing on this run shows how the assay "
@@ -2911,7 +3177,16 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Pre-flight validation for nf-helminth-amplicon."
     )
-    ap.add_argument("--reference", required=True)
+    ap.add_argument(
+        "--reference",
+        help="reference panel TSV. Required unless --reference-database "
+             "is given instead")
+    ap.add_argument(
+        "--reference-database",
+        help="a vespa-18s-refdb release directory: classify against a "
+             "large taxonomically annotated database rather than compete "
+             "reads across a panel (docs/REFERENCE_DATABASE.md). Replaces "
+             "--reference")
     ap.add_argument(
         "--samplesheet",
         help="omit to validate the reference panel on its own, which is "
@@ -3022,6 +3297,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     reference_only = not args.samplesheet
+    database = args.reference_database
+    if database and args.reference:
+        diag.error(
+            "--reference and --reference-database are alternatives: a run "
+            "either competes reads across a panel or classifies them "
+            "against a database, not both")
+    if not database and not args.reference:
+        diag.error("one of --reference or --reference-database is required")
 
     # -- run manifest: explicit, or built from --input-dir ---------------
     if reference_only:
@@ -3082,8 +3365,13 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # -- reference panel --------------------------------------------------
-    entries = parse_reference(args.reference, diag)
-    validate_reference(entries, diag, assay)
+    # In database mode there is no panel, and everything below that is
+    # about the panel - its tags, its extent, its standards - has nothing
+    # to examine. The database's own checks stand in for it.
+    entries = (parse_reference(args.reference, diag)
+               if args.reference and not database else [])
+    if args.reference and not database:
+        validate_reference(entries, diag, assay)
     # A run declared spiked must have standards in the panel to find, or
     # synthesis would mark every well spike_failed and every call
     # assay_failed - a whole plate lost to a missing reference row.
@@ -3096,9 +3384,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     if entries:
         write_combined_fasta(entries, args.outdir)
-    check_anchor_lookalikes(entries, args.assay, args.outdir, diag)
     primers = parse_primers(args.primers, diag) if args.primers else {}
-    extent = check_reference_extent(entries, primers, diag) if primers else []
+    db_info: dict = {}
+    if database:
+        # Writes preflight/anchor_lookalikes.tsv from the release.
+        db_info = check_reference_database(database, primers, args.assay,
+                                           args.outdir, diag)
+        db_info["minimap2"] = minimap2_version(diag)
+        check_database_run(args, runs, diag)
+    else:
+        check_anchor_lookalikes(entries, args.assay, args.outdir, diag)
+    extent = check_reference_extent(entries, primers, diag) \
+        if primers and not database else []
     if entries and extent:
         write_insert_fasta(entries, extent, args.outdir, diag)
     elif entries and primers.get("fwd") and primers.get("rev"):
@@ -3115,7 +3412,11 @@ def main(argv: list[str] | None = None) -> int:
             "assigned. Check that --primers belongs to this panel, and "
             "that it has both fwd and rev rows"
         )
-    tags = analyse_tags(entries, diag, tag_max_edits, expected_tag, assay)
+    # No panel, no control plasmids, so no tag to derive - the database
+    # protocol has none (docs/REFERENCE_DATABASE.md, section 6). The tag
+    # report is still written, empty, because the workflow collects it.
+    tags = (analyse_tags(entries, diag, tag_max_edits, expected_tag, assay)
+            if not database else [])
     write_tag_report(tags, args.outdir, tag_max_edits, assay)
     if tags:
         check_tag_visibility(entries, tags, diag, args.illumina_read_length)
@@ -3138,8 +3439,12 @@ def main(argv: list[str] | None = None) -> int:
             idx_rep = index_set_report(
                 im, diag, {r.platform for r in runs.values()})
             barcode_strategy = barcode_strategy_report(idx_rep, runs, diag)
-        samples = parse_samplesheet(args.samplesheet, runs, im, diag)
-        check_expected_taxa(samples, entries, diag)
+        samples = parse_samplesheet(args.samplesheet, runs, im, diag,
+                                    database=bool(database))
+        if database:
+            check_database_samples(samples, diag)
+        else:
+            check_expected_taxa(samples, entries, diag)
         used_idx = used_index_geometry(
                 samples, runs, diag, args.min_index_edit)
         plates = plate_report(samples, im, diag)
@@ -3153,7 +3458,7 @@ def main(argv: list[str] | None = None) -> int:
     # cannot measure efficiency is caught while the plate is still a
     # spreadsheet rather than after the reagents are spent.
     mock_report: dict = {}
-    if args.mocks:
+    if args.mocks and not database:
         mocks = parse_mocks(args.mocks, diag)
         if mocks:
             mock_report = check_mocks(mocks, entries, samples, diag)
@@ -3178,7 +3483,11 @@ def main(argv: list[str] | None = None) -> int:
     # -- machine-readable summary ----------------------------------------
     summary = {
         "schema_version": 1,
-        "mode": "reference_only" if reference_only else "full",
+        "mode": ("reference_only" if reference_only
+                 else "database" if database else "full"),
+        # The release every result of this run was classified against.
+        # Synthesis and the report carry its version forward.
+        "reference_database": db_info,
         "mocks": mock_report,
         "metadata": meta_report,
         "assay": {
