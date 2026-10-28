@@ -461,7 +461,7 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_lca_margin` | `0.005` | database hits within this fraction of the best alignment score take part in the LCA |
 | `--db_floors` | `species=0.995,genus=0.99,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
 | `--db_min_rel_abundance` | `0.001` | a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
-| `--db_primer_max_edits` | `3` | edits allowed when finding each primer in database mode (panel mode uses 2). Off-target bacterial 16S meets the degenerate VESPA reverse primer at three; at two it is dropped as `no_primer` rather than counted as bacteria |
+| `--db_primer_max_edits` | `3` | edits allowed when finding each primer in database mode (panel mode uses 2). Off-target bacterial 16S differs from the forward primer at its 3' end, often by three; at two it is dropped as `no_primer` rather than counted as bacteria |
 | `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
 | `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
 | `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's `illumina_windows` (132 for 2x150) |

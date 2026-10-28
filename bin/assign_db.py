@@ -652,10 +652,11 @@ def main(argv=None) -> int:
                     "(minimap2 alignment score)")
     ap.add_argument("--primer-max-edits", type=int, default=3,
                     help="edits allowed when finding each primer (panel mode "
-                    "uses 2). 3, because the degenerate VESPA reverse primer "
-                    "meets most bacterial 16S at three: at 2 a fifth of a "
-                    "real run's reads - nearly all off-target 16S - were "
-                    "dropped as no_primer instead of counted as bacteria")
+                    "uses 2). 3, because off-target bacterial 16S differs "
+                    "from the forward primer at its 3' end, a quarter of it "
+                    "by three or more: at 2 a fifth of a real run's reads "
+                    "were dropped as no_primer instead of counted as "
+                    "bacteria")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args(argv)
     t0 = time.time()
