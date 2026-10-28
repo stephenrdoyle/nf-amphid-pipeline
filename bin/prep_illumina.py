@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Illumina read preparation for nf-helminth-amplicon.
+Illumina read preparation for amphid.
 
 The sequencer has already demultiplexed, so unlike the nanopore path this
 step never decides which sample a read came from. What it does decide is

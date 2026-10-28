@@ -1,4 +1,4 @@
-# Index primer map for nf-helminth-amplicon
+# Index primer map for amphid
 # The AMPSEQ_IDXx2 primer set encodes plate position: i5 gives the row (A-P),
 # i7 gives the column (1-24). Together they define a 384-well map, so plate
 # and well are derived from the index pair rather than recorded separately.

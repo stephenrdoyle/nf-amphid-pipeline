@@ -1,4 +1,4 @@
-# nf-helminth-amplicon — usage
+# amphid — usage
 
 Targeted amplicon panel analysis for Illumina and nanopore. One
 invocation handles one sequencing run on either platform: the `platform`
@@ -14,7 +14,7 @@ disagree, the code is right and this file is stale.
 ## 1. Quick start
 
 ```bash
-NF=/nfs/users/nfs_s/sd21/lustre_link/software/nf-helminth-amplicon
+NF=/nfs/users/nfs_s/sd21/lustre_link/software/nf-amphid-pipeline
 
 nextflow run $NF -resume -bg \
     --reference   reference.tsv \

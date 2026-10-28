@@ -1,4 +1,4 @@
-# Reference panel template for nf-helminth-amplicon
+# Reference panel template for amphid
 #
 # Tab-separated, nine columns, header required. Lines starting with # are
 # ignored, so these notes can stay in the file. Empty fields are genuinely

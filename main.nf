@@ -1,7 +1,7 @@
 #!/usr/bin/env nextflow
 
 /*
- * nf-helminth-amplicon
+ * amphid
  *
  * Targeted amplicon panel analysis on Illumina and nanopore, built around
  * competitive mapping against a defined reference panel with spiked
@@ -29,7 +29,7 @@ include { REPORT         } from './modules/local/report'
 
 def helpMessage() {
     log.info """
-    nf-helminth-amplicon  ${workflow.manifest.version}
+    amphid  ${workflow.manifest.version}
 
     Usage:
       nextflow run . --reference ref.tsv --samplesheet samples.tsv --runs runs.tsv
