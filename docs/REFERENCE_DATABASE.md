@@ -94,6 +94,7 @@ A release is one directory, named for its build version, holding:
 | `resolution_illumina_<R1>x<R2>.tsv` | the same over the two read windows for that read length |
 | `anchor_lookalikes.tsv` | adapter-anchor near-copies, in exactly the columns the pipeline's pre-flight writes (`seq_id anchor strand position edits context`), so the pipeline reads it unchanged |
 | `conflicts.tsv` | identical sequences whose labels disagree at a high rank, and what the build did with each |
+| `primer_fit.tsv` | per id, how well the primers fit its best-matching template: forward and reverse edits, mismatch positions counted from each primer's 3′ end, the template at each site, and a class - `exact`, `away_3prime`, `near_3prime` (a mismatch in the last 5 bases), `indel`, `edits_only` (a genome-only record: counts known, sites not), `unknown` (from vespa-18s-refdb v0.4.0) |
 | `manifest.json` | build version, primers, PR2 version, WBPS release, version of every other layer, build date and code commit |
 
 The pipeline records `manifest.json`'s build version in every result.
@@ -162,6 +163,12 @@ are over V4.
 
 - A taxon table per sample, at the **rank actually reached** for each
   call, with the database version and primers recorded.
+- **Predicted amplification**, from the release's `primer_fit.tsv`: a
+  call on a record classed `near_3prime`, or the absence of a taxon whose
+  records all are, says that the primers were predicted to fit poorly -
+  so a low or missing signal may be the PCR, not the sample. It matters
+  most for flatworms: about two thirds of their records carry a mismatch
+  4 bases from the forward primer's 3′ end (vespa-18s-refdb, docs §6.4).
 - Off-target fractions per sample - bacteria and archaea, host, fungi -
   which PR2's taxonomy gives directly and which matches how VESPA
   reports.
