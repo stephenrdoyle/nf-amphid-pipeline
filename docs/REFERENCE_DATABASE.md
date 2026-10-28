@@ -460,6 +460,24 @@ nanopore route's shape, so synthesis and the report read either platform.
   over both windows. When no record carries both, each window is
   classified alone and the call is the LCA of the two, at the lower
   identity (`origin` = `pair_split`).
+- **Divergent windows mapped again.** `-x sr`'s penalties (mismatch 8,
+  gap open 12) stop an alignment at the first divergent stretch, so a
+  lineage ~10-15% from its nearest record - VESPA's NHP gregarines,
+  *Hexamita*, *Hypotrichomonas* - aligned its first window as two
+  pieces, and the pair was joined on one ~60bp piece: identity ~0.5,
+  coverage ~0.55, best hit a record that merely shared the conserved
+  start. A pair whose best hit on either window leaves more than 10% of
+  it unaligned is now mapped again, both windows, with map-ont's
+  penalties on sr's seeds (`-B4 -O4,24 -E2,1`); every other pair keeps
+  sr's mapping, so ordinary calls - and the floors calibrated on them -
+  do not move. On the VESPA samples at 250x200, pairs at identity
+  0.45-0.6 fell from 85,138 (3.2% of clustered pairs) to 5,675 (0.2%);
+  *Hypotrichomonas* in Human05, for one, went from "51% to" at
+  subdivision to 88% and order (Trichomonadida). What is left is
+  genuinely unalignable: past V4's conserved first ~50bp nothing in the
+  release is closer than ~70%, under any preset or seed size tried. At
+  132x128 the fall is smaller (32k to 26k): most of what remains there
+  is `pair_split`, the two short windows pointing at different records.
 - **Floors of its own** (`--db_floors_illumina`, species 0.997, genus
   0.995, family 0.95). The bases that separate sister taxa are mostly in
   the gap a 2x150 pair never reads, so the nanopore floors let a missing
@@ -511,8 +529,14 @@ VESPA's DADA2 + assignTaxonomy + BLAST calls, not accuracy):
   benchmark infers the pairing from profiles, which makes any NHP
   agreement partly circular; no conclusion is drawn from it without a
   sample key from the authors.
+- Re-mapping the divergent windows (above) changed none of these
+  numbers for the human samples: the pairs it rescues are lineages the
+  release holds only at ~85-90%, which still stop above family - but
+  now at the right order with their real distance in the label, not at
+  ~50% to an unrelated record. 8.5% of clustered pairs at 250x200 (12%
+  at 132x128) are re-mapped, most of them NHP gregarines.
 - 3-6% of passing pairs unclustered; 50-70 s per sample (median), the
-  largest (224k pairs) ~5-8 minutes, one core.
+  largest (224k pairs) ~5-9 minutes, one core.
 - SRA-Lite keeps two quality values; its "failed read" mark falls
   unevenly - 57% of *Endolimax* pairs against ~13% overall in one sample -
   so on public SRA-Lite data the quality filter is itself a taxon bias.

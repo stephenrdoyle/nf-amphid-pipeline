@@ -42,7 +42,9 @@ Per sample:
   4. Map each window with minimap2 (-x sr), keep records hit by BOTH
      windows in the orientation a pair has (R1 forward near the record's
      start, R2 reverse near its end), and score a record by the two
-     alignment scores together.
+     alignment scores together. A pair whose best hit on either window
+     -x sr leaves more than 10% unaligned (a lineage too divergent for
+     sr's penalties) is mapped again with nanopore's penalties.
   5. LCA and floors as on nanopore, on the identity of both windows
      together (unaligned ends counted as differences).
 
@@ -83,6 +85,26 @@ from prep_illumina import paired_reads, trim_readthrough  # noqa: E402
 # species calls on present ones; genus 0.995 cut wrong genera on missing
 # genera from 18% to 17%. docs/REFERENCE_DATABASE.md section 11.5.
 ILLUMINA_FLOORS = {"species": 0.997, "genus": 0.995, "family": 0.95}
+
+
+# Window mapping. SR_DIVERGENT keeps sr's seeds and chaining but scores
+# as map-ont does (mismatch 4, gap 4+2k), so an alignment carries on
+# through a divergent stretch instead of stopping at it (main()).
+SR = ("-x", "sr")
+SR_DIVERGENT = ("-x", "sr", "-B4", "-O4,24", "-E2,1")
+SR_CLIP = 0.10
+
+
+def map_windows(mm, index, paths: dict, extra, preset) -> dict:
+    """{window: {query: {record: best hit}}} for each FASTA in paths."""
+    hits: dict[str, dict] = {name: defaultdict(dict) for name in paths}
+    for name, path in paths.items():
+        if os.path.getsize(path):
+            for h in mm.map(index, path, preset=preset, extra=extra):
+                prev = hits[name][h["q"]].get(h["t"])
+                if prev is None or h["AS"] > prev["AS"]:
+                    hits[name][h["q"]][h["t"]] = h
+    return hits
 
 
 def expected_errors(qual: str) -> float:
@@ -419,14 +441,48 @@ def main(argv=None) -> int:
         # missing from the database often looks like - is still there to
         # be joined.
         extra = ("--secondary=yes", "-N", str(args.max_secondary), "-p", "0.5")
-        hits: dict[str, dict] = {"r1": defaultdict(dict), "r2": defaultdict(dict),
-                                 "full": defaultdict(dict)}
-        for name, path in (("r1", f1), ("r2", f2), ("full", ff)):
-            if os.path.getsize(path):
-                for h in mm.map(index, path, preset=("-x", "sr"), extra=extra):
-                    prev = hits[name][h["q"]].get(h["t"])
-                    if prev is None or h["AS"] > prev["AS"]:
-                        hits[name][h["q"]][h["t"]] = h
+        paths = {"r1": f1, "r2": f2, "full": ff}
+        hits = map_windows(mm, index, paths, extra, SR)
+        # -x sr's penalties (mismatch 8, gap open 12) are made for reads
+        # of a genome they belong to. Against a taxon ~15% from its
+        # nearest record - VESPA's NHP gregarines, Hexamita,
+        # Hypotrichomonas - the extension stops at the first divergent
+        # stretch, the window aligns as two pieces, and the pair was
+        # joined on one 60bp piece: identity ~0.5 over the pair, best hit
+        # a record that merely shares the conserved start. A pair sr
+        # leaves more than SR_CLIP of a window unaligned is mapped again,
+        # BOTH its windows, with nanopore's penalties on the same seeds,
+        # and that mapping replaces the first; the rest keep sr's, so
+        # ordinary calls and the floors calibrated on them are unchanged.
+        # Judged on the window's best-scoring hit, the one its call rests
+        # on: sr will often also give some record a gappy end-to-end
+        # alignment scoring below the clean partial ones. A window with
+        # no hit at all counts as unaligned too.
+        def poor(name, q):
+            hs = hits[name].get(q)
+            if not hs:
+                return True
+            h = max(hs.values(), key=lambda h: (h["AS"], h["t"]))
+            return h["qs"] + h["qlen"] - h["qe"] > SR_CLIP * h["qlen"]
+        redo = {f"p{k}" for k, (x, y, _n) in enumerate(centroids)
+                if (poor("r1", f"p{k}") or poor("r2", f"p{k}") if y
+                    else poor("full", f"p{k}"))}
+        if redo:
+            seqs = {"r1": lambda x, y: x if y else "",
+                    "r2": lambda x, y: y, "full": lambda x, y: "" if y else x}
+            again_paths = {}
+            for name, pick in seqs.items():
+                again_paths[name] = paths[name] + ".divergent"
+                adb.write_fasta(again_paths[name], (
+                    (f"p{k}", pick(x, y)) for k, (x, y, _n) in
+                    enumerate(centroids) if f"p{k}" in redo and pick(x, y)))
+            again = map_windows(mm, index, again_paths, extra, SR_DIVERGENT)
+            for name in paths:
+                for q in redo:
+                    hits[name].pop(q, None)
+                    if q in again[name]:
+                        hits[name][q] = again[name][q]
+        fate["remapped"] = sum(centroids[int(q[1:])][2] for q in redo)
         for k, (x, y, _n) in enumerate(centroids):
             q = f"p{k}"
             if not y:
@@ -573,6 +629,9 @@ def main(argv=None) -> int:
             "clustered + unclustered; whole_insert counts the pairs (within "
             "clustered or unclustered) whose insert was shorter than R1. "
             "rel_abundance is over clustered pairs: relative 18S abundance."),
+        # Pairs whose windows -x sr could not align end to end, mapped
+        # again with softer penalties (SR_DIVERGENT).
+        "remapped_divergent": fate.get("remapped", 0),
         # SRA-Lite keeps two quality values (Q30 for a pass, Q3 for a
         # failed read): the expected-error filter then only removes the
         # failed reads, and cannot tell good bases from bad.

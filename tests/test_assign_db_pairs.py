@@ -167,6 +167,68 @@ def test_whole_insert() -> None:
               and rows[0]["origin"] == "whole_insert", str(js["reads"]))
 
 
+def test_divergent_window() -> None:
+    print("\na window too divergent for -x sr is aligned end to end")
+    mm2 = minimap2()
+    if not mm2:
+        print("  SKIP: minimap2 not found")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        species = fx.build_tree(random.Random(3))
+        rel = os.path.join(tmp, "release")
+        fx.write_release(rel, species)
+        fx.write_primers(os.path.join(tmp, "primers.tsv"))
+        src = next(sp for sp, d in species.items() if not d["held_out"])
+        ref = species[src]["seq"]
+        # VESPA's NHP gregarines: a conserved start, then a stretch at a
+        # third mismatched, then conserved again - a lineage ~12% from
+        # its nearest record over the pair. -x sr's alignment of the
+        # first window stops at the stretch.
+        swap = {"A": "C", "C": "G", "G": "T", "T": "A"}
+        q = "".join(swap[b] if 40 <= i < 120 and i % 3 == 0 else b
+                    for i, b in enumerate(ref))
+        amp = fx.amplicon(q)
+        with gzip.open(os.path.join(tmp, "r1.fq.gz"), "wt") as f1, \
+                gzip.open(os.path.join(tmp, "r2.fq.gz"), "wt") as f2:
+            for i in range(20):
+                f1.write(f"@{i} 1\n{amp[:150]}\n+\n{'I' * 150}\n")
+                f2.write(f"@{i} 2\n{al.revcomp(amp)[:150]}\n+\n{'I' * 150}\n")
+
+        def run(clip):
+            old, adp.SR_CLIP = adp.SR_CLIP, clip
+            try:
+                out = os.path.join(tmp, f"out{clip}")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    adp.main(["--r1", os.path.join(tmp, "r1.fq.gz"),
+                              "--r2", os.path.join(tmp, "r2.fq.gz"),
+                              "--database", rel, "--primers",
+                              os.path.join(tmp, "primers.tsv"), "--assay",
+                              fx.ASSAY, "--sample-id", "X", "--outdir", out,
+                              "--minimap2", mm2])
+            finally:
+                adp.SR_CLIP = old
+            rows = list(csv.DictReader(open(os.path.join(out, "X.clusters.tsv")),
+                                       delimiter="\t"))
+            js = json.load(open(os.path.join(out, "X.assign_db.json")))
+            return rows[0], js
+        sr, _ = run(10.0)           # never re-mapped: -x sr alone
+        row, js = run(adp.SR_CLIP)
+        # the expected identity: mismatches over the two windows
+        w1, w2 = len(row["consensus"].split("N" * 10)[0]), 128
+        diffs = sum(a != b for a, b in zip(q[:w1], ref[:w1]))
+        want = 1 - diffs / (w1 + w2)
+        check("-x sr alone covers the divergent window only in part",
+              float(sr["coverage"]) < 0.9, f"{sr['coverage']} {sr['identity']}")
+        check("re-mapped, both windows align end to end on the right record",
+              float(row["coverage"]) >= 0.99 and row["origin"] == "pair"
+              and row["best_hit"] == fx._id(ref)
+              and js["remapped_divergent"] == 20,
+              f"{row['coverage']} {row['origin']} {js['remapped_divergent']}")
+        check("identity is the mismatches over both windows, not half of them",
+              abs(float(row["identity"]) - want) < 0.01,
+              f"{row['identity']} vs {want:.4f}")
+
+
 def test_end_to_end() -> None:
     print("\nthe fixture's Illumina run")
     mm2 = minimap2()
@@ -242,6 +304,7 @@ def main() -> int:
     test_orient()
     test_denoiser()
     test_whole_insert()
+    test_divergent_window()
     test_end_to_end()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
