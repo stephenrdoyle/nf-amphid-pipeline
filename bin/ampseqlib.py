@@ -510,8 +510,13 @@ def _strip_affixes(a: str, b: str) -> tuple[str, str]:
     return (a[: len(a) - j], b[: len(b) - j]) if j else (a, b)
 
 
-def bounded_edit(a: str, b: str, max_d: int, free_b_suffix: bool = False) -> int:
+def _bounded_edit_dp(a: str, b: str, max_d: int, free_b_suffix: bool = False) -> int:
     """Levenshtein distance between a and b, or max_d + 1 if it exceeds it.
+
+    The original banded dynamic program, kept as the reference that
+    bounded_edit is proven against (tests/test_assign.py) and as the path
+    for a negative max_d, which nothing in the pipeline asks for. Its
+    return values ARE the contract; bounded_edit only computes them faster.
 
     Banded: only cells within max_d of the diagonal are computed, because a
     path that strays further has already spent more than the budget. That
@@ -560,6 +565,128 @@ def bounded_edit(a: str, b: str, max_d: int, free_b_suffix: bool = False) -> int
     out = min(prev[1:]) if free_b_suffix else prev[m]
     return out if out <= max_d else max_d + 1
 
+
+
+def bounded_edit(a: str, b: str, max_d: int, free_b_suffix: bool = False) -> int:
+    """Levenshtein distance between a and b, or max_d + 1 if it exceeds it.
+
+    With free_b_suffix, b may run past the end of a at no cost - the mode
+    needed when a read covers only the start of a reference, as the mates of
+    an unmerged pair do. Without it a 250bp mate would be charged for every
+    base of the amplicon it never reached.
+
+    The result is exactly that of _bounded_edit_dp, the banded dynamic
+    program this replaced, edge cases included; only the arithmetic differs.
+    That program spent 90% of assignment in its inner loop - about 5 ms a
+    comparison on a 400bp nanopore amplicon, ~12 h of a laptop field run
+    on a full flow cell - because it touched every cell of a 400 x (2*max_d
+    + 1) band one Python operation at a time. Here a whole column of the
+    alignment matrix is one integer (Myers 1999, in Hyyro's form for global
+    distance), so a comparison is ~15 big-integer operations per base of b
+    instead of ~10 Python operations per cell.
+
+    Why the two agree, so that nobody has to take the tests on trust:
+
+    - Without free_b_suffix the band changes nothing that is returned. A
+      path leaving the band has spent more than max_d by then, the band
+      fills the cells outside it with max_d + 1 (a lower bound on their true
+      value), and every number that grows from them is already over the
+      limit. So the DP returns min(distance, max_d + 1) - which is what the
+      full, unbanded matrix gives when capped.
+    - With free_b_suffix it returns min over j >= 1 of D[len(a)][j], capped,
+      by the same argument. j starts at 1, not 0: the DP never looks at
+      D[len(a)][0], and nor does this. (It only matters for an empty a, and
+      that case returns before either computation.)
+    - Characters are compared with plain equality in both: an N matches an
+      N and nothing else, as do IUPAC codes and lower case. The match masks
+      are built from the characters of a as they are, so no alphabet is
+      assumed.
+    - The empty-string and length-difference returns are the DP's own
+      lines, run before either computation, including its one uncapped
+      value: an empty a in free_b_suffix mode returns len(b) whatever the
+      budget.
+    """
+    if max_d < 0:
+        return _bounded_edit_dp(a, b, max_d, free_b_suffix)
+    if not free_b_suffix:
+        a, b = _strip_affixes(a, b)
+    n, m = len(a), len(b)
+    if n == 0:
+        return m if (m <= max_d or free_b_suffix) else max_d + 1
+    if m == 0:
+        return n if n <= max_d else max_d + 1
+    if not free_b_suffix and abs(n - m) > max_d:
+        return max_d + 1
+
+    # a down the rows, b across the columns, because the free end belongs
+    # to b: the bottom row D[n][j] is then read off one column at a time,
+    # as the score, and its minimum is the free-suffix answer.
+    #
+    # Bit i of pv / mv says that D[i+1][j] - D[i][j] is +1 / -1 in the
+    # current column (neither: 0). Column 0 is D[i][0] = i, all +1.
+    # peq[c] marks the rows whose base equals c.
+    peq: dict[str, int] = {}
+    bit = 1
+    for c in a:
+        peq[c] = peq.get(c, 0) | bit
+        bit <<= 1
+    mask = bit - 1
+    top = bit >> 1
+    # Every base of b gets an entry, 0 where it occurs nowhere in a, so
+    # the loop below is a plain list walk with no lookups in it.
+    for c in set(b).difference(peq):
+        peq[c] = 0
+    eqs = list(map(peq.__getitem__, b))
+    pv, mv, score = mask, 0, n
+    inf = max_d + 1
+
+    # One step per column j of the matrix. ph / mh mark the +1 / -1
+    # horizontal steps D[i][j] - D[i][j-1]; the top row's is the change in
+    # the score. ph is left unmasked (it may go negative): every operation
+    # here carries only upwards, so bits above the top row never reach the
+    # ones that are read, and the one mask on pv keeps the state bounded.
+    # The "| 1" is the global-distance boundary: D[0][j] = j, so the step
+    # along row 0 is always +1. The two modes differ only in what they
+    # read from the bottom row, and are written out twice to keep that
+    # test out of the loop.
+    if free_b_suffix:
+        best = inf
+        for eq in eqs:
+            xv = eq | mv
+            xh = (((eq & pv) + pv) ^ pv) | eq
+            ph = mv | ~(xh | pv)
+            mh = pv & xh
+            if ph & top:
+                score += 1
+            elif mh & top:
+                score -= 1
+            if score < best:
+                best = score
+            ph = (ph << 1) | 1
+            pv = ((mh << 1) | ~(xv | ph)) & mask
+            mv = ph & xv
+        return best
+
+    # D[n][m] is at least D[n][j] - (m - j): the bottom row can fall by at
+    # most one per column. Once even that cannot bring it back within
+    # max_d, stop. The DP would have stopped too or finished over the
+    # limit; either way the answer is max_d + 1.
+    lim = max_d + m
+    for j, eq in enumerate(eqs, 1):
+        xv = eq | mv
+        xh = (((eq & pv) + pv) ^ pv) | eq
+        ph = mv | ~(xh | pv)
+        mh = pv & xh
+        if ph & top:
+            score += 1
+            if score + j > lim:
+                return inf
+        elif mh & top:
+            score -= 1
+        ph = (ph << 1) | 1
+        pv = ((mh << 1) | ~(xv | ph)) & mask
+        mv = ph & xv
+    return score if score <= max_d else inf
 
 # --------------------------------------------------------------------------
 # io
