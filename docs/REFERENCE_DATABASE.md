@@ -1,6 +1,8 @@
 # Design note: assignment against a reference database
 
-**Status: proposal. Nothing here is implemented.**
+**Status: the nanopore route is implemented** (`--reference_database`,
+2026-10-28; §11 records what was decided and why). Illumina, synthesis
+and the report for this mode are not built yet.
 
 Today the pipeline is given a reference panel - a short, curated list of
 targets - and every read is assigned competitively to whichever target it
@@ -58,6 +60,13 @@ edits and silently lost most of its reads. In database mode the mask
 comes with the database release (§4), and an organism absent from the
 database cannot be protected by it - so the rate of internal anchor hits
 should be reported per run.
+
+*Implemented:* pre-flight copies the release's `anchor_lookalikes.tsv`
+to `preflight/anchor_lookalikes.tsv` unchanged, so both stages read it
+from the path they always have. A release mask is ~46,000 rows (31,228
+distinct contexts over both strands) against a panel's handful, and the
+mask's original test - every context aligned at every anchor hit - cost
+0.3 s per hit. It is now indexed (§11.1); answers are identical.
 
 ## 4. The database is built elsewhere
 
@@ -132,15 +141,16 @@ never observed; the Illumina resolution table says what that costs.
 Poly-G tails must be trimmed if any run is on a two-colour instrument.
 The existing merge-based route is unchanged for panel mode.
 
-**Nanopore.** The whole insert is in one read. Per-read mapping with LCA
-first. Per-read error is likely to exceed the divergence between some
-sister taxa, so reads from close relatives will often stop at genus or
-family. If the mock data show that this costs too much, add a
-cluster-and-consensus step per sample and classify consensus sequences.
+**Nanopore.** The whole insert is in one read. ~~Per-read mapping with
+LCA first~~ - **decided against on the benchmark (§11.2): nanopore
+classifies per-sample consensus sequences, not reads.** Per-read error
+does exceed the divergence between sister taxa, and the result is worse
+than stopping at genus: reads from species *missing* from the database
+are confidently named as a present sister.
 
-**Thresholds** per rank are not chosen here. They should come from the
-database preparation's view of how far apart neighbouring taxa actually
-are over V4.
+**Thresholds** per rank: species 0.995, genus 0.98, family 0.95 on the
+best hit's identity, from leave-out simulations at consensus error rates
+(§11.3). The genus floor is the weak one.
 
 ## 6. No controls
 
@@ -153,10 +163,13 @@ are over V4.
   require them.
 - Calls are judged against the negative controls and a relative-abundance
   floor, not a fixed depth alone.
-- Open: whether pre-flight and assignment accept a run with no control
-  wells. `--spiked` off already gives presence/absence without
-  quantification standards; the tagged-plasmid requirement still needs
-  checking.
+- ~~Open: whether pre-flight and assignment accept a run with no control
+  wells.~~ *Resolved:* in database mode pre-flight skips every panel and
+  tag check (there is no panel), refuses `--spiked` and `--mocks` by
+  name, and **warns** - does not refuse - when the plate has no negative
+  controls: refusing to analyse reads already on disk helps nobody. The
+  assay `assets/assay/vespa18s.json` has an empty control tag. Whether a
+  missing blank should become an error is open (§10).
 
 ## 7. Report
 
@@ -182,13 +195,137 @@ are over V4.
 
 ## 9. Order of work
 
-1. A first database release from vespa-18s-refdb (§4).
+1. ~~A first database release from vespa-18s-refdb (§4).~~ v0.4.0.
 2. Illumina pair mapping with LCA, validated on the VESPA mocks.
-3. Nanopore per-read mapping with LCA, validated on a mock run.
-4. Nanopore consensus, only if step 3 shows it is needed.
+3. ~~Nanopore per-read mapping with LCA~~ - benchmarked and replaced by
+   4 (§11.2).
+4. ~~Nanopore consensus~~ - built (§11), validated on simulation; still
+   needs a characterised nanopore sample.
+5. Synthesis and report for database mode (§§6-7): not built.
 
 ## 10. Open questions
 
-- Aligner, and identity thresholds per rank (from the release's
-  resolution tables).
-- Pre-flight and assignment behaviour with no control wells.
+- ~~Aligner~~ - minimap2 (§11). ~~Identity thresholds per rank~~ - see
+  §11.3; the genus floor still needs work.
+- ~~Pre-flight and assignment behaviour with no control wells~~ - §6.
+- Should a database-mode plate with no negative control be refused
+  rather than warned about?
+- The splitter's look-alike test costs ~2.4 ms per anchor hit with a
+  release mask (two hits per read), against nothing with a panel's.
+  Measured on VESPA-shaped reads, the splitter's anchor scan runs at
+  ~195 reads/s per core with the v0.4.0 mask against ~3,300 without:
+  on a 3.2M-read run about 4.5 CPU-hours, ~35 minutes on an 8-core
+  laptop.
+  Restricting the release mask to look-alikes within 2 edits (1,038
+  rows, against 45,301 at 3) would cut that ~40-fold, but 3 edits is
+  pre-flight's deliberate margin for sequencing error.
+- Unclustered reads (groups below `--db_min_cluster_reads`) are counted
+  but not classified. Whether to give them a coarse per-read call - at
+  family or above only, where read error does not reach - is open.
+- No container image carries both python3 and minimap2, so the two
+  database-mode processes declare none.
+- The consensus cannot extend past its starting reference's ends: a
+  taxon whose insert is longer at an end than every database record
+  near it loses those bases (soft-clipped). Inserts are primer-to-primer
+  on both sides, so this needs an indel right at an end.
+
+## 11. Implementation, nanopore (2026-10-28)
+
+### 11.1 Aligner and index
+
+**minimap2** (2.31, built from source for Apple Silicon): the pipeline's
+first external dependency, used in database mode only; panel mode stays
+standard-library Python. Indexed with `-x map-ont -k 19 -w 10` - the same
+accuracy as the map-ont default k=15 on the leave-out benchmark, 1.6x
+faster. The index builds in 1-2 s and ~120 MB, so `DB_INDEX` builds it
+once per run rather than shipping it in the release. Pre-flight checks
+that minimap2 runs and records its version.
+
+**The look-alike mask index** (`ampseqlib._ContextIndex`). An exact
+filter in front of the unchanged per-context test, by the pigeonhole
+principle: cut a context of tolerance k into k + 2 pieces; an alignment
+within k edits leaves two pieces exact, on read diagonals within k of
+each other, and - since covers() only asks about alignments overlapping
+the anchor hit - on diagonals between `start - m - 2k` and `end + k`.
+Pieces with ambiguity codes are indexed under every spelling (PR2 keeps
+its Ns; ~1,200 contexts carry one), and so are read pieces with one.
+Diagonal pairs are found with sorted packed integers so the inner loops
+run in C. 0.3 s → ~2.4 ms per hit on both panel reads and VESPA-shaped
+reads; the overlap bound matters on the latter, where the 18S just past
+the primer genuinely matches hundreds of insert-start contexts. Tested
+call for call against the plain loop (`tests/test_split.py`).
+
+### 11.2 Classify consensus sequences, not reads
+
+Benchmarked with minimap2 on reads simulated from the release with 40
+genera and 60 species held out of the index:
+
+- **Single reads:** an LCA over equally best hits named 79-85% of reads
+  from *missing* species or genera at species level. No identity floor
+  can fix it: at 3% read error a present species' reads sit at ~97%
+  identity and a missing sister's at ~96%, because sister taxa differ
+  by ~1% over V4. The distributions overlap at 1% read error too.
+- **Consensus (~0.2% error):** a species floor of ~0.995 kept 90% of
+  correct species calls while wrong calls on missing taxa fell to 5-8%.
+
+So `bin/assign_db.py`, per sample:
+
+1. trims reads at the primers (orienting them; the release's records
+   are primer-trimmed inserts);
+2. maps them to the release and groups them by primary hit;
+3. builds a reference-guided consensus per group of ≥5 reads: pile the
+   reads on the hit via minimap2 `cs` tags, majority base per position
+   (insertions where most spanning reads carry one), re-align to the
+   draft, repeat until stable (≤4 rounds). Groups over 300 reads are
+   subsampled for the consensus only;
+4. **splits hidden haplotypes by linkage** (Stephen Doyle's idea): a
+   candidate allele must be ≥10% of the reads at its position and
+   binomially improbable under the error rate *measured on that group*,
+   not a homopolymer deletion; two alleles are linked when ≥3 reads
+   carry both and that is ≥3x their chance co-occurrence; the largest
+   connected set of linked alleles (≥2) is the signature, reads carrying
+   at least half of it form a second group, and both are resolved again
+   (at most two levels deep);
+5. merges consensus sequences within one edit;
+6. counts **every** read by mapping it to the final consensus set, so
+   reads from groups too small to have a consensus are still counted -
+   unless their own database hit fits better by more than 10 alignment
+   score points, which marks a taxon too rare here for a consensus; those
+   are left *unclustered* rather than absorbed into a relative;
+7. classifies each consensus: LCA over database hits within 0.5% of the
+   best alignment score (`--db_lca_margin`), cut back to the deepest rank
+   whose identity floor the best hit clears (`--db_floors`).
+
+On simulated samples (prototype): splitting raised hidden-haplotype
+recovery from 0% to 37% and exact consensus for present taxa from 87% to
+98%, at about three false splits per 30 samples; merging cut spurious
+consensus sequences from 33 to 5-10. On the pipeline fixture
+(`tests/make_db_fixture.py`) every source is recovered at its expected
+rank, with exact consensus.
+
+**Identity** is matches over the alignment block plus any query left
+unaligned at either end, not minimap2's block-only ratio: both sequences
+are primer-to-primer, so an unaligned end is a real difference.
+
+**Below family** a consensus is reported as `unclassified, NN% to X`
+(X the best hit's genus), with its rank reached, lineage and identity
+still in the row - a gap in the database reads as a gap.
+
+**Output** per sample (`assign_db/`): `clusters.tsv` (one row per
+consensus: reads, relative abundance, rank, taxon, label, identity,
+coverage, lineage, best hit and its full lineage, near-hit count, LCA
+rank before floors, the best hit's resolution rank from
+`resolution_nanopore.tsv`, origin, consensus), `taxa.tsv` (reads per
+taxon at the rank reached; a species call and a genus call in one genus
+stay separate rows), `consensus.fasta`, and `assign_db.json` (read
+accounting, settings, release and minimap2 versions). Every row carries
+the release version.
+
+### 11.3 Floors
+
+Prototype values, from the leave-out benchmark at consensus error rates:
+species 0.995, genus 0.98, family 0.95. The genus floor is too
+permissive: 17-37% of consensus sequences from missing genera were still
+named a wrong genus. `tests/bench_db_floors.py` reruns the calibration
+on a larger leave-out simulation through `bin/assign_db.py` itself, with
+floors off, and reports a grid of floor values.
