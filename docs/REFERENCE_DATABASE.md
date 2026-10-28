@@ -149,7 +149,7 @@ does exceed the divergence between sister taxa, and the result is worse
 than stopping at genus: reads from species *missing* from the database
 are confidently named as a present sister.
 
-**Thresholds** per rank: species 0.995, genus 0.98, family 0.95 on the
+**Thresholds** per rank: species 0.995, genus 0.99, family 0.95 on the
 best hit's identity, from leave-out simulations at consensus error rates
 (§11.3). The genus floor is the weak one.
 
@@ -347,8 +347,8 @@ may honestly reach; wrong = deeper than that, or a wrong name):
 | floors (species / genus) | present: deepest / wrong | missing species: deepest / higher / wrong | missing genus: deepest / higher / wrong |
 |---|---|---|---|
 | 0.990 / 0.98 | 0.98 / 0 | 0.16 / 0.62 / 0.22 | 0.57 / 0.16 / 0.27 |
-| **0.995 / 0.98** (default) | 0.98 / 0 | 0.24 / 0.62 / **0.15** | 0.57 / 0.16 / **0.27** |
-| 0.995 / 0.99 | 0.98 / 0 | 0.18 / 0.68 / 0.14 | 0.64 / 0.16 / 0.20 |
+| 0.995 / 0.98 (prototype) | 0.98 / 0 | 0.24 / 0.62 / **0.15** | 0.57 / 0.16 / **0.27** |
+| **0.995 / 0.99** (default) | 0.98 / 0 | 0.18 / 0.68 / 0.14 | 0.64 / 0.16 / 0.20 |
 | 0.997 / 0.99 | 0.98 / 0 | 0.24 / 0.68 / 0.09 | 0.64 / 0.16 / 0.20 |
 
 (full grid in the benchmark's `floors.tsv`). Read with care:
@@ -364,5 +364,6 @@ may honestly reach; wrong = deeper than that, or a wrong name):
   relative >99% identical over V4. That is the resolution limit, and the
   identity column beside each call is how it stays visible.
 
-The defaults are unchanged pending a decision; the evidence points to
-genus 0.99, and species 0.997 if real consensus error allows it.
+**Decided (2026-10-28): genus raised to 0.99.** Species stays at 0.995
+until a real nanopore run shows how much residual error consensus
+carries; 0.997 would cut wrong calls on missing species from 15% to 9%.

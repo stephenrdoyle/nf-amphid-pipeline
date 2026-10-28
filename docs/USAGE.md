@@ -451,7 +451,7 @@ On the real MinION run this affected 41.6% of reads.
 | `--reference_database` | — | a vespa-18s-refdb release directory, in place of `--reference` (§2.9) |
 | `--db_min_cluster_reads` | `5` | reads a group needs for a consensus of its own; smaller groups' reads are still counted |
 | `--db_lca_margin` | `0.005` | database hits within this fraction of the best alignment score take part in the LCA |
-| `--db_floors` | `species=0.995,genus=0.98,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
+| `--db_floors` | `species=0.995,genus=0.99,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
 
 ### 3.7 Control plasmids
 

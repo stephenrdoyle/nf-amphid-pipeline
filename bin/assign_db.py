@@ -96,10 +96,12 @@ INDEX_ARGS = ["-x", "map-ont", "-k", "19", "-w", "10"]
 # rank only if its best hit is at least this close; otherwise it stops at
 # the next rank up. From the leave-out benchmark at consensus error rates:
 # species 0.995 kept 90% of correct species calls and cut wrong calls on
-# missing species to 5-8%. The genus floor is known to be too permissive
-# (17-37% of consensus from missing genera still took a wrong genus); see
-# docs/REFERENCE_DATABASE.md for its calibration.
-DEFAULT_FLOORS = {"species": 0.995, "genus": 0.98, "family": 0.95}
+# missing species to 5-8%. Genus was 0.98 in the prototype, which let
+# 27% of consensus from missing genera take a wrong genus on a 150-sample
+# leave-out run of v0.4.0; 0.99 cut that to 20% at no cost to present
+# taxa, the rest moving honestly to family (docs/REFERENCE_DATABASE.md
+# section 11.3, tests/bench_db_floors.py).
+DEFAULT_FLOORS = {"species": 0.995, "genus": 0.99, "family": 0.95}
 
 CS = re.compile(r"(:\d+|\*[a-z][a-z]|\+[a-z]+|-[a-z]+)")
 
@@ -597,7 +599,7 @@ def main(argv=None) -> int:
                     "score take part in the LCA")
     ap.add_argument("--floors", default=",".join(
         f"{k}={v}" for k, v in DEFAULT_FLOORS.items()),
-        help="identity floor per rank, e.g. species=0.995,genus=0.98")
+        help="identity floor per rank, e.g. species=0.995,genus=0.99")
     ap.add_argument("--recruit-margin", type=int, default=10,
                     help="a read is counted to a consensus unless its own "
                     "database hit scores more than this much better "
