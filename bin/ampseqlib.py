@@ -827,9 +827,11 @@ class LookalikeMask:
         """
         widest = self.widest
         plain = is_plain_acgt(read[max(0, start - widest):end + widest])
-        if self._index is not None and plain:
-            todo = self._index.candidates(
-                read[max(0, start - widest):end + widest])
+        if self._index is not None:
+            ws = max(0, start - widest)
+            todo = self._index.candidates(read[ws:end + widest],
+                                          start - ws, end - ws, widest,
+                                          plain)
             if todo is not None:
                 return self._covers_by(todo, read, start, end, plain)
         return self._covers_by(range(len(self.contexts)), read, start, end,
@@ -961,25 +963,69 @@ class _ContextIndex:
             out.append((cuts[i], spellings))
         return out
 
-    def candidates(self, text: str) -> list[int] | None:
-        """Context numbers that could align within tolerance somewhere in
-        `text`, in index order; None when `text` is too long for the
-        integer packing, so the caller tries every context instead."""
+    def candidates(self, text: str, start: int, end: int,
+                   widest: int, plain: bool = True) -> list[int] | None:
+        """Context numbers that could align within tolerance in `text`
+        OVERLAPPING text[start:end], in index order; None when `text` is
+        too long for the integer packing, so the caller tries every
+        context instead.
+
+        Why the overlap matters. covers() only answers yes for an
+        alignment that overlaps the anchor hit, and the stretch around a
+        hit is mostly something else - on a VESPA read, the 18S insert
+        begins ~37bp past the i5 anchor, and hundreds of near-identical
+        release contexts genuinely align there. Every one of them was a
+        candidate, was aligned, and was then rejected for not overlapping:
+        14 ms per hit. An alignment that does overlap has a bounded
+        position, and so do its exact pieces. If it starts at x, with at
+        most k edits its pieces' diagonals lie within k of x, and it ends
+        within k of x + m; overlapping [start, end) needs x < end and
+        x + m + k > start. So every piece diagonal d satisfies
+            start - m - 2k  <  d  <  end + k,
+        and a pair outside that range cannot belong to an overlapping
+        alignment. The widest context and largest tolerance make the
+        bound hold for all of them at once. ~2 ms per hit again.
+
+        A read with an ambiguity code near the hit (`plain` False) is
+        still indexed: the aligner lets a read's N match any base, so a
+        piece of read holding one is looked up under every spelling it
+        allows. Without this, one N sent the call to every context in
+        turn - three seconds for a single hit.
+        """
         if len(text) > self.max_text:
             return None
         post, codes = self.post, []
         extend = codes.extend
         for L in self.lengths:
             for i in range(len(text) - L + 1):
-                hit = post.get(text[i:i + L])
-                if hit:
-                    extend(map(i.__add__, hit))
+                piece = text[i:i + L]
+                if plain:
+                    hit = post.get(piece)
+                    if hit:
+                        extend(map(i.__add__, hit))
+                    continue
+                spellings = [""]
+                for c in piece:
+                    spellings = [sp + b for sp in spellings
+                                 for b in IUPAC.get(c, "")]
+                    if len(spellings) > 256:
+                        return None
+                seen = set()
+                for sp in spellings:
+                    for code in post.get(sp, ()):
+                        if code not in seen:
+                            seen.add(code)
+                            codes.append(code + i)
         out = set(self.always)
         if len(codes) > 1:
             codes.sort()
             near = map((self.kmax + 1).__gt__, map(sub, codes[1:], codes))
-            stride = self.STRIDE
-            out.update(c // stride for c in compress(codes, near))
+            stride, k = self.STRIDE, self.kmax
+            # Diagonal bounds, shifted into the packed integers.
+            lo = start - widest - 2 * k + self.offset
+            hi = end + k + self.offset
+            out.update(c // stride for c in compress(codes, near)
+                       if lo < c % stride < hi)
         return sorted(out)
 
 

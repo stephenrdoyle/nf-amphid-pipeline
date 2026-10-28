@@ -1243,6 +1243,17 @@ def test_indexed_lookalike_mask() -> None:
                                   + rand(rng.randint(20, 200)),
                                   idx(), idx(), 2, cfg)
         reads.append(rc(unit) if rng.random() < 0.5 else unit)
+    # VESPA-shaped reads: release inserts behind the primer, where the
+    # 18S next to the adapter genuinely matches many contexts.
+    fa = os.path.join(DB_RELEASE, "refdb.fasta")
+    with open(fa) as fh:
+        inserts = [ln.strip() for i, ln in enumerate(fh) if i % 194 == 1]
+    for ins in inserts[:150]:
+        unit = sim.build_molecule("AGCAGCCGCGGTAATTCC" + ins
+                                  + "GAAACTTAAAGGAATTGACGGA", idx(), idx(),
+                                  2, cfg)
+        reads.append(mutate(rc(unit) if rng.random() < 0.5 else unit,
+                            len(unit) // 40))
     if os.path.isdir(REAL_READS):
         reads += _real_reads(100)
     calls = diff = positive = 0
@@ -1267,31 +1278,27 @@ def test_indexed_lookalike_mask() -> None:
                 if want is not None and got != want:
                     diff += 1
     # The plain loop is too slow to run on every call; the first 60 are
-    # compared outright, and every call is compared against the
-    # candidates the index proposed (cheap) below.
+    # compared outright, and below, for a dozen reads, every context is
+    # tried on its own: any whose best alignment overlaps the hit (the
+    # one thing covers() asks) must be among the index's candidates.
     miss = 0
     for read in reads[:6] + reads[-6:]:
         for pat in (a5, a7, rc(a5), rc(a7)):
             for s, e in sc.scan_all(read, pat, 2):
-                text = read[max(0, s - big.widest):e + big.widest]
-                if not al.is_plain_acgt(text):
-                    continue
-                cand = set(big._index.candidates(text))
-                # every context whose own window holds an alignment in
-                # tolerance must be among the candidates
-                for i, (ctx, srch) in enumerate(zip(big.contexts,
-                                                    big.searches)):
-                    if i in cand:
-                        continue
-                    lo = max(0, s - len(ctx))
-                    hi = min(len(read), e + len(ctx))
-                    if srch.best(read[lo:hi], True) is not None:
+                ws = max(0, s - big.widest)
+                text = read[ws:e + big.widest]
+                plain = al.is_plain_acgt(text)
+                cand = set(big._index.candidates(text, s - ws, e - ws,
+                                                 big.widest, plain))
+                for i in range(len(big.contexts)):
+                    if i not in cand and big._covers_by([i], read, s, e,
+                                                        plain):
                         miss += 1
     check(f"release mask: {calls} anchor hits ({positive} covered), first "
           "60 identical to the plain loop", diff == 0 and positive > 0,
           f"{diff} differ")
-    check("release mask: no context with an alignment in tolerance was "
-          "left out of the candidates (12 reads, every context)",
+    check("release mask: no context whose best alignment overlaps the hit "
+          "was left out of the candidates (12 reads, every context)",
           miss == 0, f"{miss} missed")
     print(f"       per call: indexed {1000 * t_idx / max(1, calls):.2f} ms, "
           f"plain loop {1000 * t_all / 60:.0f} ms")
