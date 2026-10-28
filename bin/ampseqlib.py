@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Shared primitives for nf-helminth-amplicon.
+Shared primitives for amphid.
 
 Everything in here is used by at least two of the executables, and the
 reason it is shared rather than copied is that the alternative has already

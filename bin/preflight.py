@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pre-flight validation for nf-helminth-amplicon.
+Pre-flight validation for amphid.
 
 Validates every input, derives everything derivable, and writes its reports
 before any read is touched. A samplesheet typo should cost seconds, not a
@@ -2909,7 +2909,7 @@ def write_file_resolution(samples: list[Sample], outdir: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Pre-flight validation for nf-helminth-amplicon."
+        description="Pre-flight validation for amphid."
     )
     ap.add_argument("--reference", required=True)
     ap.add_argument(

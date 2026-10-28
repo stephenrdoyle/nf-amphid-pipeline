@@ -1,4 +1,4 @@
-# Mock community definitions for nf-helminth-amplicon
+# Mock community definitions for amphid
 #
 # What went into each mock well, declared BEFORE sequencing. This is the
 # only file in the pipeline that states an expected answer, and it is what

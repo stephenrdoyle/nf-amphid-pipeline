@@ -1,4 +1,4 @@
-# Primer set for nf-helminth-amplicon - OPTIONAL input (--primers)
+# Primer set for amphid - OPTIONAL input (--primers)
 #
 # A separate file from the assay config on purpose: primers travel with the
 # PANEL, not with the construct. Change the targets and the primers may
