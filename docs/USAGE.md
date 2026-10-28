@@ -80,6 +80,31 @@ hard-links results instead of copying them, so a run is not stored
 twice. Keep `--outdir` on the same disk as the folder you launch from:
 hard links cannot cross disks.
 
+**Database mode needs minimap2** (`--reference_database`, §2.9) - the
+pipeline's one external program, used in that mode only; panel runs need
+nothing beyond Python. On an Apple Silicon laptop, build it from source
+before leaving (it needs Xcode's command-line tools, `xcode-select
+--install`, and nothing else):
+
+```bash
+git clone https://github.com/lh3/minimap2 && cd minimap2
+make arm_neon=1 aarch64=1                           # Apple Silicon; plain `make` on Intel
+mkdir -p ~/bin && cp minimap2 ~/bin/
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zprofile  # then open a new terminal
+minimap2 --version                                  # 2.31 is what database mode was built against
+```
+
+Pre-flight checks that `minimap2` runs before any read is touched, and
+records its version. Copy the database release folder onto the laptop
+too, whole: pre-flight checks every file against the hashes in its
+`manifest.json`, so a half-copied release is refused rather than used.
+Then, before leaving:
+
+```bash
+python3 tests/make_db_fixture.py
+nextflow run . -profile test_db,field
+```
+
 Plan disk for a split nanopore run larger than the run itself while it
 is in progress. Splitting is the slow stage on a laptop; it divides by
 MinKNOW batch file, so all cores are used. Basecalling quality matters
@@ -308,6 +333,50 @@ this *a particular assay* rather than code. Pointing the pipeline at a
 different panel or construct is a file swap, not a code change. Read by
 both Nextflow and `preflight.py`, so the values are defined once.
 
+### 2.9 `--reference_database` — a database release instead of a panel (directory)
+
+For protocols with no panel, no control plasmids and no quantification
+standards - the VESPA 18S V4 protocol is the one it was built for. Give a
+release directory built by the vespa-18s-refdb repository *instead of*
+`--reference`, with `--assay assets/assay/vespa18s.json` and the
+protocol's primers. The design, and why each step is there, is in
+[REFERENCE_DATABASE.md](REFERENCE_DATABASE.md).
+
+```bash
+nextflow run . -profile field \
+    --reference_database ~/refdb/vespa18s_v0.4.0 \
+    --assay assets/assay/vespa18s.json --primers vespa_primers.tsv \
+    --samplesheet samplesheet.tsv --runs runs.tsv --outdir results
+```
+
+What changes:
+
+- **Pre-flight** validates the release instead of a panel: every file
+  present and unchanged since the build, its primers equal to
+  `--primers`, its adapter anchors equal to the assay's. The release's
+  look-alike mask becomes `preflight/anchor_lookalikes.tsv`, which the
+  splitter and demultiplexer read exactly as they read a panel's.
+  `--spiked`, `--mocks` and Illumina runs are refused in this mode, and a
+  plate without negative controls is warned about: with no plasmids or
+  standards, blanks are the only measure of contamination left.
+- **Assignment** is per-sample consensus, not per read: reads are grouped
+  by their best database hit, a consensus is built for each group, hidden
+  second haplotypes are split off by linkage, and each consensus is
+  named only down to the rank its identity supports. Output is in
+  `assign_db/` (§5).
+- **Synthesis and the report are database mode's own** (§5): relative
+  18S abundance at the rank each call reached, judged against the run's
+  blanks and `--db_min_rel_abundance`, with off-target fractions
+  (bacteria and archaea, organelles, fungi, host) per well and the
+  release version on every row. No copies, no plasmid checks.
+
+Nanopore or Illumina; needs minimap2 (§1.1). On Illumina the pairs are
+not merged - at 2x150 no V4 insert overlaps - but cut to a fixed window
+of insert from each mate (`--db_window_r1`, `--db_window_r2`), denoised
+the way DADA2 or UNOISE would, and each surviving pair is classified on
+both windows together. A pair whose insert is shorter than a read is
+kept whole.
+
 ---
 
 ## 3. Parameters
@@ -382,6 +451,21 @@ On the real MinION run this affected 41.6% of reads.
 |---|---|---|
 | `--max_dist_frac` | `0.10` | maximum edit distance as a fraction of length |
 | `--min_margin` | `2` | how far the best hit must beat the second |
+
+### 3.6.1 Database mode
+
+| parameter | default | meaning |
+|---|---|---|
+| `--reference_database` | — | a vespa-18s-refdb release directory, in place of `--reference` (§2.9) |
+| `--db_min_cluster_reads` | `5` | reads a group needs for a consensus of its own; smaller groups' reads are still counted |
+| `--db_lca_margin` | `0.005` | database hits within this fraction of the best alignment score take part in the LCA |
+| `--db_floors` | `species=0.995,genus=0.99,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
+| `--db_min_rel_abundance` | `0.001` | a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
+| `--db_primer_max_edits` | `3` | edits allowed when finding each primer in database mode (panel mode uses 2). Off-target bacterial 16S differs from the forward primer at its 3' end, often by three; at two it is dropped as `no_primer` rather than counted as bacteria |
+| `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
+| `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
+| `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's `illumina_windows` (132 for 2x150) |
+| `--db_window_r2` | `null` | the same for R2 (128 for 2x150); set both for longer reads, e.g. 250 and 200 for 2x300 |
 
 ### 3.7 Control plasmids
 
@@ -481,6 +565,8 @@ week's results; delete it, or use a fresh one.
 | `stub` | placeholder tasks, for proving the DAG connects |
 | `test` | Illumina fixtures, end to end |
 | `test_ont` | nanopore fixtures, end to end, with a real 4-way split fan-out |
+| `test_db` | database mode on nanopore: a miniature release, held-out taxa, a hidden haplotype (`python3 tests/make_db_fixture.py` first) |
+| `test_db_il` | database mode on Illumina 2x150: the same release and samples as `test_db`, as read pairs |
 | `farm` | no-op, kept so existing commands still work |
 | `singularity` / `docker` / `conda` | enable that engine |
 | `debug` | echo hostnames, keep work directories |
@@ -522,10 +608,25 @@ reproducibility choice, not a dependency.
     index_matrix.tsv            observed i7 x i5 grid, unclaimed pairs marked
   prep/                         Illumina only
     <sample>.prep.json
-  assign/
+  assign/                       panel mode
     <sample>.counts.tsv         reads per reference entry
     <sample>.taxa.tsv
     <sample>.assign.json
+  assign_db/                    database mode (--reference_database)
+    <sample>.clusters.tsv       one row per consensus: reads, rank reached,
+                                taxon, identity, best hit, consensus
+    <sample>.taxa.tsv           reads per taxon at the rank reached
+    <sample>.consensus.fasta
+    <sample>.assign_db.json     read accounting, settings, release version
+  synthesis/                    in database mode:
+    db_calls.tsv                one row per sample x taxon at the rank
+                                reached: share, call, limit, identity,
+                                organism group, share within the group
+    db_wells.tsv                per well: read funnel, reads and fractions
+                                per organism group, target-group richness,
+                                reads by rank
+    db_prevalence.tsv           per taxon: samples detected of samples tested
+    db_run_qc.json              release, blanks, internal adapter rates
   synthesis/
     calls.tsv                   the results table
     calibration.tsv             per-well internal control
@@ -537,6 +638,55 @@ reproducibility choice, not a dependency.
   <run_id>_report.html          self-contained
   pipeline_info/                timeline, report, trace
 ```
+
+### Reading `assign_db/<sample>.clusters.tsv` (database mode)
+
+One row per consensus sequence. `rank` is the deepest rank the call
+reached: the lowest common ancestor of every database hit within
+`--db_lca_margin` of the best, cut back to the deepest rank whose
+identity floor (`--db_floors`) the best hit clears. `identity` is that
+best hit's, counting unaligned ends as differences - read it beside the
+rank: a species call at 0.996 and one at 1.000 are not the same claim,
+and a genus call at 0.993 says a near relative is in the database but
+this sequence is not. Below family a row is labelled `unclassified, NN%
+to X`, which is what a gap in the database looks like.
+
+| column | meaning |
+|---|---|
+| `reads`, `rel_abundance` | reads counted to this consensus, and their share of the sample's clustered reads. **Relative 18S abundance**, never organisms or copies: 18S copy number varies widely between taxa |
+| `rank`, `taxon`, `label` | the rank reached, the name there, and the name or `unclassified, NN% to X` |
+| `lineage` | the best hit's names down to the rank reached |
+| `identity`, `coverage` | the best hit's identity and the share of the consensus it aligns |
+| `best_hit`, `best_hit_lineage` | the closest record and its full lineage, even below the rank reached |
+| `near_hits`, `lca_rank` | how many records shared the LCA, and where the LCA alone stopped before the floors |
+| `db_resolution` | the deepest rank at which the best hit is distinguishable over the whole insert, from the release's `resolution_nanopore.tsv` |
+| `origin` | `group`, or `split…` when the consensus was a hidden haplotype split from its group by linkage |
+| `database_version` | the release every call was made against |
+
+`<sample>.assign_db.json` holds the read accounting: `reads_in` =
+`no_primer` + `too_short` + `clustered` + `unclustered`. Unclustered reads
+belong to taxa with too few reads here for a consensus
+(`--db_min_cluster_reads`) and are not classified - one read is not
+enough to say what it is.
+
+### Reading `synthesis/db_calls.tsv` (database mode)
+
+One row per sample and taxon at the rank reached. `call` is `detected`
+(beats the blanks and is at least `--db_min_rel_abundance` of the well),
+`below_blanks`, `below_floor`, or `low_depth` (the well has fewer than
+`--min_depth` classified reads). `limit_reads` is the fewest reads that
+beat the blanks and `limit_basis` says how it was set; with no blanks on
+the plate it is the fixed floor, and says so. `group` is the organism
+group, as VESPA reports them - helminths, protists and microsporidia (the
+targets), host, fungi, plants, invertebrates, bacteria_archaea, organelle,
+or unassigned - and `group_share` the call's share within its group, so
+a helminth composition is not flattened by a well that is mostly host.
+The groups are defined in docs/REFERENCE_DATABASE.md §11.4. And
+`primer_fit` carries the release's prediction for its best hit -
+`near_3prime` means its share may be held down by the PCR.
+`db_wells.tsv` gives each well's funnel, reads and fractions per group,
+target-group richness and reads by rank reached; `db_prevalence.tsv`
+how many samples each taxon was detected in.
 
 ### Reading `calls.tsv`
 

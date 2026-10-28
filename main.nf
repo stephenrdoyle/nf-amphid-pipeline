@@ -17,6 +17,11 @@ include { PREFLIGHT      } from './modules/local/preflight'
 include { ILLUMINA_PATH  } from './subworkflows/local/illumina'
 include { NANOPORE_PATH  } from './subworkflows/local/nanopore'
 include { ASSIGN         } from './modules/local/assign'
+include { DB_INDEX       } from './modules/local/db_index'
+include { ASSIGN_DB      } from './modules/local/assign_db'
+include { ASSIGN_DB_PAIRS} from './modules/local/assign_db_pairs'
+include { SYNTHESISE_DB  } from './modules/local/synthesise_db'
+include { REPORT_DB      } from './modules/local/report_db'
 include { SYNTHESISE     } from './modules/local/synthesise'
 include { CALIBRATE_MOCKS} from './modules/local/calibrate_mocks'
 include { COMPARE_RUNS   } from './modules/local/compare_runs'
@@ -35,6 +40,11 @@ def helpMessage() {
       --reference        Reference panel TSV (seq_id, locus, type, taxon,
                          parent_id, default_conc, conc_units, corr_factor,
                          sequence)
+        or
+      --reference_database
+                         A vespa-18s-refdb release directory: classify
+                         against a taxonomic database instead of a panel
+                         (nanopore or Illumina; needs minimap2)
       --samplesheet      Samplesheet CSV (run_id, platform, sample_id,
                          index_i7, index_i5, sample_type [, file_prefix])
       --primers          PCR1 primers TSV (name, direction, sequence)
@@ -67,7 +77,15 @@ workflow {
     // Fail on missing inputs here rather than inside a process, so the error
     // arrives immediately and names the parameter.
     def problems = []
-    if (!params.reference)   problems << "--reference is required"
+    // A panel or a database release: one of them, never both. The
+    // database route classifies against a release rather than competing
+    // reads across a panel (docs/REFERENCE_DATABASE.md).
+    if (!params.reference && !params.reference_database) {
+        problems << "one of --reference (a panel) or --reference_database (a release) is required"
+    }
+    if (params.reference && params.reference_database) {
+        problems << "--reference and --reference_database are alternatives: give one"
+    }
     if (!params.samplesheet) problems << "--samplesheet is required"
     // Not optional, whatever the placeholder machinery suggests. The
     // primer-trimmed panel is what ASSIGN competes reads against, and
@@ -106,6 +124,10 @@ workflow {
                       "--reads-per-sample 300" ],
         'test_ont': [ "${projectDir}/tests/data/ont/run",
                       "python3 tests/make_ont_fixture.py" ],
+        'test_db' : [ "${projectDir}/tests/data/db/run",
+                      "python3 tests/make_db_fixture.py" ],
+        'test_db_il': [ "${projectDir}/tests/data/db/run_il",
+                      "python3 tests/make_db_fixture.py" ],
     ]
     (workflow.profile ?: '').tokenize(',').each { prof ->
         def fx = fixtures[prof.trim()]
@@ -137,7 +159,15 @@ workflow {
     // it is re-read for every sample and imposes no length on the pairing.
     // Doing it here rather than at each call site means a new consumer
     // added later cannot reintroduce the bug.
-    ch_reference   = Channel.fromPath(params.reference,   checkIfExists: true).first()
+    // In database mode there is no panel: pre-flight gets the
+    // NO_REFERENCE placeholder in its place, and the release instead of
+    // NO_DATABASE. Each has its own placeholder name (see below).
+    ch_reference   = ( params.reference
+        ? Channel.fromPath(params.reference, checkIfExists: true)
+        : Channel.fromPath("${projectDir}/assets/NO_REFERENCE", checkIfExists: true) ).first()
+    ch_database    = ( params.reference_database
+        ? Channel.fromPath(params.reference_database, type: 'dir', checkIfExists: true)
+        : Channel.fromPath("${projectDir}/assets/NO_DATABASE", checkIfExists: true) ).first()
     ch_samplesheet = Channel.fromPath(params.samplesheet, checkIfExists: true).first()
     ch_index_map   = Channel.fromPath(params.index_map,   checkIfExists: true).first()
     ch_assay       = Channel.fromPath(params.assay,       checkIfExists: true).first()
@@ -166,7 +196,7 @@ workflow {
     ch_no_file = Channel.fromPath("${projectDir}/assets/NO_COMPARISON", checkIfExists: true).first()
 
     PREFLIGHT(ch_reference, ch_samplesheet, ch_runs, ch_index_map, ch_assay,
-              ch_primers, ch_mocks, ch_metadata)
+              ch_primers, ch_mocks, ch_metadata, ch_database)
 
     // The validation log is worth putting in front of the user rather than
     // leaving in the results directory to be found later.
@@ -230,7 +260,12 @@ workflow {
         }
 
     // -- the two read paths ----------------------------------------------
-    ILLUMINA_PATH(ch_illumina, ch_primers, ch_assay)
+    // In database mode Illumina pairs are not merged and prepped for a
+    // panel: they go straight to ASSIGN_DB_PAIRS below, so the panel
+    // route gets nothing.
+    ch_illumina_db    = params.reference_database ? ch_illumina : Channel.empty()
+    ch_illumina_panel = params.reference_database ? Channel.empty() : ch_illumina
+    ILLUMINA_PATH(ch_illumina_panel, ch_primers, ch_assay)
     NANOPORE_PATH(ch_nanopore_runs, ch_samplesheet, ch_assay,
                   PREFLIGHT.out.lookalikes)
 
@@ -252,7 +287,7 @@ workflow {
     ch_seqs = ILLUMINA_PATH.out.seqs
         .mix(NANOPORE_PATH.out.seqs)
     PREFLIGHT.out.summary
-        .combine(ch_seqs.count())
+        .combine(ch_seqs.mix(ch_illumina_db).count())
         .subscribe { _summary, n ->
             if (n == 0 && !workflow.session.isAborted()) {
                 error(
@@ -269,86 +304,134 @@ workflow {
             }
         }
 
-    ASSIGN(
-        ch_seqs,
-        // No .first() here, and it is checked rather than assumed.
-        // PREFLIGHT is invoked with nothing but value channels, and a
-        // process fed only value channels emits value channels - so
-        // the panel is already inexhaustible and .first() on it draws
-        // a "the operator first is useless" warning. That holds only
-        // while every PREFLIGHT input stays a value channel: make one
-        // of them a queue and this silently caps ASSIGN at one sample
-        // again. tests/test_nextflow.py::test_fanout_is_not_capped
-        // works that rule out for itself and fails if it stops being
-        // true.
-        PREFLIGHT.out.insert_fasta,
-        ch_reference,
-        ch_primers,
-        ch_assay,
-    )
+    if (params.reference_database) {
+        // -- database mode: classify consensus sequences ------------------
+        // One minimap2 index for the run, then one assignment per sample.
+        // The index is built from a value channel only, so its output is
+        // a value channel and pairs with every sample (see the .first()
+        // note above).
+        DB_INDEX(ch_database)
+        ASSIGN_DB(
+            ch_seqs,
+            ch_database,
+            DB_INDEX.out.index,
+            ch_primers,
+        )
+        ASSIGN_DB_PAIRS(
+            ch_illumina_db,
+            ch_database,
+            DB_INDEX.out.index,
+            ch_primers,
+            ch_assay,
+        )
+        // Run-level synthesis and the report, database mode's own: no
+        // standards or plasmids to calibrate against, so relative 18S
+        // abundance at the rank each call reached, judged against the
+        // blanks, with off-target fractions per well.
+        ch_run_id_db = ch_resolved.map { meta, files -> meta.run_id }.first()
+        SYNTHESISE_DB(
+            ch_run_id_db,
+            ASSIGN_DB.out.clusters.mix(ASSIGN_DB_PAIRS.out.clusters).collect(),
+            ASSIGN_DB.out.summary.mix(ASSIGN_DB_PAIRS.out.summary).collect(),
+            // Absent on an Illumina run; each has its own placeholder
+            // (see the NO_ placeholders above).
+            NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
+            NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT_DB")),
+            PREFLIGHT.out.dir,
+            ch_database,
+        )
+        // Every file report_db.py reads, as for the panel report.
+        // tests/test_nextflow.py::test_db_report_gets_what_it_reads.
+        REPORT_DB(
+            ch_run_id_db,
+            SYNTHESISE_DB.out.calls
+                .mix(SYNTHESISE_DB.out.wells,
+                     SYNTHESISE_DB.out.prevalence,
+                     SYNTHESISE_DB.out.qc)
+                .collect(),
+        )
+    } else {
+        ASSIGN(
+            ch_seqs,
+            // No .first() here, and it is checked rather than assumed.
+            // PREFLIGHT is invoked with nothing but value channels, and a
+            // process fed only value channels emits value channels - so
+            // the panel is already inexhaustible and .first() on it draws
+            // a "the operator first is useless" warning. That holds only
+            // while every PREFLIGHT input stays a value channel: make one
+            // of them a queue and this silently caps ASSIGN at one sample
+            // again. tests/test_nextflow.py::test_fanout_is_not_capped
+            // works that rule out for itself and fails if it stops being
+            // true.
+            PREFLIGHT.out.insert_fasta,
+            ch_reference,
+            ch_primers,
+            ch_assay,
+        )
 
-    // -- per run ----------------------------------------------------------
-    // Synthesis is a run-level step: detection limits come from the run's
-    // own blanks and the plate sensors need the whole plate, so the
-    // per-sample outputs are collected before it runs.
-    ch_run_id = ch_resolved.map { meta, files -> meta.run_id }.first()
+        // -- per run ----------------------------------------------------------
+        // Synthesis is a run-level step: detection limits come from the run's
+        // own blanks and the plate sensors need the whole plate, so the
+        // per-sample outputs are collected before it runs.
+        ch_run_id = ch_resolved.map { meta, files -> meta.run_id }.first()
 
-    SYNTHESISE(
-        ch_run_id,
-        ASSIGN.out.counts.collect(),
-        ASSIGN.out.summary.collect(),
-        ILLUMINA_PATH.out.summaries.collect().ifEmpty([]),
-        NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX")),
-        NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT")),
-        ch_samplesheet,
-        ch_reference,
-        PREFLIGHT.out.dir,
-    )
-
-    // Amplification efficiency, when the run carried mock communities.
-    if (params.mocks) {
-        CALIBRATE_MOCKS(
+        SYNTHESISE(
             ch_run_id,
-            ch_mocks,
             ASSIGN.out.counts.collect(),
+            ASSIGN.out.summary.collect(),
+            ILLUMINA_PATH.out.summaries.collect().ifEmpty([]),
+            NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX")),
+            NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT")),
+            ch_samplesheet,
             ch_reference,
             PREFLIGHT.out.dir,
         )
-    }
 
-    // Cross-run comparison. --comparison is a previous run's calls.tsv,
-    // and report.py reads the comparison.json that compare_runs.py makes
-    // from it - so it is compared here, not handed to the report raw.
-    // Passing the TSV straight through, as this once did, gave the report
-    // a file it could not parse. The previous run's label is left empty
-    // so compare_runs.py takes it from that file's own run_id column.
-    ch_comparison = ch_no_file
-    if (params.comparison) {
-        COMPARE_RUNS(
+        // Amplification efficiency, when the run carried mock communities.
+        if (params.mocks) {
+            CALIBRATE_MOCKS(
+                ch_run_id,
+                ch_mocks,
+                ASSIGN.out.counts.collect(),
+                ch_reference,
+                PREFLIGHT.out.dir,
+            )
+        }
+
+        // Cross-run comparison. --comparison is a previous run's calls.tsv,
+        // and report.py reads the comparison.json that compare_runs.py makes
+        // from it - so it is compared here, not handed to the report raw.
+        // Passing the TSV straight through, as this once did, gave the report
+        // a file it could not parse. The previous run's label is left empty
+        // so compare_runs.py takes it from that file's own run_id column.
+        ch_comparison = ch_no_file
+        if (params.comparison) {
+            COMPARE_RUNS(
+                SYNTHESISE.out.calls
+                    .combine(ch_run_id)
+                    .combine(Channel.fromPath(params.comparison, checkIfExists: true))
+                    .map { calls, rid, previous -> [ rid, calls, '', previous ] }
+            )
+            ch_comparison = COMPARE_RUNS.out.json.first()
+        }
+
+        // Every synthesis output report.py reads must be staged here - the
+        // report renders a section only when its file exists, so a missing
+        // one drops the section without a word. group_summary.tsv was missed
+        // that way. It is optional, and mix() of an empty channel adds
+        // nothing, so a run with no grouping still reports.
+        // tests/test_nextflow.py::test_report_gets_what_it_reads holds this.
+        REPORT(
+            ch_run_id,
             SYNTHESISE.out.calls
-                .combine(ch_run_id)
-                .combine(Channel.fromPath(params.comparison, checkIfExists: true))
-                .map { calls, rid, previous -> [ rid, calls, '', previous ] }
+                .mix(SYNTHESISE.out.calibration,
+                     SYNTHESISE.out.fates,
+                     SYNTHESISE.out.qc,
+                     SYNTHESISE.out.groups)
+                .collect(),
+            ch_comparison,
         )
-        ch_comparison = COMPARE_RUNS.out.json.first()
     }
-
-    // Every synthesis output report.py reads must be staged here - the
-    // report renders a section only when its file exists, so a missing
-    // one drops the section without a word. group_summary.tsv was missed
-    // that way. It is optional, and mix() of an empty channel adds
-    // nothing, so a run with no grouping still reports.
-    // tests/test_nextflow.py::test_report_gets_what_it_reads holds this.
-    REPORT(
-        ch_run_id,
-        SYNTHESISE.out.calls
-            .mix(SYNTHESISE.out.calibration,
-                 SYNTHESISE.out.fates,
-                 SYNTHESISE.out.qc,
-                 SYNTHESISE.out.groups)
-            .collect(),
-        ch_comparison,
-    )
 }
 
 workflow.onComplete {

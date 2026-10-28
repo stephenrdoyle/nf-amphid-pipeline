@@ -1,0 +1,9 @@
+run_id	platform	sample_id	index_i7	index_i5	sample_type
+DB01	nanopore	BLANK-01	TAAGGCGA	CTCTCTAT	neg_extraction
+DB01	nanopore	NTC-01	AGGCAGAA	CTCTCTAT	neg_ntc
+DB01	nanopore	S01	GGACTCCT	CTCTCTAT	unknown
+DB01	nanopore	S02	AAGAGGCA	CTCTCTAT	unknown
+DB01	nanopore	S03	GCTCATGA	CTCTCTAT	unknown
+DB01	nanopore	S04	GCGTAGTA	CTCTCTAT	unknown
+DB01	nanopore	S05	TACGCTGC	CTCTCTAT	unknown
+DB01	nanopore	S06	TAGCGCTC	CTCTCTAT	unknown

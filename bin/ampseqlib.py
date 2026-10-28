@@ -14,13 +14,14 @@ Standard library only, so the field profile has nothing to install.
 from __future__ import annotations
 
 import csv
-from array import array
 import glob
 import gzip
 import json
 import os
 import re
 from dataclasses import dataclass, field
+from itertools import compress
+from operator import sub
 
 # --------------------------------------------------------------------------
 # construct defaults, overridden by the assay config
@@ -764,50 +765,6 @@ def find_anchor_lookalikes(entries, anchors: dict, max_edits: int,
     return rows
 
 
-_Q = 5
-_BASE_CODE = {"A": 0, "C": 1, "G": 2, "T": 3}
-
-
-def _qgram_code(text: str, j: int) -> int:
-    """text[j:j+_Q] as a number in 0 .. 4**_Q - 1, or -1 if it holds
-    anything but A, C, G and T."""
-    code = 0
-    for c in text[j:j + _Q]:
-        b = _BASE_CODE.get(c)
-        if b is None:
-            return -1
-        code = code * 4 + b
-    return code
-
-
-def _expanded_seeds(pattern: str, max_edits: int,
-                    limit: int = 256) -> list[tuple[int, str]] | None:
-    """seed_pieces for a pattern holding IUPAC codes, each piece expanded
-    into the plain sequences it stands for - as (offset, piece) pairs, an
-    offset repeated once per expansion - or None if the pattern is too
-    short or a piece expands past `limit`.
-
-    Only for an index over plain text: there a degenerate piece matches
-    exactly where one of its expansions does, so the pigeonhole argument
-    holds piece by expanded piece. Database look-alikes carry Ns and other
-    codes from their source sequences, and without this every one of them
-    had to be tried at every anchor hit.
-    """
-    m, n = len(pattern), max_edits + 1
-    if max_edits < 0 or m < n or set(pattern) - set(IUPAC):
-        return None
-    cuts = [m * i // n for i in range(n + 1)]
-    out: list[tuple[int, str]] = []
-    for i in range(n):
-        variants = [""]
-        for c in pattern[cuts[i]:cuts[i + 1]]:
-            variants = [v + b for v in variants for b in IUPAC[c]]
-            if len(variants) > limit:
-                return None
-        out.extend((cuts[i], v) for v in variants)
-    return out
-
-
 class LookalikeMask:
     """Recognise a panel look-alike in a read, so it is not taken for an
     adapter.
@@ -823,51 +780,27 @@ class LookalikeMask:
 
     def __init__(self, contexts=()):
         self.contexts: list[str] = []
+        # The membership test is a set, not the list. With a panel's dozen
+        # contexts the list was fine; a database release lists ~46,000
+        # rows, and testing each against a growing list took six seconds
+        # in every splitting shard before a single read was read. The
+        # order kept - and so every search below - is unchanged.
+        seen: set[str] = set()
         for c in contexts:
             c = (c or "").upper()
-            if c and c not in self.contexts:
+            if c and c not in seen:
+                seen.add(c)
                 self.contexts.append(c)
                 rc = revcomp(c)
-                if rc not in self.contexts:
+                if rc not in seen:
+                    seen.add(rc)
                     self.contexts.append(rc)
         # One seeded search per context, at the tolerance covers() uses.
         self.searches = [SeededAnchorScan(c, max(4, len(c) // 8))
                          for c in self.contexts]
-        # And one index over all of them: seed piece -> the contexts it
-        # comes from. A panel has a handful of contexts; a reference
-        # database has tens of thousands, and trying each one per anchor
-        # hit cost a quarter of a second a hit. A context none of whose
-        # pieces occurs near the hit cannot match there (the pigeonhole
-        # argument SeededAnchorScan rests on), so only those the index
-        # names need trying. Contexts the argument does not cover are
-        # always tried.
-        self.by_piece: dict[str, list[int]] = {}
-        self.always: list[int] = []
-        for i, search in enumerate(self.searches):
-            pieces = search.seeds or _expanded_seeds(search.pattern, search.k)
-            if pieces is None:
-                self.always.append(i)
-                continue
-            for piece in {p for _, p in pieces}:
-                self.by_piece.setdefault(piece, []).append(i)
-        self.piece_lengths = sorted({len(p) for p in self.by_piece})
         self.widest = max(map(len, self.contexts), default=0)
-        # Second filter, the q-gram lemma: a context of length m found with
-        # at most k edits shares at least m - q + 1 - k*q of its q-grams
-        # with the read. A context named only by a chance piece shares far
-        # fewer, and is passed over without an alignment. Per context: its
-        # plain q-grams as codes, how many hold an IUPAC code (counted as
-        # shared, which keeps the bound safe), and the threshold.
-        self.qgrams: list[tuple[array, int, int]] = []
-        for c, search in zip(self.contexts, self.searches):
-            codes, amb = array("H"), 0
-            for j in range(len(c) - _Q + 1):
-                code = _qgram_code(c, j)
-                if code < 0:
-                    amb += 1
-                else:
-                    codes.append(code)
-            self.qgrams.append((codes, amb, len(c) - _Q + 1 - search.k * _Q))
+        self._index = (_ContextIndex(self.contexts)
+                       if len(self.contexts) > LOOKALIKE_INDEX_MIN else None)
 
     @classmethod
     def load(cls, path: str | None) -> "LookalikeMask":
@@ -891,38 +824,25 @@ class LookalikeMask:
         holding no exact piece of a context cannot match it and is passed
         over, and one that does is aligned only near those pieces. The
         answer is find_anchor_cost's, unchanged.
-
-        Which contexts are tried at all comes from the piece index: every
-        piece occurring in the stretch around the hit names its contexts,
-        and only those (and the few the index cannot cover) are aligned.
-        The stretch is the widest any context searches, so a context's own
-        stretch is never missed; the answer is unchanged.
         """
         widest = self.widest
-        lo_w = max(0, start - widest)
-        stretch = read[lo_w:end + widest]
-        plain = is_plain_acgt(stretch)
-        if plain:
-            found: set[int] = set(self.always)
-            by_piece = self.by_piece
-            for n in self.piece_lengths:
-                for j in range(len(stretch) - n + 1):
-                    ids = by_piece.get(stretch[j:j + n])
-                    if ids:
-                        found.update(ids)
-            seen = bytearray(4 ** _Q)
-            for j in range(len(stretch) - _Q + 1):
-                seen[_qgram_code(stretch, j)] = 1
-            tried = []
-            for i in sorted(found):
-                codes, amb, need = self.qgrams[i]
-                if need <= 0 or amb + sum(map(seen.__getitem__, codes)) >= need:
-                    tried.append(i)
-        else:
-            # An ambiguity code in the read can match where no exact piece
-            # does; the pigeonhole argument is off, so try every context.
-            tried = range(len(self.contexts))
-        for i in tried:
+        plain = is_plain_acgt(read[max(0, start - widest):end + widest])
+        if self._index is not None:
+            ws = max(0, start - widest)
+            todo = self._index.candidates(read[ws:end + widest],
+                                          start - ws, end - ws, widest,
+                                          plain)
+            if todo is not None:
+                return self._covers_by(todo, read, start, end, plain)
+        return self._covers_by(range(len(self.contexts)), read, start, end,
+                               plain)
+
+    def _covers_by(self, which, read: str, start: int, end: int,
+                   plain: bool) -> bool:
+        """covers() over the contexts numbered in `which`. With every
+        context, this is the original loop; the index only ever narrows
+        `which` to the contexts that could possibly match."""
+        for i in which:
             ctx, search = self.contexts[i], self.searches[i]
             lo = max(0, start - len(ctx))
             hi = min(len(read), end + len(ctx))
@@ -930,6 +850,185 @@ class LookalikeMask:
             if h is not None and lo + h[0] < end and lo + h[1] > start:
                 return True
         return False
+
+
+# Above this many contexts (both strands) covers() consults an index
+# rather than trying every context. A panel has a handful and the plain
+# loop is quicker than building the index; a database release has tens of
+# thousands, where the loop took 0.3 s per anchor hit - weeks for a
+# flow cell.
+LOOKALIKE_INDEX_MIN = 64
+
+
+class _ContextIndex:
+    """Which look-alike contexts could possibly match a stretch of read.
+
+    An exact filter, not a heuristic: every context it leaves out provably
+    has no alignment within its tolerance anywhere in the stretch, so
+    covers() gives the same answer with it as without it. It only saves
+    the work of finding that out one context at a time.
+
+    The argument is the pigeonhole principle, taken one step further than
+    SeededAnchorScan takes it. Cut a context into k + 2 disjoint pieces,
+    where k is its tolerance. An alignment with at most k edits can touch
+    at most k of them, so at least TWO pieces occur exactly in the read -
+    and in the right places relative to each other: between two exact
+    pieces the alignment can have gained or lost at most k bases, so their
+    offsets in the read differ from their offsets in the context by at
+    most k. Each piece occurrence gives a diagonal (read offset minus
+    context offset); a context is a candidate only when two of its piece
+    occurrences fall on diagonals within k of each other.
+
+    Why two pieces and not one. One exact piece - what SeededAnchorScan
+    uses - is the standard filter, and over the 31,000 contexts of a
+    database release it leaves ~1,200 candidates per anchor hit, because
+    the pieces are only 7-8bp and the stretch around a hit is ~140bp: a
+    random 7-mer is present about one time in 120. Requiring two on a
+    consistent diagonal leaves a median of ~35, none of which match on
+    real adapters. Three pieces (k + 3 shorter ones) was tried and is
+    slower: more, shorter pieces cost more to look up than they save.
+
+    How it is fast in pure Python. Every piece occurrence becomes one
+    integer, context * STRIDE + OFFSET + diagonal, produced by map() and
+    list.extend() rather than a Python loop. Sorting those integers puts
+    each context's occurrences side by side in diagonal order, and two
+    neighbours differing by at most kmax are a candidate pair - found with
+    map() and compress(), again without a Python loop. STRIDE keeps
+    different contexts' integers far enough apart that they can never
+    pair. A release's integers stay below 2**30, so the sort compares
+    them on the fast single-digit path. ~1 ms per anchor hit on an M1, against
+    ~300 ms for the plain loop over the same contexts.
+
+    Contexts the argument does not cover - too short to
+    cut, or too ambiguous to spell out (see _cut) - are always candidates.
+    """
+
+    STRIDE = 512
+
+    def __init__(self, contexts: list[str]):
+        post: dict[str, list[int]] = {}
+        self.always: list[int] = []
+        self.kmax = 0
+        self.offset = 0
+        cut = []
+        for i, ctx in enumerate(contexts):
+            k = max(4, len(ctx) // 8)
+            # Any length: the index only narrows the field, and a context
+            # over 64bp is still verified by find_anchor_cost, as before.
+            pieces = self._cut(ctx, k + 2)
+            if not pieces:
+                self.always.append(i)
+                continue
+            self.kmax = max(self.kmax, k)
+            cut.append((i, pieces))
+            self.offset = max(self.offset, max(a for a, _p in pieces))
+        for i, pieces in cut:
+            base = i * self.STRIDE + self.offset
+            for a, spellings in pieces:
+                for p in spellings:
+                    post.setdefault(p, []).append(base - a)
+        self.post = {p: tuple(v) for p, v in post.items()}
+        self.lengths = sorted({len(p) for p in self.post})
+        # The widest stretch whose integers stay clear of the next
+        # context's: diagonals run from -offset to the stretch length.
+        self.max_text = self.STRIDE - self.offset - self.kmax - 2
+
+    @staticmethod
+    def _cut(ctx: str, n: int):
+        """`ctx` in n contiguous pieces, as (offset, every plain-ACGT
+        spelling of the piece), or None.
+
+        A piece holding an ambiguity code is still an exact match where
+        the read has any base the code allows - that is how the aligner
+        scores it - so it is indexed under each such spelling. PR2 keeps
+        its ambiguity codes, and ~1,200 of a release's contexts carry
+        one; left out of the index they were tried on every call and
+        made it a hundred times slower. A piece with more than 1,024
+        spellings (five Ns) is not worth indexing, and its context is
+        always tried instead.
+        """
+        m = len(ctx)
+        if m < n:
+            return None
+        cuts = [m * i // n for i in range(n + 1)]
+        out = []
+        for i in range(n):
+            piece = ctx[cuts[i]:cuts[i + 1]]
+            spellings = [""]
+            for c in piece:
+                bases = IUPAC.get(c, "")
+                if not bases:
+                    return None
+                spellings = [s + b for s in spellings for b in bases]
+                if len(spellings) > 1024:
+                    return None
+            out.append((cuts[i], spellings))
+        return out
+
+    def candidates(self, text: str, start: int, end: int,
+                   widest: int, plain: bool = True) -> list[int] | None:
+        """Context numbers that could align within tolerance in `text`
+        OVERLAPPING text[start:end], in index order; None when `text` is
+        too long for the integer packing, so the caller tries every
+        context instead.
+
+        Why the overlap matters. covers() only answers yes for an
+        alignment that overlaps the anchor hit, and the stretch around a
+        hit is mostly something else - on a VESPA read, the 18S insert
+        begins ~37bp past the i5 anchor, and hundreds of near-identical
+        release contexts genuinely align there. Every one of them was a
+        candidate, was aligned, and was then rejected for not overlapping:
+        14 ms per hit. An alignment that does overlap has a bounded
+        position, and so do its exact pieces. If it starts at x, with at
+        most k edits its pieces' diagonals lie within k of x, and it ends
+        within k of x + m; overlapping [start, end) needs x < end and
+        x + m + k > start. So every piece diagonal d satisfies
+            start - m - 2k  <  d  <  end + k,
+        and a pair outside that range cannot belong to an overlapping
+        alignment. The widest context and largest tolerance make the
+        bound hold for all of them at once. ~2 ms per hit again.
+
+        A read with an ambiguity code near the hit (`plain` False) is
+        still indexed: the aligner lets a read's N match any base, so a
+        piece of read holding one is looked up under every spelling it
+        allows. Without this, one N sent the call to every context in
+        turn - three seconds for a single hit.
+        """
+        if len(text) > self.max_text:
+            return None
+        post, codes = self.post, []
+        extend = codes.extend
+        for L in self.lengths:
+            for i in range(len(text) - L + 1):
+                piece = text[i:i + L]
+                if plain:
+                    hit = post.get(piece)
+                    if hit:
+                        extend(map(i.__add__, hit))
+                    continue
+                spellings = [""]
+                for c in piece:
+                    spellings = [sp + b for sp in spellings
+                                 for b in IUPAC.get(c, "")]
+                    if len(spellings) > 256:
+                        return None
+                seen = set()
+                for sp in spellings:
+                    for code in post.get(sp, ()):
+                        if code not in seen:
+                            seen.add(code)
+                            codes.append(code + i)
+        out = set(self.always)
+        if len(codes) > 1:
+            codes.sort()
+            near = map((self.kmax + 1).__gt__, map(sub, codes[1:], codes))
+            stride, k = self.STRIDE, self.kmax
+            # Diagonal bounds, shifted into the packed integers.
+            lo = start - widest - 2 * k + self.offset
+            hi = end + k + self.offset
+            out.update(c // stride for c in compress(codes, near)
+                       if lo < c % stride < hi)
+        return sorted(out)
 
 
 # ASCII only, deliberately. str.isalnum() also accepts letters such as
@@ -1311,3 +1410,83 @@ def expected_errors(qual: str) -> float:
     for c in qual:
         total += 10.0 ** (-(ord(c) - 33) / 10.0)
     return total
+
+
+# --------------------------------------------------------------------------
+# reference database releases (--reference_database)
+# --------------------------------------------------------------------------
+#
+# A release is one directory built by the vespa-18s-refdb repository, and
+# its layout is the contract between the two (docs/REFERENCE_DATABASE.md
+# section 4.1). Pre-flight validates it and assignment reads it; both read
+# it through here, so the contract is written down once in code.
+
+# The nine PR2 ranks, shallowest first. taxonomy.tsv carries one column
+# for each, blank where PR2 has only a placeholder.
+RANKS = ["domain", "supergroup", "division", "subdivision", "class",
+         "order", "family", "genus", "species"]
+
+# What the pipeline reads. A release missing any of these cannot be used.
+REFDB_REQUIRED = ["manifest.json", "refdb.fasta", "taxonomy.tsv",
+                  "anchor_lookalikes.tsv", "resolution_nanopore.tsv"]
+# The rest of the contract: not read by the nanopore route, but their
+# absence means the release was not built the agreed way.
+REFDB_EXPECTED = ["members.tsv", "conflicts.tsv", "primer_fit.tsv"]
+
+LOOKALIKE_COLUMNS = ["seq_id", "anchor", "strand", "position", "edits",
+                     "context"]
+
+
+def load_release_manifest(release: str) -> dict:
+    """manifest.json of a release, or ValueError saying what is wrong."""
+    path = os.path.join(release, "manifest.json")
+    if not os.path.isfile(path):
+        raise ValueError(f"no manifest.json in {release}")
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is not valid JSON - {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return data
+
+
+def release_version(manifest: dict) -> str:
+    """The name every result carries: the build version, or the release
+    name when an older manifest has no version field."""
+    return str(manifest.get("version") or manifest.get("name") or "unknown")
+
+
+def read_fasta(path: str):
+    """(id, sequence) pairs; the id is the header up to the first space."""
+    name, parts = None, []
+    with open_text(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if name is not None:
+                    yield name, "".join(parts).upper()
+                name, parts = line[1:].split()[0], []
+            else:
+                parts.append(line)
+    if name is not None:
+        yield name, "".join(parts).upper()
+
+
+def open_text(path: str):
+    """A text handle on a plain or gzipped file."""
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return open(path, encoding="utf-8")
+
+
+def load_taxonomy(path: str) -> dict[str, dict[str, str]]:
+    """id -> {rank: name} over RANKS, blanks kept as ''."""
+    out = {}
+    with open_text(path) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            out[r["id"]] = {k: (r.get(k) or "").strip() for k in RANKS}
+    return out

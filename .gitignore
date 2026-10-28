@@ -25,6 +25,7 @@ preflight/
 split/
 demux/
 assign/
+assign_db/
 synthesis/
 *_report.html
 

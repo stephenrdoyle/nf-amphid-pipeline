@@ -1,0 +1,42 @@
+{
+ "name": "vespa18s_fixture-0.1.0",
+ "version": "fixture-0.1.0",
+ "built": "2026-10-28T00:00:00Z",
+ "code_commit": "fixture",
+ "marker": "18S rRNA V4",
+ "primers": {
+  "forward": {
+   "name": "AMPSEQ_VESPA18S_29F",
+   "sequence": "AGCAGCCGCGGTAATTCC"
+  },
+  "reverse": {
+   "name": "AMPSEQ_VESPA18S_21b8_I_R_Nmod",
+   "sequence": "TCCGTCAATTYCTTNAASTTTC"
+  },
+  "max_edits_in_silico": 2
+ },
+ "insert": "between the primers; primers not included",
+ "anchors": {
+  "i5_inner_anchor": "TCGTCGGCAGCGTC",
+  "i7_inner_anchor": "CCGAGCCCACGAGAC"
+ },
+ "lookalike_max_edits": 3,
+ "illumina_read_length": 150,
+ "illumina_windows": [
+  132,
+  128
+ ],
+ "counts": {
+  "records": 22
+ },
+ "files": {
+  "anchor_lookalikes.tsv": "83cc8a3ebe2a71f05da33774eeca740757ba160a739c50b2f422ff1f367b37a3",
+  "conflicts.tsv": "2a1fcc86813d2483c9f736245c02246673be832889d87891b380c4e4163ad71b",
+  "members.tsv": "5590daacc644c8aaddb419ae89252ce21e5bb3f75673844a11072273df0ac16b",
+  "primer_fit.tsv": "0e09820c562623fa449523fd300a4aa80bc4e894ee3ad02cc5408a980c8910b2",
+  "refdb.fasta": "cf6cc9e923a87b368efeb6e36a51b063269495a40b4899693f32edb90dbedd2d",
+  "resolution_illumina_150x150.tsv": "3d62b8a7368c270cee87645a14d8f75a57acdaba0da96585bbf5d67ace340ff4",
+  "resolution_nanopore.tsv": "3d62b8a7368c270cee87645a14d8f75a57acdaba0da96585bbf5d67ace340ff4",
+  "taxonomy.tsv": "0171953f51a53dd37e136779642d401ebbd5ae8d4825ca58eaa537ef2fcd6016"
+ }
+}

@@ -1058,6 +1058,36 @@ def test_fixture_reads_are_checked() -> None:
           cmds and not bad, "; ".join(bad) or "no commands found")
 
 
+def test_db_report_gets_what_it_reads() -> None:
+    """REPORT_DB must be handed every file report_db.py reads.
+
+    The same failure test_report_gets_what_it_reads guards for the panel
+    report, in database mode's own pair of tools: a synthesis file the
+    report reads but main.nf never stages is a report that fails, or one
+    that renders without the section.
+    """
+    print("\nthe database-mode report is given what it reads")
+    with open(os.path.join(ROOT, "bin", "report_db.py"), encoding="utf-8") as fh:
+        reads = set(re.findall(r'os\.path\.join\(d,\s*"([^"]+)"\)', fh.read()))
+    with open(os.path.join(ROOT, "modules", "local", "synthesise_db.nf"),
+              encoding="utf-8") as fh:
+        emits = dict(re.findall(
+            r'path\s+"synthesis/([^"]+)"\s*,\s*emit:\s*(\w+)', fh.read()))
+    with open(os.path.join(ROOT, "main.nf"), encoding="utf-8") as fh:
+        main_text = strip_comments(fh.read())
+    call = main_text[main_text.find("REPORT_DB("):]
+    call = call[: call.find("\n        )") + 1]
+    check("report_db.py's synthesis inputs were found", len(reads) >= 3,
+          str(sorted(reads)))
+    unknown = sorted(f for f in reads if f not in emits)
+    check("every file the database report reads is a SYNTHESISE_DB output",
+          not unknown, str(unknown))
+    missing = sorted(f for f in reads if f in emits
+                     and f"SYNTHESISE_DB.out.{emits[f]}" not in call)
+    check("and every one of them is passed to REPORT_DB", not missing,
+          ", ".join(missing))
+
+
 def main() -> int:
     test_includes_resolve()
     test_params_declared()
@@ -1076,6 +1106,7 @@ def main() -> int:
     test_stubs_present()
     test_ids_not_cut_at_a_dot()
     test_report_gets_what_it_reads()
+    test_db_report_gets_what_it_reads()
     test_fixture_reads_are_checked()
 
     print(f"\n{'='*62}")

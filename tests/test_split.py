@@ -1130,6 +1130,180 @@ def test_seeded_scan_matches_reference() -> None:
           f"seeded {len(real) / (t2 - t1):.0f} reads/s (one core)")
 
 
+DB_RELEASE = ("/Users/sd21/Documents/WORK/informatics_workbook/"
+              "vespa-18s-refdb/releases/vespa18s_v0.4.0")
+
+
+def test_indexed_lookalike_mask() -> None:
+    """A database-sized mask answers exactly as the plain loop does.
+
+    A panel's mask holds a handful of contexts and covers() tries each in
+    turn. A database release holds ~46,000 rows, where that loop costs
+    0.3 s per anchor hit, so above LOOKALIKE_INDEX_MIN contexts covers()
+    first asks an index which contexts could possibly match and tries
+    only those. The index is meant to be exact - it leaves out only
+    contexts with no alignment in tolerance - so the claim is checked
+    call for call against the loop over every context (_covers_by with
+    all of them), on hits that are look-alikes as well as hits that are
+    not, so a filter that dropped real candidates would show.
+    """
+    print("\nindexed look-alike mask matches the plain loop")
+    import time
+    import ampseqlib as al
+    cfg = sc.load_assay(ASSAY)
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+    rc = dx.revcomp
+    rng = random.Random(4242)
+
+    def rand(n):
+        return "".join(rng.choice("ACGT") for _ in range(n))
+
+    def mutate(s, n):
+        s = list(s)
+        for _ in range(n):
+            if not s:
+                break
+            j = rng.randrange(len(s))
+            op = rng.random()
+            if op < 0.5:
+                s[j] = rng.choice("ACGT")
+            elif op < 0.75:
+                del s[j]
+            else:
+                s.insert(j, rng.choice("ACGT"))
+        return "".join(s)
+
+    # 150 inserts, each carrying an anchor near-copy at 0-3 edits: well
+    # over the index threshold once both strands are counted.
+    inserts = []
+    for k in range(150):
+        anchor = rng.choice((a5, a7))
+        inserts.append((f"ins{k}", rand(rng.randint(30, 200))
+                        + mutate(anchor, rng.randint(0, 3))
+                        + rand(rng.randint(30, 200))))
+    lk = al.find_anchor_lookalikes(
+        inserts, {"i5_inner_anchor": a5, "i7_inner_anchor": a7},
+        al.LOOKALIKE_MAX_EDITS)
+    mask = al.LookalikeMask(r["context"] for r in lk)
+    check(f"synthetic mask is indexed ({len(mask.contexts)} contexts)",
+          mask._index is not None)
+
+    def every(read, s, e):
+        return mask._covers_by(range(len(mask.contexts)), read, s, e,
+                               al.is_plain_acgt(read[max(0, s - mask.widest):
+                                                     e + mask.widest]))
+
+    def idx():
+        return rand(8)
+
+    calls = diff = positive = 0
+    for _ in range(600):
+        name, ins = rng.choice(inserts)
+        unit = sim.build_molecule(mutate(ins, rng.randint(0, 12)), idx(),
+                                  idx(), 2, cfg)
+        read = rc(unit) if rng.random() < 0.5 else unit
+        if rng.random() < 0.3:
+            read = read + rc(sim.build_molecule(rand(300), idx(), idx(), 2,
+                                                cfg))
+        if rng.random() < 0.05:
+            j = rng.randrange(len(read))
+            read = read[:j] + "N" + read[j + 1:]
+        spots = [(s, e) for pat in (a5, a7, rc(a5), rc(a7))
+                 for s, e in sc.scan_all(read, pat, 3)]
+        # and intervals that are not anchor hits at all
+        spots += [(j, j + rng.randint(1, 20))
+                  for j in rng.sample(range(len(read)), 3)]
+        for s, e in spots:
+            want = every(read, s, e)
+            calls += 1
+            positive += want
+            if mask.covers(read, s, e) != want:
+                diff += 1
+    check(f"{calls} calls on noisy concatemers ({positive} covered): "
+          "indexed covers() == plain loop", diff == 0 and positive > 50,
+          f"{diff} differ, {positive} positive")
+
+    # The real release, when it is on this machine: its own mask, real
+    # adapter hits, and its own look-alikes inside noisy reads.
+    path = os.path.join(DB_RELEASE, "anchor_lookalikes.tsv")
+    if not os.path.exists(path):
+        print("  skip database release: not on this machine")
+        return
+    t0 = time.time()
+    big = al.LookalikeMask.load(path)
+    print(f"       release mask: {len(big.contexts)} contexts, "
+          f"built in {time.time() - t0:.1f} s")
+    rows = al.read_table(path)
+    rng.shuffle(rows)
+    reads = []
+    for r in rows[:200]:
+        ctx = r["context"]
+        core = mutate(ctx, rng.randint(0, 6))
+        unit = sim.build_molecule(rand(rng.randint(20, 200)) + core
+                                  + rand(rng.randint(20, 200)),
+                                  idx(), idx(), 2, cfg)
+        reads.append(rc(unit) if rng.random() < 0.5 else unit)
+    # VESPA-shaped reads: release inserts behind the primer, where the
+    # 18S next to the adapter genuinely matches many contexts.
+    fa = os.path.join(DB_RELEASE, "refdb.fasta")
+    with open(fa) as fh:
+        inserts = [ln.strip() for i, ln in enumerate(fh) if i % 194 == 1]
+    for ins in inserts[:150]:
+        unit = sim.build_molecule("AGCAGCCGCGGTAATTCC" + ins
+                                  + "GAAACTTAAAGGAATTGACGGA", idx(), idx(),
+                                  2, cfg)
+        reads.append(mutate(rc(unit) if rng.random() < 0.5 else unit,
+                            len(unit) // 40))
+    if os.path.isdir(REAL_READS):
+        reads += _real_reads(100)
+    calls = diff = positive = 0
+    t_idx = t_all = 0.0
+    for read in reads:
+        for pat in (a5, a7, rc(a5), rc(a7)):
+            for s, e in sc.scan_all(read, pat, 2):
+                plain = al.is_plain_acgt(read[max(0, s - big.widest):
+                                              e + big.widest])
+                t = time.time()
+                got = big.covers(read, s, e)
+                t_idx += time.time() - t
+                if calls < 60:
+                    t = time.time()
+                    want = big._covers_by(range(len(big.contexts)), read,
+                                          s, e, plain)
+                    t_all += time.time() - t
+                else:
+                    want = None
+                calls += 1
+                positive += got
+                if want is not None and got != want:
+                    diff += 1
+    # The plain loop is too slow to run on every call; the first 60 are
+    # compared outright, and below, for a dozen reads, every context is
+    # tried on its own: any whose best alignment overlaps the hit (the
+    # one thing covers() asks) must be among the index's candidates.
+    miss = 0
+    for read in reads[:6] + reads[-6:]:
+        for pat in (a5, a7, rc(a5), rc(a7)):
+            for s, e in sc.scan_all(read, pat, 2):
+                ws = max(0, s - big.widest)
+                text = read[ws:e + big.widest]
+                plain = al.is_plain_acgt(text)
+                cand = set(big._index.candidates(text, s - ws, e - ws,
+                                                 big.widest, plain))
+                for i in range(len(big.contexts)):
+                    if i not in cand and big._covers_by([i], read, s, e,
+                                                        plain):
+                        miss += 1
+    check(f"release mask: {calls} anchor hits ({positive} covered), first "
+          "60 identical to the plain loop", diff == 0 and positive > 0,
+          f"{diff} differ")
+    check("release mask: no context whose best alignment overlaps the hit "
+          "was left out of the candidates (12 reads, every context)",
+          miss == 0, f"{miss} missed")
+    print(f"       per call: indexed {1000 * t_idx / max(1, calls):.2f} ms, "
+          f"plain loop {1000 * t_all / 60:.0f} ms")
+
+
 def test_indexed_mask_matches_reference() -> None:
     """The indexed look-alike mask answers exactly as trying every context.
 
@@ -1210,8 +1384,8 @@ def test_indexed_mask_matches_reference() -> None:
           f"({covered} covered)", not bad, str(bad[:2]))
     n_amb = sum(bool(set(c) - set("ACGT")) for c in mask.contexts)
     check(f"contexts with IUPAC codes ({n_amb}) are indexed, not tried at "
-          f"every hit", n_amb > 0 and not mask.always,
-          f"{len(mask.always)} always tried")
+          f"every hit", n_amb > 0 and not mask._index.always,
+          f"{len(mask._index.always)} always tried")
 
 
 def main() -> int:
@@ -1227,6 +1401,7 @@ def main() -> int:
     test_cutting_preserves_indices()
     test_panel_lookalikes_are_not_junctions()
     test_seeded_scan_matches_reference()
+    test_indexed_lookalike_mask()
     test_indexed_mask_matches_reference()
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

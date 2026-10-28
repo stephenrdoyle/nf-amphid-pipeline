@@ -1,0 +1,96 @@
+{
+  "_comment": [
+    "Assay definition for the VESPA 18S V4 protocol (Owens et al. 2024,",
+    "Nat Commun 15:402) run through amphid's database mode.",
+    "",
+    "The library is the same two-step Nextera construct as ampseq_helminth,",
+    "with the same tandem-duplicated AMPSEQ indices, so the library and",
+    "indexing sections are copied from it unchanged: splitting and",
+    "demultiplexing are primer-agnostic and work on the inner anchors alone.",
+    "",
+    "What differs is what is NOT here. The protocol has no control plasmids",
+    "and no quantification standards, so there is no control tag (an empty",
+    "sequence) and no quantification section. Its reference is a database",
+    "release given with --reference_database, not a panel, and the primers",
+    "are checked against that release's manifest.",
+    "",
+    "Use with --reference_database only. A panel run needs a control tag to",
+    "separate targets from control plasmids and will refuse this file."
+  ],
+  "name": "vespa18s_v4",
+  "version": "0.1.0",
+  "description": "VESPA 18S V4 (29F / 21b8_I_R_Nmod), two-step Nextera PCR, tandem-duplicated dual indices; no control plasmids, no quantification standards",
+  "control_tag": {
+    "_comment": [
+      "None: the protocol has no control plasmids."
+    ],
+    "sequence": "",
+    "max_edits": 3
+  },
+  "library": {
+    "_comment": [
+      "Two-step PCR. PCR1 adds the Nextera overhangs to locus-specific primers;",
+      "PCR2 adds P5/P7 tails and the tandem-duplicated indices.",
+      "",
+      "After orientation normalisation to the i5-forward strand, both indices",
+      "read in the same orientation as the index list: the i5 primer carries",
+      "the index forward, and the i7 primer carries its reverse complement,",
+      "which the top strand reverses back.",
+      "",
+      "The 19bp mosaic end AGATGTGTATAAGAGACAG is shared by both overhangs, so",
+      "it cannot identify which end of a molecule is being read. The anchors",
+      "to use are the discriminating portions abutting each index window."
+    ],
+    "pcr1_overhang_fwd": "TCGTCGGCAGCGTCAGATGTGTATAAGAGACAG",
+    "pcr1_overhang_rev": "GTCTCGTGGGCTCGGAGATGTGTATAAGAGACAG",
+    "mosaic_end": "AGATGTGTATAAGAGACAG",
+    "p5_tail": "AATGATACGGCGACCACCGAGATCTACAC",
+    "p7_tail": "CAAGCAGAAGACGGCATACGAGAT",
+    "i5_inner_anchor": "TCGTCGGCAGCGTC",
+    "i7_inner_anchor": "CCGAGCCCACGAGAC",
+    "reference_extent": "full_amplicon"
+  },
+  "indexing": {
+    "_comment": [
+      "barcode_repeats 2 is the AMPSEQ tandem design; 1 is a conventional",
+      "single index at each end. Both are dual-index. The difference is that",
+      "the duplication is indel insurance: an indel makes one copy",
+      "uninformative and the other carries the read, and a frame slip yields",
+      "two copies that disagree, which is what detects it. With one copy",
+      "there is no second observation.",
+      "",
+      "allow_indels is false regardless, because the i7 set's minimum edit",
+      "distance is only 2 - it tolerates one substitution but zero indels.",
+      "",
+      "The index map encodes plate position: i5 gives the row (A-P), i7 the",
+      "column (1-24). So well is derived, never recorded."
+    ],
+    "index_map": "assets/index_map.tsv",
+    "barcode_repeats": 2,
+    "allow_indels": false,
+    "require_copy_agreement": true,
+    "accept_single_end": false,
+    "position_encoded_in_index": true
+  },
+  "tolerances": {
+    "_comment": [
+      "Tuning rather than identity. Tightening these makes pre-flight fussier;",
+      "loosening lets more through."
+    ],
+    "corr_factor_min": 0.1,
+    "corr_factor_max": 10.0,
+    "min_tag_length_warn": 12
+  },
+  "error_profiles": {
+    "_comment": [
+      "Nominal per-base error rates, used to forecast tag detection in the",
+      "pre-flight report so a decoy that is reliable on Illumina but marginal",
+      "under a fast basecalling model is known in advance rather than",
+      "discovered in the data."
+    ],
+    "illumina": 0.001,
+    "nanopore_sup": 0.01,
+    "nanopore_hac": 0.02,
+    "nanopore_fast": 0.05
+  }
+}
