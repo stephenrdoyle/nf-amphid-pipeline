@@ -1304,6 +1304,90 @@ def test_indexed_lookalike_mask() -> None:
           f"plain loop {1000 * t_all / 60:.0f} ms")
 
 
+def test_indexed_mask_matches_reference() -> None:
+    """The indexed look-alike mask answers exactly as trying every context.
+
+    A reference database's mask holds tens of thousands of contexts, and
+    covers() used to try each one at every anchor hit. It now tries only
+    those a seed-piece index names and the q-gram lemma does not rule out
+    - both bounds that cannot drop a context within tolerance. Checked
+    here against the definition itself, find_anchor_cost on each context
+    in turn, over junctions, embedded look-alikes with edits, contexts
+    carrying IUPAC codes (as database sequences do), and reads with N.
+    """
+    print("\nindexed look-alike mask matches trying every context")
+    import ampseqlib as al
+    cfg = sc.load_assay(ASSAY)
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+    rng = random.Random(2071)
+
+    def rand(n):
+        return "".join(rng.choice("ACGT") for _ in range(n))
+
+    def mutate(seq, n):
+        s = list(seq)
+        for _ in range(n):
+            j = rng.randrange(len(s))
+            op = rng.random()
+            if op < 0.5:
+                s[j] = rng.choice("ACGT")
+            elif op < 0.75:
+                s.insert(j, rng.choice("ACGT"))
+            else:
+                del s[j]
+        return "".join(s)
+
+    # Contexts as find_anchor_lookalikes writes them: insert, a near-copy
+    # of an anchor, insert. Some carry IUPAC codes, as database ones do.
+    contexts = []
+    for _ in range(400):
+        mid = mutate(rng.choice((a5, a7)), rng.randint(0, 3))
+        ctx = rand(24) + mid + rand(24)
+        if rng.random() < 0.15:
+            ctx = "".join(rng.choice("NRYS") if rng.random() < 0.03 else c
+                          for c in ctx)
+        contexts.append(ctx)
+    mask = al.LookalikeMask(contexts)
+
+    def reference(read, start, end):
+        for ctx in mask.contexts:
+            lo = max(0, start - len(ctx))
+            hi = min(len(read), end + len(ctx))
+            h = al.find_anchor_cost(read[lo:hi], ctx, max(4, len(ctx) // 8))
+            if h is not None and lo + h[0] < end and lo + h[1] > start:
+                return True
+        return False
+
+    bad, covered, n = [], 0, 0
+    for _ in range(600):
+        kind = rng.random()
+        if kind < 0.4:      # a real junction: tail, index, anchor, insert
+            read = (rand(rng.randint(0, 150)) + cfg["p5_tail"] + rand(16)
+                    + a5 + rand(rng.randint(20, 150)))
+            start = read.rfind(a5)
+        else:               # a look-alike, with edits, somewhere in insert
+            ctx = rng.choice(contexts)
+            pre = rand(rng.randint(0, 120))
+            read = pre + mutate(ctx.replace("N", "A"), rng.randint(0, 8)) \
+                + rand(rng.randint(0, 120))
+            start = len(pre) + 24
+        if kind > 0.9:      # an N near the hit: the unindexed path
+            j = rng.randrange(max(0, start - 30), min(len(read), start + 40))
+            read = read[:j] + "N" + read[j + 1:]
+        end = min(len(read), start + 14)
+        got, want = mask.covers(read, start, end), reference(read, start, end)
+        n += 1
+        covered += want
+        if got != want:
+            bad.append((read, start, end, got, want))
+    check(f"indexed covers() matches every-context reference on {n} hits "
+          f"({covered} covered)", not bad, str(bad[:2]))
+    n_amb = sum(bool(set(c) - set("ACGT")) for c in mask.contexts)
+    check(f"contexts with IUPAC codes ({n_amb}) are indexed, not tried at "
+          f"every hit", n_amb > 0 and not mask._index.always,
+          f"{len(mask._index.always)} always tried")
+
+
 def main() -> int:
     test_earlier_worse_anchor_is_not_skipped()
     test_split_accounting()
@@ -1318,6 +1402,7 @@ def main() -> int:
     test_panel_lookalikes_are_not_junctions()
     test_seeded_scan_matches_reference()
     test_indexed_lookalike_mask()
+    test_indexed_mask_matches_reference()
     print(f"\n{'='*62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

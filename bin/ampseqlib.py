@@ -899,7 +899,7 @@ class _ContextIndex:
     them on the fast single-digit path. ~1 ms per anchor hit on an M1, against
     ~300 ms for the plain loop over the same contexts.
 
-    Contexts the argument does not cover - longer than 64bp, too short to
+    Contexts the argument does not cover - too short to
     cut, or too ambiguous to spell out (see _cut) - are always candidates.
     """
 
@@ -913,7 +913,9 @@ class _ContextIndex:
         cut = []
         for i, ctx in enumerate(contexts):
             k = max(4, len(ctx) // 8)
-            pieces = self._cut(ctx, k + 2) if len(ctx) <= 64 else None
+            # Any length: the index only narrows the field, and a context
+            # over 64bp is still verified by find_anchor_cost, as before.
+            pieces = self._cut(ctx, k + 2)
             if not pieces:
                 self.always.append(i)
                 continue
@@ -941,8 +943,8 @@ class _ContextIndex:
         scores it - so it is indexed under each such spelling. PR2 keeps
         its ambiguity codes, and ~1,200 of a release's contexts carry
         one; left out of the index they were tried on every call and
-        made it a hundred times slower. A piece with more than 64
-        spellings (four Ns) is not worth indexing, and its context is
+        made it a hundred times slower. A piece with more than 1,024
+        spellings (five Ns) is not worth indexing, and its context is
         always tried instead.
         """
         m = len(ctx)
@@ -958,7 +960,7 @@ class _ContextIndex:
                 if not bases:
                     return None
                 spellings = [s + b for s in spellings for b in bases]
-                if len(spellings) > 64:
+                if len(spellings) > 1024:
                     return None
             out.append((cuts[i], spellings))
         return out
