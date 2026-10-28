@@ -324,6 +324,14 @@ def test_lca_and_floors() -> None:
                                   "identity": 0.9}, ptax, 6)
     check("stopped above family by the floors: unclassified",
           label == "unclassified, 90% to Haemonchus", label)
+    btax = {"B": dict(zip(al.RANKS, "Bacteria;Bacteroidetes;Bacteroidetes_X;"
+                          "Bacteroidia;Bacteroidales;Prevotellaceae;"
+                          "Prevotellaceae_X;Prevotellaceae_XX;"
+                          "Prevotellaceae_XX_sp.".split(";")))}
+    _t, label = adb.label_for({"best_hit": "B", "depth": 4, "lca_depth": 8,
+                               "identity": 0.9}, btax, 6)
+    check("the nearest record is named past placeholders",
+          label == "unclassified, 90% to Prevotellaceae", label)
 
 
 def test_floor_parsing() -> None:

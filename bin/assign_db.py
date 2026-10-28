@@ -543,7 +543,12 @@ def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
     lin = tax.get(call["best_hit"], {})
     d = call["depth"]
     taxon = lin.get(RANKS[d], "") if d >= 0 else ""
-    near = lin.get("genus") or deepest_named(lin) or call["best_hit"] or "nothing"
+    # The nearest record named by its deepest real name: genus if it has
+    # one, else up the tree past any placeholder ("90% to Prevotellaceae",
+    # not "90% to Prevotellaceae_X").
+    near = next((lin.get(r) for r in ("genus",) + tuple(reversed(RANKS[:7]))
+                 if lin.get(r) and not is_placeholder(lin.get(r))),
+                "") or deepest_named(lin) or call["best_hit"] or "nothing"
     if d >= label_depth:
         if not is_placeholder(taxon):
             return taxon, taxon
