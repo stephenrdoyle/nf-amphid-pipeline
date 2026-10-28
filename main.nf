@@ -243,19 +243,31 @@ workflow {
     // skipped and Nextflow prints "Complete". That happened: a
     // -stub-run reported success having executed PREFLIGHT and nothing
     // else, and it read as a passing test of the whole DAG.
+    //
+    // The guard fires only once pre-flight has PASSED, and not on a run
+    // that is being stopped. As a bare ifEmpty it also fired whenever
+    // pre-flight failed or the run was interrupted - every branch is
+    // empty then too - and added a second, wrong explanation about
+    // platform columns under the real one.
     ch_seqs = ILLUMINA_PATH.out.seqs
         .mix(NANOPORE_PATH.out.seqs)
-        .ifEmpty { error(
-            "no sample reached assignment.\n" +
-            "  Both platform branches are empty, so nothing after " +
-            "pre-flight would run.\n" +
-            "  The Illumina branch takes rows of " +
-            "preflight/file_resolution.tsv whose platform is " +
-            "'illumina';\n" +
-            "  the nanopore branch takes rows of the run manifest whose " +
-            "platform is 'nanopore'.\n" +
-            "  Check that the samplesheet and the run manifest agree on " +
-            "the platform column.") }
+    PREFLIGHT.out.summary
+        .combine(ch_seqs.count())
+        .subscribe { _summary, n ->
+            if (n == 0 && !workflow.session.isAborted()) {
+                error(
+                    "no sample reached assignment.\n" +
+                    "  Both platform branches are empty, so nothing after " +
+                    "pre-flight would run.\n" +
+                    "  The Illumina branch takes rows of " +
+                    "preflight/file_resolution.tsv whose platform is " +
+                    "'illumina';\n" +
+                    "  the nanopore branch takes rows of the run manifest " +
+                    "whose platform is 'nanopore'.\n" +
+                    "  Check that the samplesheet and the run manifest agree " +
+                    "on the platform column.")
+            }
+        }
 
     ASSIGN(
         ch_seqs,

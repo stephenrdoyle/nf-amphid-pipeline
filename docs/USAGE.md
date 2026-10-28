@@ -42,6 +42,51 @@ disconnect kills the head process and orphans the LSF jobs.
 `-resume` picks up where a killed or failed run stopped. Splitting,
 demultiplexing and assignment are all resumable at task granularity.
 
+### 1.1 In the field: a laptop, no farm, no network
+
+Every tool in `bin/` is standard-library Python 3, so a laptop needs only
+**Python 3**, **Java 17+** and **Nextflow** - no conda, no containers, no
+plugins. Set it up **while you still have internet**: Nextflow downloads
+its own runtime the first time it runs, and cannot do so offline.
+
+Before leaving:
+
+```bash
+nextflow -version                                   # fetches the runtime; needs network
+nextflow run . -profile test,field                  # needs the fixture reads, see the README
+nextflow run . -profile test_ont,field
+```
+
+In the field:
+
+```bash
+export NXF_OFFLINE=true
+export NXF_ANSI_LOG=false
+nextflow run . -profile field \
+    --reference reference.tsv --samplesheet samplesheet.tsv \
+    --runs runs.tsv --primers primers.tsv --spiked --outdir results
+```
+
+`NXF_OFFLINE=true` stops Nextflow checking for updates, which offline
+otherwise waits for a timeout. `NXF_ANSI_LOG=false` swaps the live,
+redrawing progress display for plain lines - worth setting on the farm
+too. The live display redraws everything printed during a run, and once
+pre-flight's warnings plus the progress table are taller than the
+terminal, the warnings are printed again on every refresh. Plain output
+shows them once, at the start, and reads the same in a log file or after
+an ssh drop. Put both lines in `~/.zprofile` so every terminal has them. `-profile field` runs on the laptop's own
+cores with no farm time limits, deletes `work/` once a run succeeds, and
+hard-links results instead of copying them, so a run is not stored
+twice. Keep `--outdir` on the same disk as the folder you launch from:
+hard links cannot cross disks.
+
+Plan disk for a split nanopore run larger than the run itself while it
+is in progress. Splitting is the slow stage on a laptop; it divides by
+MinKNOW batch file, so all cores are used. Basecalling quality matters
+more in the field than anything here: on simulated plates, FAST rather
+than HAC basecalling cost about five points of correctly resolved
+barcode ends and doubled the wrong-sample calls.
+
 ---
 
 ## 2. Input files

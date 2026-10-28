@@ -90,7 +90,20 @@ process PREFLIGHT {
         ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
         ${idx_edit} \\
         ${tag_edits} ${exp_tag} ${reps} \\
-        --outdir preflight
+        --outdir preflight > preflight_console.txt 2>&1 || {
+        # The report reaches the terminal ONCE. Left on stdout and stderr,
+        # Nextflow quoted it twice in its error - as command output and as
+        # command error - and repeated the whole error in its live display.
+        # So the console copy goes to a file, and on failure the report is
+        # given once, as the error. On success main.nf prints it instead.
+        if [ -s preflight/validation.log ]; then
+            cat preflight/validation.log >&2
+            tail -n 1 preflight_console.txt >&2
+        else
+            cat preflight_console.txt >&2
+        fi
+        exit 1
+    }
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
@@ -144,7 +157,20 @@ process PREFLIGHT {
         ${prim} ${mock_arg} ${meta_arg} ${base_arg} ${read_len} \\
         ${idx_edit} \\
         ${tag_edits} ${exp_tag} ${reps} \\
-        --outdir preflight
+        --outdir preflight > preflight_console.txt 2>&1 || {
+        # The report reaches the terminal ONCE. Left on stdout and stderr,
+        # Nextflow quoted it twice in its error - as command output and as
+        # command error - and repeated the whole error in its live display.
+        # So the console copy goes to a file, and on failure the report is
+        # given once, as the error. On success main.nf prints it instead.
+        if [ -s preflight/validation.log ]; then
+            cat preflight/validation.log >&2
+            tail -n 1 preflight_console.txt >&2
+        else
+            cat preflight_console.txt >&2
+        fi
+        exit 1
+    }
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
