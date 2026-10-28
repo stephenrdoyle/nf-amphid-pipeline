@@ -259,6 +259,8 @@ def write_release(outdir: str, species: dict, version: str = "fixture-0.1.0") ->
         "anchors": {"i5_inner_anchor": "TCGTCGGCAGCGTC",
                     "i7_inner_anchor": "CCGAGCCCACGAGAC"},
         "lookalike_max_edits": al.LOOKALIKE_MAX_EDITS,
+        "illumina_read_length": 150,
+        "illumina_windows": [150 - len(FWD[1]), 150 - len(REV[1])],
         "counts": {"records": len(records)},
         "files": files,
     }
@@ -289,6 +291,34 @@ def expected_call(species: dict, source: str) -> tuple[str, str]:
     genus_in = any(not v["held_out"] and v["lineage"][7] == lin[7]
                    for v in species.values())
     return ("genus", lin[7]) if genus_in else ("family", lin[6])
+
+
+def write_illumina(run_dir: str, sheet: list, species: dict, cfg: dict,
+                   rng: random.Random, length: int = 150) -> None:
+    """Paired 2x150 reads per sample, each mate reading in from its end
+    of the amplicon and into the adapter when the amplicon is short."""
+    os.makedirs(run_dir, exist_ok=True)
+    model = sim.ERROR_MODELS["illumina"]
+    tail1 = al.revcomp(cfg["pcr1_overhang_rev"]) + "A" * length
+    tail2 = al.revcomp(cfg["pcr1_overhang_fwd"]) + "A" * length
+    for row, (sid, _t, comp) in zip(sheet, SAMPLES):
+        recs1, recs2 = [], []
+        k = 0
+        for src, n in comp.items():
+            amp = amplicon(species[src]["seq"])
+            for _ in range(n):
+                r1, _a, _b = sim.apply_errors(rng, (amp + tail1)[:length], model)
+                r2, _a, _b = sim.apply_errors(
+                    rng, (al.revcomp(amp) + tail2)[:length], model)
+                q1 = sim.qual_string(rng, len(r1), model["rate"])
+                q2 = sim.qual_string(rng, len(r2), model["rate"])
+                recs1.append(f"@{sid}.{k} 1:N:0\n{r1}\n+\n{q1}\n")
+                recs2.append(f"@{sid}.{k} 2:N:0\n{r2}\n+\n{q2}\n")
+                k += 1
+        for mate, recs in (("R1", recs1), ("R2", recs2)):
+            with gzip.open(os.path.join(run_dir, f"{sid}_{mate}.fastq.gz"),
+                           "wt") as fh:
+                fh.writelines(recs)
 
 
 def main(argv=None) -> int:
@@ -354,6 +384,15 @@ def main(argv=None) -> int:
                 q = sim.qual_string(rng, len(s), model["rate"])
                 fh.write(f"@{rid}\tRG:Z:{rg}\tPU:Z:SIM00000\tLB:Z:DB01\n"
                          f"{s}\n+\n{q}\n")
+    # The same samples as a 2x150 Illumina run, for the Illumina route:
+    # its own samplesheet and manifest, files named <sample>_R1/_R2.
+    il_sheet = [dict(r, run_id="DB02", platform="illumina") for r in sheet]
+    mf.write_samplesheet(il_sheet, os.path.join(out, "samplesheet_il.tsv"))
+    mf.write_runs(os.path.join(out, "runs_il.tsv"), "DB02", "illumina",
+                  "run_il")
+    write_illumina(os.path.join(out, "run_il"), il_sheet, species, cfg,
+                   random.Random(args.seed + 7))
+
     with open(os.path.join(out, "truth.tsv"), "w", encoding="utf-8") as fh:
         wr = csv.writer(fh, delimiter="\t", lineterminator="\n")
         wr.writerow(["sample_id", "source", "reads", "expected_rank",

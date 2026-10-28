@@ -40,6 +40,7 @@ from report import (  # noqa: E402
 FUNNEL = (("clustered", "#3d6b8e", "classified"),
           ("unclustered", "#9fb4c4", "too few reads for a consensus"),
           ("too_short", "#c98a5e", "too short"),
+          ("low_quality", "#d9a0a0", "low quality (Illumina)"),
           ("no_primer", "#c9c2b0", "no primer pair"))
 # One colour per organism group, fixed so a group is the same colour in
 # every run's report. Target groups in strong colours, off-target muted.

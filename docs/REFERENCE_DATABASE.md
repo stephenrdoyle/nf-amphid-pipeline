@@ -1,8 +1,8 @@
 # Design note: assignment against a reference database
 
-**Status: the nanopore route is implemented end to end** - assignment,
-synthesis and report (`--reference_database`, 2026-10-28; §11 records
-what was decided and why). The Illumina route is not built yet.
+**Status: implemented end to end on nanopore and Illumina** -
+assignment, synthesis and report (`--reference_database`, 2026-10-28;
+§11 records what was decided and why).
 
 Today the pipeline is given a reference panel - a short, curated list of
 targets - and every read is assigned competitively to whichever target it
@@ -203,7 +203,9 @@ best hit's identity, from leave-out simulations at consensus error rates
 ## 9. Order of work
 
 1. ~~A first database release from vespa-18s-refdb (§4).~~ v0.4.0.
-2. Illumina pair mapping with LCA, validated on the VESPA mocks.
+2. ~~Illumina pair mapping with LCA~~ - built (§11.5). Validated against
+   VESPA's own published per-sample results; the mocks' reads were not
+   deposited.
 3. ~~Nanopore per-read mapping with LCA~~ - benchmarked and replaced by
    4 (§11.2).
 4. ~~Nanopore consensus~~ - built (§11), validated on simulation; still
@@ -417,3 +419,56 @@ synthesis is built on standards and plasmids this protocol does not have.
 
 Release note for vespa-18s-refdb: v0.4.0's `taxonomy.tsv` has one row
 whose domain is the literal `domain` and nine with no domain.
+
+### 11.5 Illumina
+
+`bin/assign_db_pairs.py`, as `ASSIGN_DB_PAIRS`. Its outputs have the
+nanopore route's shape, so synthesis and the report read either platform.
+
+- **Not merged.** At 2x150 no V4 insert overlaps, and dropping pairs
+  that fail to merge would bias against long-V4 lineages. Each mate is
+  primer-trimmed (either mate may carry the forward primer) and cut to a
+  fixed window of insert - the release's `illumina_windows`, 132 and 128
+  for 2x150, or `--db_window_r1`/`--db_window_r2` - so error copies line
+  up base for base. A pair whose insert ends inside R1 (read-through,
+  found with prep_illumina's junction search) is kept whole as one
+  sequence, so short-V4 lineages are not lost either.
+- **Denoised, not consensus-built.** Illumina's error is in the counting,
+  not the bases: UNOISE-style, a sequence d mismatches from a more
+  abundant one and at most 1/2^(2d+1) of its abundance is its error copy;
+  sequences seen once join the nearest survivor within 3 mismatches or
+  stay unclustered. Candidates are found exactly by pigeonhole pieces.
+- **Classified as a pair.** Each window is mapped (minimap2 `-x sr`,
+  secondary hits within half the best score); a record counts when both
+  windows hit it in a pair's shape (R1 forward from its start, R2 reverse
+  from its end), scored by the two alignment scores together; identity is
+  over both windows. When no record carries both, each window is
+  classified alone and the call is the LCA of the two, at the lower
+  identity (`origin` = `pair_split`).
+- **Floors of its own** (`--db_floors_illumina`, species 0.997, genus
+  0.995, family 0.95). The bases that separate sister taxa are mostly in
+  the gap a 2x150 pair never reads, so the nanopore floors let a missing
+  species take its sister's name. Leave-out calibration at 2x150 (same
+  design as §11.3, `tests/bench_db_floors.py --illumina 150`, 613
+  sequences):
+
+  | floors (species / genus) | present: deepest | missing species: wrong | missing genus: wrong |
+  |---|---|---|---|
+  | 0.995 / 0.99 (nanopore's) | 0.83 | 0.16 | 0.18 |
+  | **0.997 / 0.995** | 0.81 | **0.09** | **0.17** |
+
+  17-19% of present taxa stop above species whatever the floor: the
+  windows do not separate them from a relative in the database - the
+  2x150 resolution limit, as the release's `resolution_illumina_150x150`
+  table predicts.
+- **SRA-Lite quality.** Public SRA data often keep two quality values
+  (Q30 pass, Q3 failed read); the expected-error filter then only drops
+  failed reads, and the summary says the filter was blind.
+- **LCA and unlabelled records.** A record with no taxonomy at all (v0.4.0
+  has nine, unresolved conflicts) is left out of the LCA rather than
+  vetoing it - on both platforms.
+
+Release notes for vespa-18s-refdb found on the way: `V4_ef59fbd391ef`
+(PR2 `QJVE01000361.1.1814_U`, labelled *Arthrobacter stackebrandtii*)
+is human 18S - a bacterial assembly carrying host contamination - and
+ties with *Homo sapiens*, so human reads stop at no rank.

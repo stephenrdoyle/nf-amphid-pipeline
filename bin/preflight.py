@@ -2059,11 +2059,39 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
             "declared in panel targets, and database mode has no panel. "
             "Not supported yet")
     ill = sorted(r.run_id for r in runs.values() if r.platform == "illumina")
-    if ill:
+    if not ill:
+        return
+    # Illumina pairs are cut to a fixed window of insert from each mate
+    # (assign_db_pairs.py); a read too short to hold primer plus window
+    # would be dropped whole, every one of them.
+    try:
+        man = load_release_manifest(args.reference_database)
+    except ValueError:
+        return          # reported by check_reference_database
+    win = man.get("illumina_windows")
+    if not win or len(win) != 2:
         diag.error(
-            f"--reference_database: run(s) {', '.join(ill)} are Illumina, "
-            "and only the nanopore route of database mode is built so far "
-            "(docs/REFERENCE_DATABASE.md, section 9)")
+            f"--reference_database: run(s) {', '.join(ill)} are Illumina, but "
+            "the release's manifest.json has no illumina_windows, so the "
+            "insert windows read from each mate are not defined")
+        return
+    prim = man.get("primers") or {}
+    lf = len((prim.get("forward") or {}).get("sequence", ""))
+    lr = len((prim.get("reverse") or {}).get("sequence", ""))
+    L = args.illumina_read_length
+    for mate, w, lp in (("R1", int(win[0]), lf), ("R2", int(win[1]), lr)):
+        if L and w + lp > L:
+            diag.warn(
+                f"database mode: the release's {mate} window is {w}bp of insert "
+                f"after a {lp}bp primer, longer than --illumina_read_length "
+                f"{L}; set --db_window_r1/--db_window_r2 to fit, or every "
+                "pair will be too short")
+    table = f"resolution_illumina_{L}x{L}.tsv"
+    if L and not os.path.isfile(os.path.join(args.reference_database, table)):
+        diag.warn(
+            f"database mode: the release has no {table}, so the report "
+            f"cannot say how far {L}bp pairs resolve each record. Calls "
+            "are still made; their resolution column is left blank")
 
 
 def check_database_samples(samples: list, diag: Diagnostics) -> None:

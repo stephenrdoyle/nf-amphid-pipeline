@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.join(ROOT, "bin"))
 
 import ampseqlib as al            # noqa: E402
 import assign_db as adb           # noqa: E402
+import assign_db_pairs as adp     # noqa: E402
 import simulate as sim            # noqa: E402
 
 ALLOWED = {"in_db": "species", "species_out": "genus", "genus_out": "family"}
@@ -125,26 +126,52 @@ def run(args) -> int:
         taxa = [(i, "in_db") for i in rng.sample(pools["in_db"], 2)]
         taxa.append((rng.choice(pools["species_out"]), "species_out"))
         taxa.append((rng.choice(pools["genus_out"]), "genus_out"))
-        fq = os.path.join(args.workdir, f"{sid}.fastq.gz")
-        with gzip.open(fq, "wt") as fh:
-            n = 0
-            for t, cat in taxa:
-                for _ in range(rng.choice([20, 50, 150, 400])):
-                    m = FWD + seqs[t] + al.revcomp(REV_TEMPLATE)
-                    if rng.random() < 0.5:
-                        m = al.revcomp(m)
-                    m, _s, _i = sim.apply_errors(rng, m, model)
-                    fh.write(f"@{t}|{cat}|{n}\n{m}\n+\n{'5' * len(m)}\n")
-                    n += 1
         out = os.path.join(args.workdir, "out")
-        with contextlib.redirect_stdout(io.StringIO()):
-            adb.main(["--reads", fq, "--database", P["release"],
-                      "--index", P["index"], "--primers",
-                      os.path.join(args.workdir, "primers.tsv"),
-                      "--sample-id", sid, "--outdir", out,
-                      "--minimap2", mm2, "--threads", str(args.threads),
-                      "--floors", ""])
-        os.remove(fq)
+        common = ["--database", P["release"], "--index", P["index"],
+                  "--primers", os.path.join(args.workdir, "primers.tsv"),
+                  "--sample-id", sid, "--outdir", out, "--minimap2", mm2,
+                  "--threads", str(args.threads), "--floors", ""]
+        if args.illumina:
+            # Pairs as a MiSeq reads them: each mate from its end of the
+            # amplicon, `read` bases long.
+            L = args.illumina
+            m_il = sim.ERROR_MODELS["illumina"]
+            paths = [os.path.join(args.workdir, f"{sid}_R{i}.fastq.gz")
+                     for i in (1, 2)]
+            with gzip.open(paths[0], "wt") as f1, gzip.open(paths[1], "wt") as f2:
+                n = 0
+                for t, cat in taxa:
+                    amp = FWD + seqs[t] + al.revcomp(REV_TEMPLATE)
+                    for _ in range(rng.choice([20, 50, 150, 400])):
+                        a, _s, _i = sim.apply_errors(rng, (amp + "A" * L)[:L], m_il)
+                        b, _s, _i = sim.apply_errors(
+                            rng, (al.revcomp(amp) + "A" * L)[:L], m_il)
+                        f1.write(f"@{n} 1\n{a}\n+\n{'I' * len(a)}\n")
+                        f2.write(f"@{n} 2\n{b}\n+\n{'I' * len(b)}\n")
+                        n += 1
+            wargs = []
+            if args.windows:
+                w1, w2 = args.windows.split("x")
+                wargs = ["--window-r1", w1, "--window-r2", w2]
+            with contextlib.redirect_stdout(io.StringIO()):
+                adp.main(["--r1", paths[0], "--r2", paths[1], *common, *wargs])
+            for f in paths:
+                os.remove(f)
+        else:
+            fq = os.path.join(args.workdir, f"{sid}.fastq.gz")
+            with gzip.open(fq, "wt") as fh:
+                n = 0
+                for t, cat in taxa:
+                    for _ in range(rng.choice([20, 50, 150, 400])):
+                        m = FWD + seqs[t] + al.revcomp(REV_TEMPLATE)
+                        if rng.random() < 0.5:
+                            m = al.revcomp(m)
+                        m, _s, _i = sim.apply_errors(rng, m, model)
+                        fh.write(f"@{t}|{cat}|{n}\n{m}\n+\n{'5' * len(m)}\n")
+                        n += 1
+            with contextlib.redirect_stdout(io.StringIO()):
+                adb.main(["--reads", fq, *common])
+            os.remove(fq)
         truth = {t: cat for t, cat in taxa}
         with open(os.path.join(out, f"{sid}.clusters.tsv")) as fh:
             for r in csv.DictReader(fh, delimiter="\t"):
@@ -157,7 +184,13 @@ def run(args) -> int:
                 continue
             best = None
             for t in truth:
-                d = al.bounded_edit(r["consensus"], seqs[t], 60)
+                if "N" * 10 in r["consensus"]:
+                    # a pair: score each window against the source's ends
+                    x, _, y = r["consensus"].partition("N" * 10)
+                    d = (al.bounded_edit(x, seqs[t][:len(x)], 30)
+                         + al.bounded_edit(y, seqs[t][-len(y):], 30))
+                else:
+                    d = al.bounded_edit(r["consensus"], seqs[t], 60)
                 if best is None or d < best[0]:
                     best = (d, t)
             r["source"], r["category"] = (best[1], truth[best[1]]) \
@@ -186,8 +219,8 @@ def outcome(r, tax, floors) -> str:
 
 def report(rows, tax, args) -> None:
     grids = []
-    for sp in (0.99, 0.993, 0.995, 0.997):
-        for gn in (0.97, 0.975, 0.98, 0.985, 0.99):
+    for sp in (0.99, 0.993, 0.995, 0.997, 1.0):
+        for gn in (0.97, 0.975, 0.98, 0.985, 0.99, 0.995):
             grids.append({"species": sp, "genus": gn, "family": 0.95})
     lines = ["species\tgenus\tcategory\tn\tdeepest\thigher\twrong"]
     for fl in grids:
@@ -218,6 +251,12 @@ def main(argv=None) -> int:
     ap.add_argument("--minimap2", default="minimap2")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=2026)
+    ap.add_argument("--illumina", type=int, default=0,
+                    help="simulate Illumina pairs of this read length "
+                    "instead of nanopore reads, through assign_db_pairs.py")
+    ap.add_argument("--windows", default="",
+                    help="with --illumina: R1xR2 insert windows (default: "
+                    "the release's)")
     ap.add_argument("--report-only", action="store_true",
                     help="re-read clusters.json and print the grid")
     args = ap.parse_args(argv)

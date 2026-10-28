@@ -370,7 +370,12 @@ What changes:
   (bacteria and archaea, organelles, fungi, host) per well and the
   release version on every row. No copies, no plasmid checks.
 
-Nanopore only so far. Needs minimap2 (§1.1).
+Nanopore or Illumina; needs minimap2 (§1.1). On Illumina the pairs are
+not merged - at 2x150 no V4 insert overlaps - but cut to a fixed window
+of insert from each mate (`--db_window_r1`, `--db_window_r2`), denoised
+the way DADA2 or UNOISE would, and each surviving pair is classified on
+both windows together. A pair whose insert is shorter than a read is
+kept whole.
 
 ---
 
@@ -457,6 +462,9 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_floors` | `species=0.995,genus=0.99,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
 | `--db_min_rel_abundance` | `0.001` | a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
 | `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
+| `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
+| `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's `illumina_windows` (132 for 2x150) |
+| `--db_window_r2` | `null` | the same for R2 (128 for 2x150); set both for longer reads, e.g. 250 and 200 for 2x300 |
 
 ### 3.7 Control plasmids
 
@@ -557,6 +565,7 @@ week's results; delete it, or use a fresh one.
 | `test` | Illumina fixtures, end to end |
 | `test_ont` | nanopore fixtures, end to end, with a real 4-way split fan-out |
 | `test_db` | database mode on nanopore: a miniature release, held-out taxa, a hidden haplotype (`python3 tests/make_db_fixture.py` first) |
+| `test_db_il` | database mode on Illumina 2x150: the same release and samples as `test_db`, as read pairs |
 | `farm` | no-op, kept so existing commands still work |
 | `singularity` / `docker` / `conda` | enable that engine |
 | `debug` | echo hostnames, keep work directories |

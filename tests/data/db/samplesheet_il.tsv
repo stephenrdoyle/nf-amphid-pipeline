@@ -1,0 +1,9 @@
+run_id	platform	sample_id	index_i7	index_i5	sample_type
+DB02	illumina	BLANK-01	TAAGGCGA	CTCTCTAT	neg_extraction
+DB02	illumina	NTC-01	AGGCAGAA	CTCTCTAT	neg_ntc
+DB02	illumina	S01	GGACTCCT	CTCTCTAT	unknown
+DB02	illumina	S02	AAGAGGCA	CTCTCTAT	unknown
+DB02	illumina	S03	GCTCATGA	CTCTCTAT	unknown
+DB02	illumina	S04	GCGTAGTA	CTCTCTAT	unknown
+DB02	illumina	S05	TACGCTGC	CTCTCTAT	unknown
+DB02	illumina	S06	TAGCGCTC	CTCTCTAT	unknown

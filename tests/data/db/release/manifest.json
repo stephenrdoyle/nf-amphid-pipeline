@@ -21,6 +21,11 @@
   "i7_inner_anchor": "CCGAGCCCACGAGAC"
  },
  "lookalike_max_edits": 3,
+ "illumina_read_length": 150,
+ "illumina_windows": [
+  132,
+  128
+ ],
  "counts": {
   "records": 22
  },

@@ -331,8 +331,9 @@ def main(argv=None) -> int:
         wr.writerows(calls)
 
     # Per well: the read funnel and the off-target fractions.
-    well_cols = ["run_id", "sample_id", "sample_type", "demuxed", "reads_in",
-                 "no_primer", "too_short", "unclustered", "clustered",
+    well_cols = ["run_id", "sample_id", "sample_type", "platform",
+                 "demuxed", "reads_in", "no_primer", "too_short",
+                 "low_quality", "unclustered", "clustered",
                  "clusters", "haplotype_splits", "detected_taxa",
                  "unclassified_fraction"] + \
         [f"{g}_reads" for g in GROUPS] + \
@@ -357,9 +358,12 @@ def main(argv=None) -> int:
         wells_out.append({
             "run_id": args.run_id, "sample_id": sid,
             "sample_type": w.sample_type,
+            "platform": w.summary.get("platform", "nanopore"
+                                      if w.summary else ""),
             "demuxed": per_sample.get(sid, ""),
             **{k: rd.get(k, 0) for k in ("reads_in", "no_primer", "too_short",
-                                         "unclustered", "clustered")},
+                                         "low_quality", "unclustered",
+                                         "clustered")},
             "clusters": w.summary.get("clusters", 0),
             "haplotype_splits": w.summary.get("haplotype_splits", 0),
             "detected_taxa": sum(1 for c in calls if c["sample_id"] == sid

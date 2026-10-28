@@ -2400,10 +2400,17 @@ def test_reference_database_mode() -> None:
         il_sheet = os.path.join(tmp, "ss_il.tsv")
         mf.write_samplesheet([{**r, "platform": "illumina"} for r in sheet],
                              il_sheet)
-        code, summ, _ = go(runs_path=ill, sheet_path=il_sheet, label="i")
-        check("an Illumina run is refused until that route exists",
-              code == 1 and errs(summ, "only the nanopore route"),
+        code, summ, _ = go("--illumina-read-length", "150", runs_path=ill,
+                           sheet_path=il_sheet, label="i")
+        check("an Illumina run is accepted, its read length checked "
+              "against the release", not errs(summ, "Illumina")
+              and not any("illumina_windows" in e for e in summ["errors"]),
               str(summ["errors"]))
+        code, summ, _ = go("--illumina-read-length", "100", runs_path=ill,
+                           sheet_path=il_sheet, label="i2")
+        check("reads too short for the release's windows are warned about",
+              any("longer than --illumina_read_length 100" in w
+                  for w in summ["warnings"]), str(summ["warnings"]))
 
         # no negative controls: warned, not refused
         noneg = os.path.join(tmp, "ss_noneg.tsv")

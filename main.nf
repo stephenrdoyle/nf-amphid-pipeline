@@ -19,6 +19,7 @@ include { NANOPORE_PATH  } from './subworkflows/local/nanopore'
 include { ASSIGN         } from './modules/local/assign'
 include { DB_INDEX       } from './modules/local/db_index'
 include { ASSIGN_DB      } from './modules/local/assign_db'
+include { ASSIGN_DB_PAIRS} from './modules/local/assign_db_pairs'
 include { SYNTHESISE_DB  } from './modules/local/synthesise_db'
 include { REPORT_DB      } from './modules/local/report_db'
 include { SYNTHESISE     } from './modules/local/synthesise'
@@ -43,7 +44,7 @@ def helpMessage() {
       --reference_database
                          A vespa-18s-refdb release directory: classify
                          against a taxonomic database instead of a panel
-                         (nanopore only so far; needs minimap2)
+                         (nanopore or Illumina; needs minimap2)
       --samplesheet      Samplesheet CSV (run_id, platform, sample_id,
                          index_i7, index_i5, sample_type [, file_prefix])
       --primers          PCR1 primers TSV (name, direction, sequence)
@@ -124,6 +125,8 @@ workflow {
         'test_ont': [ "${projectDir}/tests/data/ont/run",
                       "python3 tests/make_ont_fixture.py" ],
         'test_db' : [ "${projectDir}/tests/data/db/run",
+                      "python3 tests/make_db_fixture.py" ],
+        'test_db_il': [ "${projectDir}/tests/data/db/run_il",
                       "python3 tests/make_db_fixture.py" ],
     ]
     (workflow.profile ?: '').tokenize(',').each { prof ->
@@ -257,7 +260,12 @@ workflow {
         }
 
     // -- the two read paths ----------------------------------------------
-    ILLUMINA_PATH(ch_illumina, ch_primers, ch_assay)
+    // In database mode Illumina pairs are not merged and prepped for a
+    // panel: they go straight to ASSIGN_DB_PAIRS below, so the panel
+    // route gets nothing.
+    ch_illumina_db    = params.reference_database ? ch_illumina : Channel.empty()
+    ch_illumina_panel = params.reference_database ? Channel.empty() : ch_illumina
+    ILLUMINA_PATH(ch_illumina_panel, ch_primers, ch_assay)
     NANOPORE_PATH(ch_nanopore_runs, ch_samplesheet, ch_assay,
                   PREFLIGHT.out.lookalikes)
 
@@ -279,7 +287,7 @@ workflow {
     ch_seqs = ILLUMINA_PATH.out.seqs
         .mix(NANOPORE_PATH.out.seqs)
     PREFLIGHT.out.summary
-        .combine(ch_seqs.count())
+        .combine(ch_seqs.mix(ch_illumina_db).count())
         .subscribe { _summary, n ->
             if (n == 0 && !workflow.session.isAborted()) {
                 error(
@@ -309,6 +317,13 @@ workflow {
             DB_INDEX.out.index,
             ch_primers,
         )
+        ASSIGN_DB_PAIRS(
+            ch_illumina_db,
+            ch_database,
+            DB_INDEX.out.index,
+            ch_primers,
+            ch_assay,
+        )
         // Run-level synthesis and the report, database mode's own: no
         // standards or plasmids to calibrate against, so relative 18S
         // abundance at the rank each call reached, judged against the
@@ -316,12 +331,12 @@ workflow {
         ch_run_id_db = ch_resolved.map { meta, files -> meta.run_id }.first()
         SYNTHESISE_DB(
             ch_run_id_db,
-            ASSIGN_DB.out.clusters.collect(),
-            ASSIGN_DB.out.summary.collect(),
-            // Database mode is nanopore only (pre-flight refuses Illumina
-            // runs), so these always exist - no placeholder needed.
-            NANOPORE_PATH.out.summary,
-            NANOPORE_PATH.out.split,
+            ASSIGN_DB.out.clusters.mix(ASSIGN_DB_PAIRS.out.clusters).collect(),
+            ASSIGN_DB.out.summary.mix(ASSIGN_DB_PAIRS.out.summary).collect(),
+            // Absent on an Illumina run; each has its own placeholder
+            // (see the NO_ placeholders above).
+            NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
+            NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT_DB")),
             PREFLIGHT.out.dir,
             ch_database,
         )

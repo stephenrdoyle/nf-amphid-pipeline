@@ -485,7 +485,12 @@ def classify_hits(hits: list[dict], tax: dict, floors: dict,
     best = max(near, key=lambda h: (h["AS"], identity(h), h["t"]))
     ident = identity(best)
     names = sorted({h["t"] for h in near})
-    lca = lca_depth(names, tax)
+    # A record with no taxonomy at all - v0.4.0 has nine, conflicts its
+    # build left unresolved - can vouch for nothing, and as a member of
+    # the LCA it vetoed everything: human 18S tied with one stopped at
+    # no rank. It is left out of the LCA, unless it is all there is.
+    known = [t for t in names if tax.get(t, {}).get("domain")]
+    lca = lca_depth(known or names, tax)
     depth = apply_floors(lca, ident, floors)
     return {
         "depth": depth, "rank": RANKS[depth] if depth >= 0 else "",
