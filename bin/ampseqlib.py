@@ -14,6 +14,7 @@ Standard library only, so the field profile has nothing to install.
 from __future__ import annotations
 
 import csv
+from array import array
 import glob
 import gzip
 import json
@@ -763,6 +764,50 @@ def find_anchor_lookalikes(entries, anchors: dict, max_edits: int,
     return rows
 
 
+_Q = 5
+_BASE_CODE = {"A": 0, "C": 1, "G": 2, "T": 3}
+
+
+def _qgram_code(text: str, j: int) -> int:
+    """text[j:j+_Q] as a number in 0 .. 4**_Q - 1, or -1 if it holds
+    anything but A, C, G and T."""
+    code = 0
+    for c in text[j:j + _Q]:
+        b = _BASE_CODE.get(c)
+        if b is None:
+            return -1
+        code = code * 4 + b
+    return code
+
+
+def _expanded_seeds(pattern: str, max_edits: int,
+                    limit: int = 256) -> list[tuple[int, str]] | None:
+    """seed_pieces for a pattern holding IUPAC codes, each piece expanded
+    into the plain sequences it stands for - as (offset, piece) pairs, an
+    offset repeated once per expansion - or None if the pattern is too
+    short or a piece expands past `limit`.
+
+    Only for an index over plain text: there a degenerate piece matches
+    exactly where one of its expansions does, so the pigeonhole argument
+    holds piece by expanded piece. Database look-alikes carry Ns and other
+    codes from their source sequences, and without this every one of them
+    had to be tried at every anchor hit.
+    """
+    m, n = len(pattern), max_edits + 1
+    if max_edits < 0 or m < n or set(pattern) - set(IUPAC):
+        return None
+    cuts = [m * i // n for i in range(n + 1)]
+    out: list[tuple[int, str]] = []
+    for i in range(n):
+        variants = [""]
+        for c in pattern[cuts[i]:cuts[i + 1]]:
+            variants = [v + b for v in variants for b in IUPAC[c]]
+            if len(variants) > limit:
+                return None
+        out.extend((cuts[i], v) for v in variants)
+    return out
+
+
 class LookalikeMask:
     """Recognise a panel look-alike in a read, so it is not taken for an
     adapter.
@@ -788,6 +833,41 @@ class LookalikeMask:
         # One seeded search per context, at the tolerance covers() uses.
         self.searches = [SeededAnchorScan(c, max(4, len(c) // 8))
                          for c in self.contexts]
+        # And one index over all of them: seed piece -> the contexts it
+        # comes from. A panel has a handful of contexts; a reference
+        # database has tens of thousands, and trying each one per anchor
+        # hit cost a quarter of a second a hit. A context none of whose
+        # pieces occurs near the hit cannot match there (the pigeonhole
+        # argument SeededAnchorScan rests on), so only those the index
+        # names need trying. Contexts the argument does not cover are
+        # always tried.
+        self.by_piece: dict[str, list[int]] = {}
+        self.always: list[int] = []
+        for i, search in enumerate(self.searches):
+            pieces = search.seeds or _expanded_seeds(search.pattern, search.k)
+            if pieces is None:
+                self.always.append(i)
+                continue
+            for piece in {p for _, p in pieces}:
+                self.by_piece.setdefault(piece, []).append(i)
+        self.piece_lengths = sorted({len(p) for p in self.by_piece})
+        self.widest = max(map(len, self.contexts), default=0)
+        # Second filter, the q-gram lemma: a context of length m found with
+        # at most k edits shares at least m - q + 1 - k*q of its q-grams
+        # with the read. A context named only by a chance piece shares far
+        # fewer, and is passed over without an alignment. Per context: its
+        # plain q-grams as codes, how many hold an IUPAC code (counted as
+        # shared, which keeps the bound safe), and the threshold.
+        self.qgrams: list[tuple[array, int, int]] = []
+        for c, search in zip(self.contexts, self.searches):
+            codes, amb = array("H"), 0
+            for j in range(len(c) - _Q + 1):
+                code = _qgram_code(c, j)
+                if code < 0:
+                    amb += 1
+                else:
+                    codes.append(code)
+            self.qgrams.append((codes, amb, len(c) - _Q + 1 - search.k * _Q))
 
     @classmethod
     def load(cls, path: str | None) -> "LookalikeMask":
@@ -811,10 +891,39 @@ class LookalikeMask:
         holding no exact piece of a context cannot match it and is passed
         over, and one that does is aligned only near those pieces. The
         answer is find_anchor_cost's, unchanged.
+
+        Which contexts are tried at all comes from the piece index: every
+        piece occurring in the stretch around the hit names its contexts,
+        and only those (and the few the index cannot cover) are aligned.
+        The stretch is the widest any context searches, so a context's own
+        stretch is never missed; the answer is unchanged.
         """
-        widest = max(map(len, self.contexts), default=0)
-        plain = is_plain_acgt(read[max(0, start - widest):end + widest])
-        for ctx, search in zip(self.contexts, self.searches):
+        widest = self.widest
+        lo_w = max(0, start - widest)
+        stretch = read[lo_w:end + widest]
+        plain = is_plain_acgt(stretch)
+        if plain:
+            found: set[int] = set(self.always)
+            by_piece = self.by_piece
+            for n in self.piece_lengths:
+                for j in range(len(stretch) - n + 1):
+                    ids = by_piece.get(stretch[j:j + n])
+                    if ids:
+                        found.update(ids)
+            seen = bytearray(4 ** _Q)
+            for j in range(len(stretch) - _Q + 1):
+                seen[_qgram_code(stretch, j)] = 1
+            tried = []
+            for i in sorted(found):
+                codes, amb, need = self.qgrams[i]
+                if need <= 0 or amb + sum(map(seen.__getitem__, codes)) >= need:
+                    tried.append(i)
+        else:
+            # An ambiguity code in the read can match where no exact piece
+            # does; the pigeonhole argument is off, so try every context.
+            tried = range(len(self.contexts))
+        for i in tried:
+            ctx, search = self.contexts[i], self.searches[i]
             lo = max(0, start - len(ctx))
             hi = min(len(read), end + len(ctx))
             h = search.best(read[lo:hi], plain)
