@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -43,19 +44,21 @@ FUNNEL = (("clustered", "#3d6b8e", "classified"),
           ("low_quality", "#d9a0a0", "low quality (Illumina)"),
           ("no_primer", "#c9c2b0", "no primer pair"))
 # One colour per organism group, fixed so a group is the same colour in
-# every run's report. Target groups in strong colours, off-target muted.
+# every run's report. A fixed-order categorical palette chosen to stay
+# distinguishable under the common colour-vision deficiencies; the
+# off-target remainder in greys so the eye goes to the targets.
 GROUP_STYLE = (
-    ("helminths", "#0072B2", "helminths"),
-    ("protists", "#009E73", "protists"),
-    ("microsporidia", "#CC79A7", "microsporidia"),
-    ("host", "#D55E00", "host"),
-    ("fungi", "#9e9ac8", "fungi"),
-    ("plants", "#b5cf6b", "plants"),
-    ("invertebrates", "#E69F00", "other invertebrates"),
-    ("bacteria_archaea", "#8c6d31", "bacteria & archaea"),
-    ("organelle", "#c7c7a0", "organelles"),
-    ("unassigned", OTHER_COLOUR, "unassigned"),
-    ("chimera", "#e8e8e8", "PCR chimeras"),
+    ("helminths", "#2a78d6", "helminths"),
+    ("protists", "#1baf7a", "protists"),
+    ("microsporidia", "#e87ba4", "microsporidia"),
+    ("fungi", "#eda100", "fungi"),
+    ("host", "#eb6834", "host"),
+    ("plants", "#6250d6", "plants"),
+    ("invertebrates", "#9085e9", "other invertebrates"),
+    ("bacteria_archaea", "#888780", "bacteria & archaea"),
+    ("organelle", "#b4b2a9", "organelles"),
+    ("unassigned", "#d3d1c7", "unassigned"),
+    ("chimera", "#e34948", "PCR chimeras"),
 )
 GROUP_COLOUR = {g: c for g, c, _l in GROUP_STYLE}
 GROUP_LABEL = {g: lab for g, _c, lab in GROUP_STYLE}
@@ -64,10 +67,73 @@ TARGET = ("helminths", "protists", "microsporidia")
 # eight taxa, and the ninth onwards went grey - one helminth in three on
 # the fixture. Okabe-Ito, then Paul Tol's muted set, which stays
 # distinguishable under the common colour-vision deficiencies.
-WITHIN_COLOURS = TAXON_COLOURS + ["#332288", "#88CCEE", "#44AA99",
-                                  "#999933", "#AA4499", "#882255"]
-RANK_COLOURS = {"species": "#0b6b3a", "genus": "#3d8f5f",
-                "family": "#8a5300", "above": "#b03030"}
+WITHIN_COLOURS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4",
+                  "#008300", "#6250d6", "#e34948", "#332288", "#88CCEE",
+                  "#44AA99", "#999933", "#AA4499", "#882255"]
+# Sequential: darkest = most specific.
+RANK_COLOURS = {"species": "#0c447c", "genus": "#378add",
+                "family": "#85b7eb", "above": "#d3d1c7"}
+CHART_INK, CHART_GRID, CHART_AXIS = "#52514e", "#e1e0d9", "#c3c2b7"
+
+
+def columns_svg(labels: list, series: list, height: int = 300,
+                note: str = "") -> str:
+    """Vertical stacked columns, one per sample, each scaled to 100%.
+
+    `series` is [(name, colour, [value per label])]; each column is the
+    values' shares of that column's total, stacked in series order from
+    the bottom. Drawn as inline SVG rather than with a charting library:
+    the report is one self-contained file that must open with no network.
+    Gridlines every 10%, the axis in muted ink, a 2px gap between stacked
+    segments, labels angled when there are many columns; every segment
+    carries a hover title with its name, share and value. Columns with no
+    data are drawn as an empty outline, so a blank well is visible as one.
+    """
+    n = len(labels)
+    if not n:
+        return ""
+    left, top, bottom = 44, 8, 64
+    slot = max(14.0, min(56.0, 900.0 / n))
+    width = left + slot * n + 8
+    bar = min(24.0, slot * 0.72)
+    ph = height - top - bottom
+    out = [f"<svg viewBox='0 0 {width:.0f} {height}' width='100%' "
+           f"style='max-width:{max(width, 360):.0f}px;display:block' "
+           f"role='img' aria-label='{esc(note)}'>"]
+    for k in range(11):
+        y = top + ph - ph * k / 10
+        out.append(f"<line x1='{left}' x2='{width - 4:.0f}' y1='{y:.1f}' "
+                   f"y2='{y:.1f}' stroke='{CHART_GRID if k else CHART_AXIS}' "
+                   "stroke-width='1'/>")
+        out.append(f"<text x='{left - 6}' y='{y + 3.5:.1f}' text-anchor='end' "
+                   f"font-size='10.5' fill='{CHART_INK}'>{k * 10}%</text>")
+    for i, lab in enumerate(labels):
+        x = left + slot * i + (slot - bar) / 2
+        tot = sum(vals[i] for _n, _c, vals in series)
+        if tot <= 0:
+            out.append(f"<rect x='{x:.1f}' y='{top}' width='{bar:.1f}' "
+                       f"height='{ph}' fill='none' stroke='{CHART_GRID}'/>")
+        else:
+            y = top + ph
+            for name, colour, vals in series:
+                v = vals[i]
+                if v <= 0:
+                    continue
+                h = ph * v / tot
+                gap = 2 if h > 3 else 0
+                out.append(
+                    f"<rect x='{x:.1f}' y='{y - h:.1f}' width='{bar:.1f}' "
+                    f"height='{max(h - gap, 0.5):.1f}' fill='{colour}'>"
+                    f"<title>{esc(lab)} - {esc(name)}: {100 * v / tot:.1f}% "
+                    f"({fmt(v)})</title></rect>")
+                y -= h
+        cx = x + bar / 2
+        ly = top + ph + 10
+        out.append(f"<text transform='translate({cx:.1f},{ly}) rotate(-55)' "
+                   f"text-anchor='end' font-size='10.5' fill='{CHART_INK}'>"
+                   f"{esc(lab)}</text>")
+    out.append("</svg>")
+    return "".join(out)
 NEG = ("neg_extraction", "neg_ntc")
 
 
@@ -76,6 +142,11 @@ def pct(x) -> str:
         return f"{100 * float(x):.1f}%"
     except (TypeError, ValueError):
         return "—"
+
+
+def natural(sid: str):
+    """Sort key: A2 before A10, plate wells in row then column order."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", sid)]
 
 
 def legend(items) -> str:
@@ -87,7 +158,8 @@ def legend(items) -> str:
 def build(args) -> str:
     d = args.synthesis_dir
     calls = read_table(os.path.join(d, "db_calls.tsv"))
-    wells = read_table(os.path.join(d, "db_wells.tsv"))
+    wells = sorted(read_table(os.path.join(d, "db_wells.tsv")),
+                   key=lambda w: natural(w["sample_id"]))
     prevalence = read_table(os.path.join(d, "db_prevalence.tsv"))
     with open(os.path.join(d, "db_run_qc.json"), encoding="utf-8") as fh:
         qc = json.load(fh)
@@ -193,23 +265,25 @@ def build(args) -> str:
         "and protists are read off. The last column is the read funnel: "
         "how many of the reads that reached the sample were classified.</p>")
     P.append(legend([(GROUP_COLOUR[g], GROUP_LABEL[g]) for g in present]))
+    P.append(columns_svg(
+        [w["sample_id"] for w in wells],
+        [(GROUP_LABEL[g], GROUP_COLOUR[g],
+          [int(w.get(f"{g}_reads") or 0) for w in wells]) for g in present],
+        note="Share of each well's classified reads by organism group"))
     rows = []
     for w in wells:
         funnel = [(lab, int(w.get(k) or 0), c) for k, c, lab in FUNNEL]
-        groups = [(GROUP_LABEL[g], int(w.get(f"{g}_reads") or 0),
-                   GROUP_COLOUR[g]) for g in present]
         rows.append(
             f"<tr><td>{esc(w['sample_id'])}<br><span class='note'>"
             f"{esc(w['sample_type'])}</span></td>"
             f"<td class='num'>{fmt(w['clustered'])}</td>"
-            f"<td style='width:45%;min-width:200px'>{stacked_bar(groups)}</td>"
             + "".join(f"<td class='num'>{pct(w.get(g + '_fraction'))}</td>"
                       for g in TARGET)
             + f"<td class='num'>{fmt(w['reads_in'])}</td>"
             f"<td style='min-width:80px'>{stacked_bar(funnel)}</td></tr>")
     P.append(
         "<div class='scroll'><table><thead><tr><th>sample</th>"
-        "<th class='num'>classified reads</th><th>organism groups</th>"
+        "<th class='num'>classified reads</th>"
         + "".join(f"<th class='num'>{GROUP_LABEL[g]}</th>" for g in TARGET)
         + "<th class='num'>reads in</th><th>funnel</th>"
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
@@ -230,36 +304,54 @@ def build(args) -> str:
             f"<p>Shares <b>within {GROUP_LABEL[g]}</b>: the other groups are "
             f"set aside and each well's {GROUP_LABEL[g]} reads are the "
             "denominator, so a well that is mostly host still shows its "
-            f"{GROUP_LABEL[g]} composition. The read count beside each bar is "
-            "what that composition rests on - few reads, little "
-            "confidence.</p>")
+            f"{GROUP_LABEL[g]} composition. Few reads under a column means "
+            "little confidence in it.</p>")
         totals = defaultdict(float)
         for c in gcalls:
             totals[(c["rank"], c["taxon"])] += float(c["group_share"] or 0)
         top = [k for k, _v in sorted(totals.items(), key=lambda kv: -kv[1])]
         colours = {k: WITHIN_COLOURS[i]
                    for i, k in enumerate(top[:len(WITHIN_COLOURS)])}
-        P.append(legend([(colours[k], f"{k[1]} ({k[0]})") for k in colours]
+        # Legend by the readable label ("Chromadorea, unnamed family
+        # (nearest Haemonchus)"), not PR2's placeholder name.
+        label_of = {}
+        for c in gcalls:
+            label_of.setdefault((c["rank"], c["taxon"]), c["label"])
+        def name(k):
+            lab = label_of.get(k, k[1])
+            return lab if lab != k[1] else f"{k[1]} ({k[0]})"
+        P.append(legend([(colours[k], name(k)) for k in colours]
                         + ([(OTHER_COLOUR, "everything else")]
                            if len(top) > len(colours) else [])))
+        # The chart: one column per sample, its detected taxa as shares of
+        # the group. Taxa past the palette pool as "everything else".
+        named = list(colours)
+        series = []
+        for k in named:
+            series.append((name(k), colours[k], [
+                sum(float(c["group_share"] or 0) for c in by_sample.get(w["sample_id"], [])
+                    if c["group"] == g and c["call"] == "detected"
+                    and (c["rank"], c["taxon"]) == k) for w in samples]))
+        series.append(("everything else", OTHER_COLOUR, [
+            sum(float(c["group_share"] or 0) for c in by_sample.get(w["sample_id"], [])
+                if c["group"] == g and c["call"] == "detected"
+                and (c["rank"], c["taxon"]) not in colours) for w in samples]))
+        P.append(columns_svg([w["sample_id"] for w in samples], series,
+                             note=f"Composition within {GROUP_LABEL[g]}, per sample"))
         rr = []
         for w in samples:
-            mine = [c for c in by_sample.get(w["sample_id"], [])
-                    if c["group"] == g and c["call"] == "detected"]
-            parts = [(f"{c['taxon']} ({c['rank']})", float(c["group_share"] or 0),
-                      colours.get((c["rank"], c["taxon"]), OTHER_COLOUR))
-                     for c in mine]
             n = int(w.get(f"{g}_reads") or 0)
             rr.append(f"<tr><td>{esc(w['sample_id'])}</td>"
                       f"<td class='num'>{fmt(n)}</td>"
-                      f"<td style='width:60%;min-width:200px'>"
-                      f"{stacked_bar(parts) if parts else '—'}</td>"
                       f"<td class='num'>{esc(w.get(g + '_richness', ''))}</td></tr>")
-        P.append("<table><thead><tr><th>sample</th>"
+        P.append("<div class='scroll' style='max-height:240px'><table><thead>"
+                 "<tr><th>sample</th>"
                  f"<th class='num'>{GROUP_LABEL[g]} reads</th>"
-                 "<th>composition within the group</th>"
                  "<th class='num'>richness</th></tr></thead><tbody>"
-                 + "".join(rr) + "</tbody></table>")
+                 + "".join(rr) + "</tbody></table></div>")
+        P.append("<p class='note'>An empty column is a sample with no "
+                 f"{GROUP_LABEL[g]} detected. The read count is what each "
+                 "column rests on.</p>")
 
         # presence table: taxa x samples, with prevalence
         taxa = [r for r in prevalence if r["group"] == g]
@@ -325,17 +417,11 @@ def build(args) -> str:
     # -- rank reached -----------------------------------------------------
     P.append("<h2 id='rank'>How deep each well could be named</h2>")
     P.append(legend([(c, k) for k, c in RANK_COLOURS.items()]))
-    rr = []
-    for w in samples:
-        parts = [(k, int(w.get(f"rank_{k}") or 0), c)
-                 for k, c in RANK_COLOURS.items()]
-        rr.append(f"<tr><td>{esc(w['sample_id'])}</td>"
-                  f"<td style='min-width:320px'>{stacked_bar(parts)}</td>"
-                  + "".join(f"<td class='num'>{fmt(w.get('rank_' + k))}</td>"
-                            for k in RANK_COLOURS) + "</tr>")
-    P.append("<table><thead><tr><th>sample</th><th>reads by rank reached</th>"
-             + "".join(f"<th class='num'>{k}</th>" for k in RANK_COLOURS)
-             + "</tr></thead><tbody>" + "".join(rr) + "</tbody></table>")
+    P.append(columns_svg(
+        [w["sample_id"] for w in samples],
+        [(k, c, [int(w.get(f"rank_{k}") or 0) for w in samples])
+         for k, c in RANK_COLOURS.items()],
+        note="Share of each sample's classified reads by the rank reached"))
     fl = (qc.get("settings") or {}).get("floors") or {}
     P.append(
         "<p class='note'>A consensus is named at a rank only when the lowest "
