@@ -310,6 +310,12 @@ def test_groups() -> None:
                             "microsporidia", "offtarget"))
               and "Presence by sample" in doc
               and "No protists were classified" in doc)
+        fungal = [r for r in csv.DictReader(open(os.path.join(
+            tmp, "synthesis", "db_wells.tsv")), delimiter="\t")]
+        check("fungi get a section of their own, with richness per well",
+              "id='fungi'" in doc and "fungal ranks are shifted" in doc
+              and doc.find("id='fungi'") < doc.find("id='offtarget'")
+              and all("fungi_richness" in r for r in fungal))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

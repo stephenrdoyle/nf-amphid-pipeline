@@ -102,6 +102,10 @@ TARGET_GROUPS = ("helminths", "protists", "microsporidia")
 OFFTARGET = tuple(g for g in GROUPS if g not in TARGET_GROUPS
                   and g not in ("unassigned", "chimera"))
 HELMINTH_CLASSES = {"Nematoda", "Platyhelminthes", "Acanthocephala"}
+# Groups the report shows taxon by taxon: the targets, and fungi, which
+# are off-target but can dominate a sample (half of every primate sample
+# in VESPA's public data) and say something about diet and collection.
+DETAIL_GROUPS = TARGET_GROUPS + ("fungi",)
 
 
 def organism_group(lineage: list[str], host_clade: str) -> str:
@@ -525,7 +529,7 @@ def main(argv=None) -> int:
                  "unclassified_fraction"] + \
         [f"{g}_reads" for g in GROUPS] + \
         [f"{g}_fraction" for g in GROUPS] + \
-        [f"{g}_richness" for g in TARGET_GROUPS] + \
+        [f"{g}_richness" for g in DETAIL_GROUPS] + \
         [f"rank_{r}" for r in ("species", "genus", "family", "above")] + \
         ["database_version"]
     wells_out = []
@@ -558,11 +562,11 @@ def main(argv=None) -> int:
             "unclassified_fraction": f"{unclass / d:.4f}",
             **{f"{g}_reads": off[g] for g in GROUPS},
             **{f"{g}_fraction": f"{off[g] / d:.4f}" for g in GROUPS},
-            # Detected taxa per target group: VESPA's richness.
+            # Detected taxa per target group (VESPA's richness), and fungi.
             **{f"{g}_richness": sum(1 for c in calls if c["sample_id"] == sid
                                     and c["group"] == g
                                     and c["call"] == "detected")
-               for g in TARGET_GROUPS},
+               for g in DETAIL_GROUPS},
             **{f"rank_{k}": ranks[k] for k in ("species", "genus", "family",
                                                "above")},
             "database_version": version})

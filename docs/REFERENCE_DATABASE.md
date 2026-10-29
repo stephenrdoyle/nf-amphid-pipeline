@@ -390,7 +390,8 @@ synthesis is built on standards and plasmids this protocol does not have.
 - **Organism groups**, reported the way VESPA reports them (Owens et al.
   2024, Figs 3-5): each well's classified reads by group first, then each
   *target* group on its own with shares recalculated within the group, a
-  presence table per taxon and sample, and prevalence and richness. The
+  presence table per taxon and sample, and prevalence and richness (fungi
+  get the same section, though off-target: they can be most of a sample). The
   group comes from the PR2 lineage down to the rank the call *reached* -
   a call that stopped at domain is `unassigned`, not guessed - first
   match wins: bacteria and archaea (domain); organelles (PR2's

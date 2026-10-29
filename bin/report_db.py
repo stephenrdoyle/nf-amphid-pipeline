@@ -63,6 +63,10 @@ GROUP_STYLE = (
 GROUP_COLOUR = {g: c for g, c, _l in GROUP_STYLE}
 GROUP_LABEL = {g: lab for g, _c, lab in GROUP_STYLE}
 TARGET = ("helminths", "protists", "microsporidia")
+# Shown taxon by taxon like the targets: fungi are off-target, but can be
+# most of a sample, and what they are (moulds, yeasts, mushrooms) says
+# something about diet and how long a sample sat before collection.
+DETAIL = TARGET + ("fungi",)
 # Within a target group a run easily names more than the panel palette's
 # eight taxa, and the ninth onwards went grey - one helminth in three on
 # the fixture. Okabe-Ito, then Paul Tol's muted set, which stays
@@ -350,7 +354,7 @@ def build(args) -> str:
              "reads went</a> · <a href='#warn'>before reading the "
              "results</a> · <a href='#groups'>all reads by organism group</a> · "
              + " · ".join(f"<a href='#{g}'>{GROUP_LABEL[g]}</a>"
-                          for g in TARGET)
+                          for g in DETAIL)
              + " · <a href='#offtarget'>off-target</a> · <a href='#rank'>"
              "naming depth</a> · <a href='#calls'>every call</a></p>")
 
@@ -505,11 +509,11 @@ def build(args) -> str:
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
     P.append(legend([(c, f"funnel: {lab}") for _k, c, lab in FUNNEL]))
 
-    # -- each target group on its own (VESPA Figs 4b-d, 5b-d) -------------
+    # -- each target group on its own (VESPA Figs 4b-d, 5b-d), then fungi --
     by_sample = defaultdict(list)
     for c in calls:
         by_sample[c["sample_id"]].append(c)
-    for g in TARGET:
+    for g in DETAIL:
         gcalls = [c for c in det if c["group"] == g and c["sample_type"] not in NEG]
         P.append(f"<h2 id='{g}'>{GROUP_LABEL[g].capitalize()}</h2>")
         if not any(c["group"] == g for c in calls):
@@ -522,6 +526,19 @@ def build(args) -> str:
             "denominator, so a well that is mostly host still shows its "
             f"{GROUP_LABEL[g]} composition. Few reads under a column means "
             "little confidence in it.</p>")
+        if g == "fungi":
+            P.append(
+                "<p>Fungi are not a target, but they can be most of a "
+                "sample, and what they are says something about it: moulds "
+                "and yeasts suggest diet, or growth on the sample between "
+                "defecation and collection, rather than infection.</p>"
+                "<p class='note'>PR2's fungal ranks are shifted: its "
+                "<i>class</i> column holds the phylum (Ascomycota), "
+                "<i>order</i> the subphylum and <i>family</i> the class. A "
+                "fungal call shown \"at family\" - Eurotiomycetes, for "
+                "instance - is really at class, and many mould genera are "
+                "identical over V4, so that is often as far as it can go."
+                "</p>")
         totals = defaultdict(float)
         for c in gcalls:
             totals[(c["rank"], c["taxon"])] += float(c["group_share"] or 0)
