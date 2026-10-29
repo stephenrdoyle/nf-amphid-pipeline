@@ -37,7 +37,8 @@ process ASSIGN_DB_PAIRS {
         --assay ${assay} \\
         --sample-id ${meta.id} \\
         --threads ${task.cpus} \\
-        ${w1} ${w2} \\
+        ${w1} ${w2} \
+        --read-length ${params.illumina_read_length} \\
         --max-ee ${params.max_ee} \\
         --lca-margin ${params.db_lca_margin} \
         --primer-max-edits ${params.db_primer_max_edits} \\

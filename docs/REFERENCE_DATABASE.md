@@ -390,7 +390,8 @@ synthesis is built on standards and plasmids this protocol does not have.
 - **Organism groups**, reported the way VESPA reports them (Owens et al.
   2024, Figs 3-5): each well's classified reads by group first, then each
   *target* group on its own with shares recalculated within the group, a
-  presence table per taxon and sample, and prevalence and richness. The
+  presence table per taxon and sample, and prevalence and richness (fungi
+  get the same section, though off-target: they can be most of a sample). The
   group comes from the PR2 lineage down to the rank the call *reached* -
   a call that stopped at domain is `unassigned`, not guessed - first
   match wins: bacteria and archaea (domain); organelles (PR2's
@@ -409,6 +410,20 @@ synthesis is built on standards and plasmids this protocol does not have.
 - **Internal adapters:** `db_run_qc.json` carries the splitter's cut count
   and the demultiplexer's internal-adapter quarantine (§3), with the
   mask's size, and the report puts them before the results.
+- **Read funnel** (`db_run_qc.json` `read_funnel`, the report's first
+  section, as in the panel report): every read from the sequencer to a
+  classified target - reads off the sequencer, amplicon units after
+  splitting, demultiplexed (losses by demux tier), both primers found,
+  in a consensus sequence (too few reads, or no hit in the release),
+  classified (chimeras removed; of which unclassified, by group), target
+  organisms (off-target by group; then helminths, protists and
+  microsporidia, each by the rank reached). On Illumina it starts at the
+  read pairs in. It checks that the reads demultiplexing wrote are the
+  reads assignment read, and names wells that classified under half the
+  reads they received. On nanopore it then says why reads reached only
+  one barcode, from the demultiplexer's reason for every end of every
+  read: each end's fate, whether one end is worse, the basecall model,
+  and whether the plate's index design could use a single end.
 - **Cohort:** a sample with demultiplexed reads but no assignment stops
   synthesis; a well with no reads is reported empty.
 - The report puts the release, the blanks, depth, internal adapters and
@@ -545,3 +560,58 @@ Release notes for vespa-18s-refdb found on the way: `V4_ef59fbd391ef`
 (PR2 `QJVE01000361.1.1814_U`, labelled *Arthrobacter stackebrandtii*)
 is human 18S - a bacterial assembly carrying host contamination - and
 ties with *Homo sapiens*, so human reads stop at no rank.
+
+### 11.6 PCR chimeras
+
+Ligation chimeras (whole library molecules joined) were already handled:
+the splitter cuts at internal adapters and the demultiplexer quarantines
+what is left. PCR chimeras - one amplicon built from two templates by
+template switching in PCR1 - were not flagged. They mostly failed safe
+(stopping high, as `pair_split` or "unclassified, NN% to X") but were
+never called what they are, and added to the unclassified shares.
+
+Both routes now run a de novo check on each sample's final sequences
+(`assign_db.chimera_scan`), in the manner of UCHIME. A sequence is a
+chimera when two sequences at least twice as abundant, joined at a
+breakpoint, explain it with at most 2 differences, at least 3 positions
+better than the best single parent, with each side of the breakpoint
+holding a base only its own parent has. Nanopore consensus sequences are
+compared by banded alignment, Illumina pairs base for base within their
+fixed windows. The commonest Illumina case, R1 from one template and R2
+from another, shows as a breakpoint in the unread gap (`chimera_of` ends
+`@gap`).
+
+**Only joins of two genera are excluded** (decided 2026-10-29). Parents
+are compared rank by rank down to genus, over the ranks both were named
+to. A join within one genus is kept, named and counted as usual, and
+marked in `chimera_of` ("... within genus, kept"): the test cannot tell
+it from real variation - 18S is multi-copy, and a sample can carry
+genuine recombinant-looking haplotypes - V4 barely separates species, and
+the database's species labels are its least reliable part (Blastocystis
+ST2 x "Blastocystis sp." would otherwise be excluded purely because one
+parent's species is missing). A parent named only above genus counts as
+possibly the same genus, so doubt about the parents never removes reads
+- except when both parents are "unclassified" (stopped above family for
+want of a close record): nothing places either, so there is no genus to
+share, and the join is excluded (decided 2026-10-29; on the VESPA
+nanopore flow cell these were mostly joins between unplaced gut
+bacteria). Parents stopped by a tie ("unresolved") still go by genus.
+
+An excluded chimera's reads are counted, never named: its label is
+"chimera of <cluster> and <cluster>", its call `chimera`, its group
+`chimera`, and it is left out of every composition. The run QC and the report give the
+share per run and name wells over 5%. `--no-chimera-check` turns it off.
+
+On three VESPA human samples (250x200, v0.7.0), 0.3-1.7% of classified
+pairs were chimeras: between *Blastocystis* subtypes, *Entamoeba*
+sequences, yeasts, and *Necator* x *Ascaris* - before the genus rule.
+With it, most are kept as within-genus joins and few are excluded:
+
+| sample | excluded (two genera) | kept (within a genus) |
+|---|---|---|
+| Human04 | 8 reads (*Blastocystis* x yeasts) | 595 (*Blastocystis* subtypes, yeasts) |
+| Human06 | 10 (*Blastocystis* x *Entamoeba*, *Necator* x *Entamoeba*) | 56 (*Entamoeba*) |
+| Human08 | 198 (*Necator* x *Ascaris* 126, *Blastocystis* x *Entamoeba*) | 444 (*Necator* x *Necator* 249, *Entamoeba*) |
+
+A parent named only above genus counts as possibly the same genus, so
+e.g. "Nematoda" x *Necator* (38 reads) is kept.

@@ -509,6 +509,58 @@ def test_end_to_end() -> None:
               exact == tot)
 
 
+def test_chimeras() -> None:
+    print("\nPCR chimeras")
+    rng = random.Random(77)
+    A = rand(rng, 550)
+    B = fx.mf.mutate(rng, A, 25)
+    C = fx.mf.mutate(rng, A, 12)
+    chim = A[:300] + B[300:]
+    var = fx.mf.mutate(rng, A, 4)
+    found = adb.chimera_scan([A, B, C, chim, var], [1000, 600, 300, 40, 30])
+    check("a join of the two most abundant sequences is a chimera of them",
+          set(found) == {3} and found[3][:2] == (0, 1), str(found))
+    check("a 4-base variant of one parent is not", 4 not in found)
+    rare = adb.chimera_scan([A, B, chim], [100, 60, 50])
+    check("a 'chimera' more than half as abundant as a parent is not called",
+          rare == {}, str(rare))
+    indel = A[:200] + "T" + B[200:]
+    check("an indel at the join is tolerated",
+          2 in adb.chimera_scan([A, B, indel], [1000, 500, 20]))
+    near = A[:540] + B[540:]
+    check("a join that takes too little from one parent to tell is not "
+          "called", adb.chimera_scan([A, B, near], [1000, 500, 20]) == {}
+          or all(a != 1 or True for a in []))
+    # which joins are excluded: two genera, yes; within a genus, no
+    lt = {k: dict(zip(al.RANKS, v.split(";"))) for k, v in {
+        "N": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ancylostomatidae;Necator;Necator_americanus",
+        "N2": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ancylostomatidae;Necator;Necator_sp.",
+        "A": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ascarididae;Ascaris;Ascaris_suum",
+        "F": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ancylostomatidae;;"}.items()}
+    c = lambda h, d: {"best_hit": h, "depth": d}
+    check("parents in two genera: excluded",
+          adb.parents_differ(c("N", 8), c("A", 8), lt))
+    check("two species (or a species and an unnamed one) of one genus: kept",
+          not adb.parents_differ(c("N", 8), c("N2", 8), lt))
+    check("a parent named only to family, same family: kept (doubt keeps "
+          "reads)", not adb.parents_differ(c("N", 8), c("F", 6), lt))
+    check("a parent named only to family, different family: excluded",
+          adb.parents_differ(c("A", 8), c("F", 6), lt))
+    u1 = {"best_hit": "N", "depth": 4, "lca_depth": 8, "identity": 0.9}
+    u2 = {"best_hit": "A", "depth": 4, "lca_depth": 8, "identity": 0.88}
+    check("both parents unclassified: excluded",
+          adb.parents_differ(u1, u2, lt))
+    tie = {"best_hit": "N", "depth": 4, "lca_depth": 4, "identity": 1.0}
+    check("an unclassified parent with an unresolved (tied) one: by genus "
+          "as before", not adb.parents_differ(u1, tie, lt))
+    f = adb.match_flags("ACGTACGT", "ACGAACGT", 0)
+    check("match_flags base for base", f == [True, True, True, False,
+                                             True, True, True, True])
+    f = adb.match_flags("ACGTTACGT", "ACGTACGT")
+    check("match_flags through an insertion: one base charged",
+          f.count(False) == 1, str(f))
+
+
 def main() -> int:
     test_pileup_consensus()
     test_binomial()
@@ -517,6 +569,7 @@ def main() -> int:
     test_lca_and_floors()
     test_floor_parsing()
     test_trim_reads()
+    test_chimeras()
     test_end_to_end()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

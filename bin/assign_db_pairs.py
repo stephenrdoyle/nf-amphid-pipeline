@@ -329,6 +329,10 @@ def main(argv=None) -> int:
                     help="insert bases kept from R1 (default: the release's "
                     "illumina_windows)")
     ap.add_argument("--window-r2", type=int)
+    ap.add_argument("--read-length", type=int,
+                    help="sequenced read length, to find the release's "
+                    "resolution_illumina_<L>x<L>.tsv (default: window + "
+                    "primer)")
     ap.add_argument("--max-ee", type=float, default=2.0,
                     help="expected errors allowed over both windows")
     ap.add_argument("--min-size", type=int, default=2,
@@ -341,6 +345,8 @@ def main(argv=None) -> int:
     ap.add_argument("--primer-max-edits", type=int, default=3,
                     help="edits allowed when finding each primer (see "
                     "assign_db.py)")
+    ap.add_argument("--no-chimera-check", action="store_true",
+                    help="do not test sequences for PCR chimeras")
     ap.add_argument("--lca-margin", type=float, default=0.005)
     ap.add_argument("--floors", default=",".join(
         f"{k}={v}" for k, v in ILLUMINA_FLOORS.items()),
@@ -547,13 +553,41 @@ def main(argv=None) -> int:
 
     # Outputs in assign_db.py's shape, so synthesis reads either platform.
     resolution = {}
-    rpath = os.path.join(args.database,
-                         f"resolution_illumina_{w1 + len(next(iter(fwd_seq.values()), ''))}"
-                         f"x{w2 + len(next(iter(rev_seq.values()), ''))}.tsv")
+    # The release names its resolution tables by READ length
+    # (resolution_illumina_150x150, _300x300). Given --read-length that
+    # is used; otherwise it is inferred as window + primer, which is right
+    # only when the windows fill the reads (the 2x150 defaults).
+    if args.read_length:
+        rl1 = rl2 = args.read_length
+    else:
+        rl1 = w1 + len(next(iter(fwd_seq.values()), ""))
+        rl2 = w2 + len(next(iter(rev_seq.values()), ""))
+    rpath = os.path.join(args.database, f"resolution_illumina_{rl1}x{rl2}.tsv")
     if os.path.exists(rpath):
         resolution = {r["id"]: r.get("deepest_rank", "") for r in read_table(rpath)}
     total = fate["clustered"]
     order = sorted(range(len(centroids)), key=lambda k: (-centroids[k][2], k))
+    cid = {k: f"{sid}_p{n}" for n, k in enumerate(order, 1)}
+    # PCR chimeras (assign_db.chimera_scan), within each shape so the
+    # windows line up base for base. A join in the unread gap - R1 from
+    # one parent, R2 from another - is the commonest kind on Illumina,
+    # and the concatenated windows show it as a breakpoint at the '|'.
+    chim: dict = {}
+    if not args.no_chimera_check:
+        shapes: dict = defaultdict(list)
+        for k in order:
+            x, y, _n = centroids[k]
+            shapes[(len(x), len(y))].append(k)
+        for ks in shapes.values():
+            found = adb.chimera_scan(
+                [centroids[k][0] + "|" + centroids[k][1] for k in ks],
+                [centroids[k][2] for k in ks], fixed=True)
+            for q, (a, b, bp, *_r) in found.items():
+                chim[ks[q]] = (ks[a], ks[b], bp)
+    # Only joins of two genera are excluded (assign_db.parents_differ).
+    kept_joins = {k: v for k, v in chim.items()
+                  if not adb.parents_differ(calls[v[0]], calls[v[1]], tax)}
+    chim = {k: v for k, v in chim.items() if k not in kept_joins}
     rows = []
     label_depth = RANKS.index("family")
     for n, k in enumerate(order, 1):
@@ -562,6 +596,25 @@ def main(argv=None) -> int:
         taxon, label = adb.label_for(call, tax, label_depth)
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
+        chimera_of = ""
+        if k in kept_joins:
+            a, b, bp = kept_joins[k]
+            chimera_of = f"{cid[a]}+{cid[b]}@{bp} within genus, kept"
+        if k in chim:
+            a, b, bp = chim[k]
+            # In the gap when every base telling the parents apart takes
+            # the left parent's in R1's window and the right one's in R2's.
+            q = x + "|" + y
+            pa = centroids[a][0] + "|" + centroids[a][1]
+            pb = centroids[b][0] + "|" + centroids[b][1]
+            inf = [i for i in range(len(q)) if pa[i] != pb[i]]
+            gap = y and inf and all(
+                (q[i] == pa[i]) == (i < len(x)) for i in inf
+                if q[i] in (pa[i], pb[i]))
+            where = "gap" if gap else str(bp)
+            chimera_of = f"{cid[a]}+{cid[b]}@{where}"
+            taxon, label, d = "", f"chimera of {cid[a]} and {cid[b]}", -1
+            call = {**call, "rank": ""}
         rows.append({
             "sample_id": sid, "cluster": f"{sid}_p{n}", "reads": cnt,
             "rel_abundance": f"{cnt / total:.6f}" if total else "",
@@ -574,9 +627,10 @@ def main(argv=None) -> int:
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
             "db_resolution": resolution.get(call["best_hit"], ""),
-            "origin": ("whole_insert" if not y else
-                       "pair_split" if call.get("split_mates") else "pair"),
+            "origin": ("chimera" if k in chim else "whole_insert" if not y
+                       else "pair_split" if call.get("split_mates") else "pair"),
             "merged": 0,
+            "chimera_of": chimera_of,
             "length": len(x) + len(y),
             "database_version": version,
             # The insert as far as it was read, gap marked by Ns.
@@ -585,7 +639,8 @@ def main(argv=None) -> int:
     cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
             "label", "identity", "coverage", "lineage", "best_hit",
             "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "origin", "merged", "length", "database_version", "consensus"]
+            "origin", "merged", "chimera_of", "length", "database_version",
+            "consensus"]
     with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
               encoding="utf-8") as fh:
         w = writer(fh, cols)
@@ -643,6 +698,11 @@ def main(argv=None) -> int:
         "quality_filter_blind": len(qual_values) <= 2,
         "clusters": len(rows),
         "haplotype_splits": 0,
+        "chimeras": {"sequences": len(chim),
+                     "reads": sum(centroids[k][2] for k in chim),
+                     "within_genus_kept": {
+                         "sequences": len(kept_joins),
+                         "reads": sum(centroids[k][2] for k in kept_joins)}},
         "settings": {"window_r1": w1, "window_r2": w2, "max_ee": args.max_ee,
                      "min_size": args.min_size,
                      "max_diffs": args.max_diffs if args.max_diffs is not None

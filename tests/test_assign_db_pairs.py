@@ -296,6 +296,57 @@ def test_end_to_end() -> None:
         check("pair accounting closes, and the release version is recorded", ok)
 
 
+def test_gap_chimera() -> None:
+    print("\na chimera joined in the unread gap")
+    mm2 = minimap2()
+    if not mm2:
+        print("  SKIP: minimap2 not found")
+        return
+    rng = random.Random(21)
+    with tempfile.TemporaryDirectory() as tmp:
+        species = fx.build_tree(random.Random(3))
+        rel = os.path.join(tmp, "release")
+        fx.write_release(rel, species)
+        fx.write_primers(os.path.join(tmp, "primers.tsv"))
+        a = fx.amplicon(species["Haemonchus_contortus"]["seq"])
+        b = fx.amplicon(species["Ascaris_suum"]["seq"])
+        cfg = al.load_assay(fx.ASSAY)
+        t1 = al.revcomp(cfg["pcr1_overhang_rev"]) + "A" * 150
+        t2 = al.revcomp(cfg["pcr1_overhang_fwd"]) + "A" * 150
+        with gzip.open(os.path.join(tmp, "r1.fq.gz"), "wt") as f1, \
+                gzip.open(os.path.join(tmp, "r2.fq.gz"), "wt") as f2:
+            k = 0
+            for left, right, n in ((a, a, 300), (b, b, 200), (a, b, 25)):
+                for _ in range(n):
+                    f1.write(f"@{k} 1\n{(left + t1)[:150]}\n+\n{'I' * 150}\n")
+                    f2.write(f"@{k} 2\n{(al.revcomp(right) + t2)[:150]}\n+\n"
+                             f"{'I' * 150}\n")
+                    k += 1
+        with contextlib.redirect_stdout(io.StringIO()):
+            adp.main(["--r1", os.path.join(tmp, "r1.fq.gz"),
+                      "--r2", os.path.join(tmp, "r2.fq.gz"),
+                      "--database", rel, "--primers",
+                      os.path.join(tmp, "primers.tsv"), "--assay", fx.ASSAY,
+                      "--sample-id", "X", "--outdir", tmp, "--minimap2", mm2])
+        rows = list(csv.DictReader(open(os.path.join(tmp, "X.clusters.tsv")),
+                                   delimiter="\t"))
+        js = json.load(open(os.path.join(tmp, "X.assign_db.json")))
+        ch = [r for r in rows if r["origin"] == "chimera"]
+        check("R1 from one species and R2 from another: a chimera joined in "
+              "the gap, not named", len(ch) == 1 and ch[0]["reads"] == "25"
+              and ch[0]["chimera_of"].endswith("@gap") and not ch[0]["rank"]
+              and js["chimeras"]["reads"] == 25,
+              str([(r["reads"], r["origin"], r["chimera_of"], r["label"])
+                   for r in rows]))
+        check("only the excluded chimera carries origin 'chimera'",
+              all((r["origin"] == "chimera") == r["label"].startswith("chimera")
+                  for r in rows))
+        check("its parents are still named (to genus or species: at 2x150 "
+              "a sister can be identical over the windows)", sum(
+            1 for r in rows if r["rank"] in ("species", "genus")) == 2,
+            str([(r["reads"], r["rank"], r["label"]) for r in rows]))
+
+
 def rank_of(x):
     return x["rank"]
 
@@ -306,6 +357,7 @@ def main() -> int:
     test_whole_insert()
     test_divergent_window()
     test_end_to_end()
+    test_gap_chimera()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

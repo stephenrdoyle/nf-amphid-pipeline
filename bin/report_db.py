@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 
@@ -43,30 +44,139 @@ FUNNEL = (("clustered", "#3d6b8e", "classified"),
           ("low_quality", "#d9a0a0", "low quality (Illumina)"),
           ("no_primer", "#c9c2b0", "no primer pair"))
 # One colour per organism group, fixed so a group is the same colour in
-# every run's report. Target groups in strong colours, off-target muted.
+# every run's report. A fixed-order categorical palette chosen to stay
+# distinguishable under the common colour-vision deficiencies; the
+# off-target remainder in greys so the eye goes to the targets.
 GROUP_STYLE = (
-    ("helminths", "#0072B2", "helminths"),
-    ("protists", "#009E73", "protists"),
-    ("microsporidia", "#CC79A7", "microsporidia"),
-    ("host", "#D55E00", "host"),
-    ("fungi", "#9e9ac8", "fungi"),
-    ("plants", "#b5cf6b", "plants"),
-    ("invertebrates", "#E69F00", "other invertebrates"),
-    ("bacteria_archaea", "#8c6d31", "bacteria & archaea"),
-    ("organelle", "#c7c7a0", "organelles"),
-    ("unassigned", OTHER_COLOUR, "unassigned"),
+    ("helminths", "#2a78d6", "helminths"),
+    ("protists", "#1baf7a", "protists"),
+    ("microsporidia", "#e87ba4", "microsporidia"),
+    ("fungi", "#eda100", "fungi"),
+    ("host", "#eb6834", "host"),
+    ("plants", "#6250d6", "plants"),
+    ("invertebrates", "#9085e9", "other invertebrates"),
+    ("bacteria_archaea", "#888780", "bacteria & archaea"),
+    ("organelle", "#b4b2a9", "organelles"),
+    ("unassigned", "#d3d1c7", "unassigned"),
+    ("chimera", "#e34948", "PCR chimeras"),
 )
 GROUP_COLOUR = {g: c for g, c, _l in GROUP_STYLE}
 GROUP_LABEL = {g: lab for g, _c, lab in GROUP_STYLE}
 TARGET = ("helminths", "protists", "microsporidia")
+# Shown taxon by taxon like the targets: fungi are off-target, but can be
+# most of a sample, and what they are (moulds, yeasts, mushrooms) says
+# something about diet and how long a sample sat before collection.
+DETAIL = TARGET + ("fungi",)
 # Within a target group a run easily names more than the panel palette's
 # eight taxa, and the ninth onwards went grey - one helminth in three on
 # the fixture. Okabe-Ito, then Paul Tol's muted set, which stays
 # distinguishable under the common colour-vision deficiencies.
-WITHIN_COLOURS = TAXON_COLOURS + ["#332288", "#88CCEE", "#44AA99",
-                                  "#999933", "#AA4499", "#882255"]
-RANK_COLOURS = {"species": "#0b6b3a", "genus": "#3d8f5f",
-                "family": "#8a5300", "above": "#b03030"}
+WITHIN_COLOURS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4",
+                  "#008300", "#6250d6", "#e34948", "#332288", "#88CCEE",
+                  "#44AA99", "#999933", "#AA4499", "#882255"]
+# Sequential: darkest = most specific.
+RANK_COLOURS = {"species": "#0c447c", "genus": "#378add",
+                "family": "#85b7eb", "above": "#d3d1c7"}
+CHART_INK, CHART_GRID, CHART_AXIS = "#52514e", "#e1e0d9", "#c3c2b7"
+
+
+def columns_svg(labels: list, series: list, height: int = 300,
+                note: str = "", totals: list | None = None,
+                totals_label: str = "reads") -> str:
+    """Vertical stacked columns, one per sample, each scaled to 100%.
+
+    `series` is [(name, colour, [value per label])]; each column is the
+    values' shares of that column's total, stacked in series order from
+    the bottom. Drawn as inline SVG rather than with a charting library:
+    the report is one self-contained file that must open with no network.
+    Gridlines every 10%, the axis in muted ink, a 2px gap between stacked
+    segments, labels angled when there are many columns; every segment
+    carries a hover title with its name, share and value. Columns with no
+    data are drawn as an empty outline, so a blank well is visible as one.
+
+    With `totals`, a small bar panel sits above the columns, aligned with
+    them: the read count each column's percentages rest on. On a log
+    scale, because counts run from a handful to tens of thousands and the
+    shallow wells - where a 100% column means least - are the ones that
+    must not vanish against the deepest.
+    """
+    n = len(labels)
+    if not n:
+        return ""
+    th = 74 if totals is not None else 0       # height of the totals panel
+    height += th
+    left, top, bottom = 44, 8 + th, 64
+    slot = max(14.0, min(56.0, 900.0 / n))
+    width = left + slot * n + 8
+    bar = min(24.0, slot * 0.72)
+    ph = height - top - bottom
+    out = [f"<svg viewBox='0 0 {width:.0f} {height}' width='100%' "
+           f"style='max-width:{max(width, 360):.0f}px;display:block' "
+           f"role='img' aria-label='{esc(note)}'>"]
+    if totals is not None:
+        import math
+        tmax = max([t for t in totals if t] or [1])
+        decades = max(1, math.ceil(math.log10(max(tmax, 10))))
+        t0, tb = 6, 6 + th - 18                 # panel top and baseline
+        tph = tb - t0
+        def ty(v):
+            return tb - tph * min(1.0, math.log10(max(v, 1)) / decades)
+        for d in range(0, decades + 1):
+            y = tb - tph * d / decades
+            out.append(f"<line x1='{left}' x2='{width - 4:.0f}' y1='{y:.1f}' "
+                       f"y2='{y:.1f}' stroke='{CHART_GRID if d else CHART_AXIS}' "
+                       "stroke-width='1'/>")
+            lab = {0: "1", 1: "10", 2: "100", 3: "1k", 4: "10k", 5: "100k",
+                   6: "1M"}.get(d, f"1e{d}")
+            if decades <= 4 or d % 2 == 0 or d == decades:
+                out.append(f"<text x='{left - 6}' y='{y + 3.5:.1f}' "
+                           f"text-anchor='end' font-size='10' "
+                           f"fill='{CHART_INK}'>{lab}</text>")
+        out.append(f"<text x='{left}' y='{t0 - 0.5:.1f}' font-size='10' "
+                   f"fill='{CHART_INK}'>{esc(totals_label)} (log scale)</text>")
+        for i, lab in enumerate(labels):
+            v = totals[i] or 0
+            x = left + slot * i + (slot - bar) / 2
+            if v > 0:
+                y = ty(v)
+                out.append(f"<rect x='{x:.1f}' y='{y:.1f}' width='{bar:.1f}' "
+                           f"height='{max(tb - y, 0.5):.1f}' fill='#5f5e5a'>"
+                           f"<title>{esc(lab)}: {fmt(v)} {esc(totals_label)}"
+                           f"</title></rect>")
+    for k in range(11):
+        y = top + ph - ph * k / 10
+        out.append(f"<line x1='{left}' x2='{width - 4:.0f}' y1='{y:.1f}' "
+                   f"y2='{y:.1f}' stroke='{CHART_GRID if k else CHART_AXIS}' "
+                   "stroke-width='1'/>")
+        out.append(f"<text x='{left - 6}' y='{y + 3.5:.1f}' text-anchor='end' "
+                   f"font-size='10.5' fill='{CHART_INK}'>{k * 10}%</text>")
+    for i, lab in enumerate(labels):
+        x = left + slot * i + (slot - bar) / 2
+        tot = sum(vals[i] for _n, _c, vals in series)
+        if tot <= 0:
+            out.append(f"<rect x='{x:.1f}' y='{top}' width='{bar:.1f}' "
+                       f"height='{ph}' fill='none' stroke='{CHART_GRID}'/>")
+        else:
+            y = top + ph
+            for name, colour, vals in series:
+                v = vals[i]
+                if v <= 0:
+                    continue
+                h = ph * v / tot
+                gap = 2 if h > 3 else 0
+                out.append(
+                    f"<rect x='{x:.1f}' y='{y - h:.1f}' width='{bar:.1f}' "
+                    f"height='{max(h - gap, 0.5):.1f}' fill='{colour}'>"
+                    f"<title>{esc(lab)} - {esc(name)}: {100 * v / tot:.1f}% "
+                    f"({fmt(v)})</title></rect>")
+                y -= h
+        cx = x + bar / 2
+        ly = top + ph + 10
+        out.append(f"<text transform='translate({cx:.1f},{ly}) rotate(-55)' "
+                   f"text-anchor='end' font-size='10.5' fill='{CHART_INK}'>"
+                   f"{esc(lab)}</text>")
+    out.append("</svg>")
+    return "".join(out)
 NEG = ("neg_extraction", "neg_ntc")
 
 
@@ -77,16 +187,134 @@ def pct(x) -> str:
         return "—"
 
 
+def natural(sid: str):
+    """Sort key: A2 before A10, plate wells in row then column order."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", sid)]
+
+
 def legend(items) -> str:
     return ("<div class='legend' style='flex-wrap:wrap'>" + "".join(
         f"<span class='sw' style='background:{c}'></span>{esc(lab)}&nbsp;&nbsp;"
         for c, lab in items) + "</div>")
 
 
+# The report's own words for each end's fate rather than the
+# demultiplexer's, which reads "adapter not found" as a molecule that
+# never carried the index. diagnose_demux.py on a real flow cell
+# (FBH77883) found most such ends were reads that stopped short or
+# adapters damaged past the search budget, not missing indexes.
+ENDS_ORDER = (
+    ("ok", "read, both copies agree", ""),
+    ("ok_single_copy", "read from one copy",
+     "the other copy was unreadable; still accepted"),
+    ("anchor_not_found", "adapter not found at this end",
+     "the read stopped before it, the adapter was basecalled too badly to "
+     "recognise, or the molecule never carried it"),
+    ("barcode_off_read", "read ends inside the barcode",
+     "the adapter is there but the read stops before the index"),
+    ("no_copy_matched", "barcode matches no index",
+     "the index was read with too many errors for this index set"),
+    ("copies_disagreed", "the two copies disagree",
+     "an insertion or deletion shifted one copy"))
+
+
+def barcode_ends_html(be: dict) -> str:
+    """Why reads reached only one barcode, from the demultiplexer's
+    reason for every end of every read.
+
+    A read needs both ends, and each end fails on its own, so the losses
+    multiply: 87% and 78% per end is 68% of reads. The table says how
+    each end was lost, and the text says what would change it - which
+    is mostly the molecule, the basecalls or the plate design rather
+    than the demultiplexer's settings.
+    """
+    n = be["reads"] or 1
+    i5, i7 = be.get("i5") or {}, be.get("i7") or {}
+
+    def ok(d):
+        return d.get("ok", 0) + d.get("ok_single_copy", 0)
+
+    out = ["<h3>Why reads reached only one barcode</h3>"]
+    out.append(
+        f"<p>A read is placed in a well only when both of its barcodes are "
+        f"read. Each end fails on its own: the i5 end gave a barcode in "
+        f"{100 * ok(i5) / n:.0f}% of reads and the i7 end in "
+        f"{100 * ok(i7) / n:.0f}%, so only {100 * (be.get('both_ends') or 0) / n:.0f}% "
+        f"had both. {fmt(be.get('one_end'))} reads "
+        f"({100 * (be.get('one_end') or 0) / n:.0f}%) had one. How each end "
+        "was lost, over every read in the run:</p>")
+    rows = []
+    for k, lab, what in ENDS_ORDER:
+        a, b = i5.get(k, 0), i7.get(k, 0)
+        if not (a or b):
+            continue
+        rows.append(
+            f"<tr><td>{esc(lab)}</td>"
+            f"<td class='num'>{fmt(a)}</td><td class='num'>{100 * a / n:.1f}%</td>"
+            f"<td class='num'>{fmt(b)}</td><td class='num'>{100 * b / n:.1f}%</td>"
+            f"<td class='note'>{esc(what)}</td></tr>")
+    out.append("<table><thead><tr><th>End</th><th class='num'>i5</th><th></th>"
+               "<th class='num'>i7</th><th></th><th>What it means</th></tr>"
+               "</thead><tbody>" + "".join(rows) + "</tbody></table>")
+
+    notes = []
+    lost5, lost7 = n - ok(i5), n - ok(i7)
+    if lost5 and lost7 and max(lost5, lost7) > 1.4 * min(lost5, lost7):
+        worse = "i7" if lost7 > lost5 else "i5"
+        notes.append(
+            f"The {worse} end fails {max(lost5, lost7) / min(lost5, lost7):.1f}x "
+            "as often as the other. Reads come in both orientations, so "
+            "the end sequenced last - where quality falls off - is not "
+            "always the same end; a steady difference points at that side "
+            "of the construct instead: an incomplete PCR2 product, or an "
+            "adapter that basecalls badly.")
+    absent = i5.get("anchor_not_found", 0) + i7.get("anchor_not_found", 0)
+    if absent > 0.4 * (lost5 + lost7):
+        notes.append(
+            "Most failed ends have no adapter in the read at all: the "
+            "read stopped before reaching it (a broken or short "
+            "molecule), or the adapter was basecalled too badly to "
+            "recognise. Loosening the adapter search recovers little; "
+            "size selection and basecalling do more.")
+    model = be.get("basecall_model") or ""
+    if "_hac" in model or "_fast" in model:
+        notes.append(
+            f"Basecalled with <code>{esc(model)}</code>. Re-basecalling "
+            "with the SUP model would read more damaged adapters and "
+            "barcodes.")
+    used = [be.get("i5_used") or 0, be.get("i7_used") or 0]
+    wells = be.get("wells_declared") or 0
+    if wells and wells > max(used):
+        notes.append(
+            f"<b>Why one-end reads are not kept:</b> the plate combines "
+            f"{used[0]} i5 with {used[1]} i7 indexes for {wells} wells, so "
+            "one barcode narrows a read only to a row or column of wells. "
+            "Checking which index pairs exist on the plate rescued "
+            f"{fmt(be.get('rescued_by_combination') or 0)} of them. "
+            "Unique dual indexes - each i5 and each i7 used in one well "
+            "only - would let a single readable end name the well, and "
+            "most of these reads could then be kept (the demultiplexer's "
+            "<code>--accept-single-end</code>, not yet a pipeline option).")
+    elif wells and not be.get("accept_single_end"):
+        notes.append(
+            "Each index is used in one well only, so a single readable end "
+            "is enough to name the well: the demultiplexer's "
+            "<code>--accept-single-end</code> (not yet a pipeline option) "
+            "would keep most of these reads.")
+    notes.append(
+        "For the cause of each failed end - read too short, adapter "
+        "damaged, or the end lost while the other survived - and what "
+        "loosening the search would recover, run "
+        "<code>bin/diagnose_demux.py</code> on the reads.")
+    out.append("<ul>" + "".join(f"<li>{x}</li>" for x in notes) + "</ul>")
+    return "".join(out)
+
+
 def build(args) -> str:
     d = args.synthesis_dir
     calls = read_table(os.path.join(d, "db_calls.tsv"))
-    wells = read_table(os.path.join(d, "db_wells.tsv"))
+    wells = sorted(read_table(os.path.join(d, "db_wells.tsv")),
+                   key=lambda w: natural(w["sample_id"]))
     prevalence = read_table(os.path.join(d, "db_prevalence.tsv"))
     with open(os.path.join(d, "db_run_qc.json"), encoding="utf-8") as fh:
         qc = json.load(fh)
@@ -122,12 +350,75 @@ def build(args) -> str:
                          1 for c in det if c["group"] in TARGET
                          and c["rank"] != "species"))))
         + "</div>")
-    P.append("<p class='note'>Sections: <a href='#warn'>before reading the "
+    P.append("<p class='note'>Sections: <a href='#funnel'>where the "
+             "reads went</a> · <a href='#warn'>before reading the "
              "results</a> · <a href='#groups'>all reads by organism group</a> · "
              + " · ".join(f"<a href='#{g}'>{GROUP_LABEL[g]}</a>"
-                          for g in TARGET)
+                          for g in DETAIL)
              + " · <a href='#offtarget'>off-target</a> · <a href='#rank'>"
              "naming depth</a> · <a href='#calls'>every call</a></p>")
+
+    # -- the read funnel, as in the panel report -------------------------
+    # The per-well figures start at reads that reached a sample, already
+    # net of splitting and demultiplexing; this is the one place a run
+    # that lost its reads to barcodes, to primer dimer, or to bacteria
+    # looks different from one that was simply shallow.
+    funnel = qc.get("read_funnel") or {}
+    stages = funnel.get("stages") or []
+    if stages:
+        P.append("<h2 id='funnel'>Where the reads went</h2>")
+        P.append(
+            "<p>Every read from the sequencer to a classified target "
+            "organism, and what was lost at each step. The per-sample "
+            "figures further down start at <i>demultiplexed to a sample</i>"
+            ", so this is the only place a run that lost its reads to "
+            "unreadable barcodes, to primer dimer or to off-target "
+            "amplification looks different from one that was simply "
+            "shallow.</p>")
+        start = stages[0]["reads"] or 1
+        P.append("<table><thead><tr><th>Stage</th><th class='num'>Reads"
+                 "</th><th class='num'>% of start</th><th></th>"
+                 "<th>Lost here <span class='note'>(indented rows: what "
+                 "they hold)</span></th></tr></thead><tbody>")
+        for st in stages:
+            sub = st.get("sub")
+            indent = " style='padding-left:1.6em'"
+            p = st.get("percent_of_start")
+            frac = min(1.0, st["reads"] / start)
+            bar = (f'<div class="bar"><span style="width:{100 * frac:.2f}%;'
+                   f'background:{"#9fb4c4" if sub else "#3d6b8e"}">'
+                   '</span></div>')
+            lost = "<br>".join(f"{esc(k)} {fmt(v)}"
+                               for k, v in st["lost_here"].items()) or "—"
+            P.append(
+                f"<tr><td{indent if sub else ''}>{esc(st['stage'])}</td>"
+                f"<td class='num'>{fmt(st['reads'])}</td>"
+                f"<td class='num'>{'' if p is None else f'{p:.1f}%'}</td>"
+                f"<td style='width:28%'>{bar}</td>"
+                f"<td class='note'>{lost}</td></tr>")
+        P.append("</tbody></table>")
+        if funnel.get("handoff_balances") is False:
+            h = funnel.get("handoff") or {}
+            P.append(
+                f"<p>{flag('bad', 'MISMATCH')} Demultiplexing wrote "
+                f"{fmt(h.get('written_by_demultiplexing'))} reads to samples "
+                f"but assignment read {fmt(h.get('read_by_assignment'))}. "
+                "No filter accounts for the difference: data was lost "
+                "between the steps.</p>")
+        be = funnel.get("barcode_ends")
+        if be and be.get("reads"):
+            P.append(barcode_ends_html(be))
+        bad = funnel.get("wells_losing_over_half") or []
+        if bad:
+            P.append(
+                f"<p>{flag('warn', 'wells')} {len(bad)} well(s) classified "
+                "fewer than half the reads they received. They look shallow "
+                "below, but the reaction rather than the loading is the "
+                "likelier problem: "
+                + esc(", ".join(
+                    f"{b['sample_id']} ({100 * b['classified_fraction']:.0f}%)"
+                    for b in sorted(bad, key=lambda b: natural(b["sample_id"]))))
+                + ".</p>")
 
     # -- what could undermine the results -------------------------------
     P.append("<h2 id='warn'>Before reading the results</h2>")
@@ -163,6 +454,16 @@ def build(args) -> str:
             f"mask ({fmt(ia.get('mask_rows'))} sites) protects taxa in the "
             "database from both; a taxon missing from it is not protected, "
             "so a high rate here is worth a second look.")
+    chq = qc.get("chimeras") or {}
+    if chq.get("reads"):
+        items.append(
+            flag("warn" if chq.get("wells_over_5pct") else "ok", "chimeras")
+            + f" {fmt(chq['reads'])} reads ({100 * chq['of_clustered']:.1f}% "
+            "of classified) were PCR chimeras - joins of two more abundant "
+            "sequences in the same well. They are counted but never named, "
+            "and kept out of every composition."
+            + (" Over 5% in: " + esc(", ".join(chq["wells_over_5pct"])) + "."
+               if chq.get("wells_over_5pct") else ""))
     near = qc.get("near_3prime_calls") or []
     if near:
         items.append(flag("warn", "primer fit") + " Detected with a best hit "
@@ -182,33 +483,37 @@ def build(args) -> str:
         "and protists are read off. The last column is the read funnel: "
         "how many of the reads that reached the sample were classified.</p>")
     P.append(legend([(GROUP_COLOUR[g], GROUP_LABEL[g]) for g in present]))
+    P.append(columns_svg(
+        [w["sample_id"] for w in wells],
+        [(GROUP_LABEL[g], GROUP_COLOUR[g],
+          [int(w.get(f"{g}_reads") or 0) for w in wells]) for g in present],
+        note="Share of each well's classified reads by organism group",
+        totals=[int(w.get("clustered") or 0) for w in wells],
+        totals_label="classified reads"))
     rows = []
     for w in wells:
         funnel = [(lab, int(w.get(k) or 0), c) for k, c, lab in FUNNEL]
-        groups = [(GROUP_LABEL[g], int(w.get(f"{g}_reads") or 0),
-                   GROUP_COLOUR[g]) for g in present]
         rows.append(
             f"<tr><td>{esc(w['sample_id'])}<br><span class='note'>"
             f"{esc(w['sample_type'])}</span></td>"
             f"<td class='num'>{fmt(w['clustered'])}</td>"
-            f"<td style='width:45%;min-width:200px'>{stacked_bar(groups)}</td>"
             + "".join(f"<td class='num'>{pct(w.get(g + '_fraction'))}</td>"
                       for g in TARGET)
             + f"<td class='num'>{fmt(w['reads_in'])}</td>"
             f"<td style='min-width:80px'>{stacked_bar(funnel)}</td></tr>")
     P.append(
         "<div class='scroll'><table><thead><tr><th>sample</th>"
-        "<th class='num'>classified reads</th><th>organism groups</th>"
+        "<th class='num'>classified reads</th>"
         + "".join(f"<th class='num'>{GROUP_LABEL[g]}</th>" for g in TARGET)
         + "<th class='num'>reads in</th><th>funnel</th>"
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
     P.append(legend([(c, f"funnel: {lab}") for _k, c, lab in FUNNEL]))
 
-    # -- each target group on its own (VESPA Figs 4b-d, 5b-d) -------------
+    # -- each target group on its own (VESPA Figs 4b-d, 5b-d), then fungi --
     by_sample = defaultdict(list)
     for c in calls:
         by_sample[c["sample_id"]].append(c)
-    for g in TARGET:
+    for g in DETAIL:
         gcalls = [c for c in det if c["group"] == g and c["sample_type"] not in NEG]
         P.append(f"<h2 id='{g}'>{GROUP_LABEL[g].capitalize()}</h2>")
         if not any(c["group"] == g for c in calls):
@@ -219,36 +524,69 @@ def build(args) -> str:
             f"<p>Shares <b>within {GROUP_LABEL[g]}</b>: the other groups are "
             f"set aside and each well's {GROUP_LABEL[g]} reads are the "
             "denominator, so a well that is mostly host still shows its "
-            f"{GROUP_LABEL[g]} composition. The read count beside each bar is "
-            "what that composition rests on - few reads, little "
-            "confidence.</p>")
+            f"{GROUP_LABEL[g]} composition. Few reads under a column means "
+            "little confidence in it.</p>")
+        if g == "fungi":
+            P.append(
+                "<p>Fungi are not a target, but they can be most of a "
+                "sample, and what they are says something about it: moulds "
+                "and yeasts suggest diet, or growth on the sample between "
+                "defecation and collection, rather than infection.</p>"
+                "<p class='note'>PR2's fungal ranks are shifted: its "
+                "<i>class</i> column holds the phylum (Ascomycota), "
+                "<i>order</i> the subphylum and <i>family</i> the class. A "
+                "fungal call shown \"at family\" - Eurotiomycetes, for "
+                "instance - is really at class, and many mould genera are "
+                "identical over V4, so that is often as far as it can go."
+                "</p>")
         totals = defaultdict(float)
         for c in gcalls:
             totals[(c["rank"], c["taxon"])] += float(c["group_share"] or 0)
         top = [k for k, _v in sorted(totals.items(), key=lambda kv: -kv[1])]
         colours = {k: WITHIN_COLOURS[i]
                    for i, k in enumerate(top[:len(WITHIN_COLOURS)])}
-        P.append(legend([(colours[k], f"{k[1]} ({k[0]})") for k in colours]
+        # Legend by the readable label ("Chromadorea, unnamed family
+        # (nearest Haemonchus)"), not PR2's placeholder name.
+        label_of = {}
+        for c in gcalls:
+            label_of.setdefault((c["rank"], c["taxon"]), c["label"])
+        def name(k):
+            lab = label_of.get(k, k[1])
+            return lab if lab != k[1] else f"{k[1]} ({k[0]})"
+        P.append(legend([(colours[k], name(k)) for k in colours]
                         + ([(OTHER_COLOUR, "everything else")]
                            if len(top) > len(colours) else [])))
+        # The chart: one column per sample, its detected taxa as shares of
+        # the group. Taxa past the palette pool as "everything else".
+        named = list(colours)
+        series = []
+        for k in named:
+            series.append((name(k), colours[k], [
+                sum(float(c["group_share"] or 0) for c in by_sample.get(w["sample_id"], [])
+                    if c["group"] == g and c["call"] == "detected"
+                    and (c["rank"], c["taxon"]) == k) for w in samples]))
+        series.append(("everything else", OTHER_COLOUR, [
+            sum(float(c["group_share"] or 0) for c in by_sample.get(w["sample_id"], [])
+                if c["group"] == g and c["call"] == "detected"
+                and (c["rank"], c["taxon"]) not in colours) for w in samples]))
+        P.append(columns_svg([w["sample_id"] for w in samples], series,
+                             note=f"Composition within {GROUP_LABEL[g]}, per sample",
+                             totals=[int(w.get(f"{g}_reads") or 0) for w in samples],
+                             totals_label=f"{GROUP_LABEL[g]} reads"))
         rr = []
         for w in samples:
-            mine = [c for c in by_sample.get(w["sample_id"], [])
-                    if c["group"] == g and c["call"] == "detected"]
-            parts = [(f"{c['taxon']} ({c['rank']})", float(c["group_share"] or 0),
-                      colours.get((c["rank"], c["taxon"]), OTHER_COLOUR))
-                     for c in mine]
             n = int(w.get(f"{g}_reads") or 0)
             rr.append(f"<tr><td>{esc(w['sample_id'])}</td>"
                       f"<td class='num'>{fmt(n)}</td>"
-                      f"<td style='width:60%;min-width:200px'>"
-                      f"{stacked_bar(parts) if parts else '—'}</td>"
                       f"<td class='num'>{esc(w.get(g + '_richness', ''))}</td></tr>")
-        P.append("<table><thead><tr><th>sample</th>"
+        P.append("<div class='scroll' style='max-height:240px'><table><thead>"
+                 "<tr><th>sample</th>"
                  f"<th class='num'>{GROUP_LABEL[g]} reads</th>"
-                 "<th>composition within the group</th>"
                  "<th class='num'>richness</th></tr></thead><tbody>"
-                 + "".join(rr) + "</tbody></table>")
+                 + "".join(rr) + "</tbody></table></div>")
+        P.append("<p class='note'>An empty column is a sample with no "
+                 f"{GROUP_LABEL[g]} detected. The read count is what each "
+                 "column rests on.</p>")
 
         # presence table: taxa x samples, with prevalence
         taxa = [r for r in prevalence if r["group"] == g]
@@ -314,17 +652,13 @@ def build(args) -> str:
     # -- rank reached -----------------------------------------------------
     P.append("<h2 id='rank'>How deep each well could be named</h2>")
     P.append(legend([(c, k) for k, c in RANK_COLOURS.items()]))
-    rr = []
-    for w in samples:
-        parts = [(k, int(w.get(f"rank_{k}") or 0), c)
-                 for k, c in RANK_COLOURS.items()]
-        rr.append(f"<tr><td>{esc(w['sample_id'])}</td>"
-                  f"<td style='min-width:320px'>{stacked_bar(parts)}</td>"
-                  + "".join(f"<td class='num'>{fmt(w.get('rank_' + k))}</td>"
-                            for k in RANK_COLOURS) + "</tr>")
-    P.append("<table><thead><tr><th>sample</th><th>reads by rank reached</th>"
-             + "".join(f"<th class='num'>{k}</th>" for k in RANK_COLOURS)
-             + "</tr></thead><tbody>" + "".join(rr) + "</tbody></table>")
+    P.append(columns_svg(
+        [w["sample_id"] for w in samples],
+        [(k, c, [int(w.get(f"rank_{k}") or 0) for w in samples])
+         for k, c in RANK_COLOURS.items()],
+        note="Share of each sample's classified reads by the rank reached",
+        totals=[int(w.get("clustered") or 0) for w in samples],
+        totals_label="classified reads"))
     fl = (qc.get("settings") or {}).get("floors") or {}
     P.append(
         "<p class='note'>A consensus is named at a rank only when the lowest "
@@ -338,7 +672,7 @@ def build(args) -> str:
     # -- the calls ---------------------------------------------------------
     P.append("<h2 id='calls'>Every call</h2>")
     lev = {"detected": "ok", "below_blanks": "warn", "below_floor": "warn",
-           "low_depth": "bad"}
+           "low_depth": "bad", "chimera": "warn"}
     order = {g: i for i, (g, _c, _l) in enumerate(GROUP_STYLE)}
     cr = []
     for c in sorted(calls, key=lambda c: (c["sample_id"],

@@ -626,7 +626,8 @@ reproducibility choice, not a dependency.
                                 per organism group, target-group richness,
                                 reads by rank
     db_prevalence.tsv           per taxon: samples detected of samples tested
-    db_run_qc.json              release, blanks, internal adapter rates
+    db_run_qc.json              release, blanks, internal adapter rates,
+                                the run's read funnel
   synthesis/
     calls.tsv                   the results table
     calibration.tsv             per-well internal control

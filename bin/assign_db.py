@@ -446,6 +446,176 @@ def merge_close(clusters: list[dict], max_edits: int) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# chimeras
+# --------------------------------------------------------------------------
+
+
+def match_flags(q: str, p: str, band: int = 25) -> list[bool]:
+    """For each base of q, whether a global alignment to p matches it.
+
+    Banded edit-distance alignment (unit costs) with a traceback; an
+    inserted query base, or a substitution, is a mismatch at that base, and
+    a deletion from the query is charged to the base after it. Equal-length
+    sequences with no band needed are compared base for base, which is
+    what Illumina's fixed windows are.
+    """
+    n, m = len(q), len(p)
+    if n == m and band <= 0:
+        return [a == b for a, b in zip(q, p)]
+    band = max(band, abs(n - m) + 2)
+    INF = n + m + 1
+    # dp rows over j in [i - band, i + band]
+    prev = {j: j for j in range(0, min(m, band) + 1)}
+    back = [dict() for _ in range(n + 1)]
+    for j in prev:
+        back[0][j] = "L" if j else ""
+    for i in range(1, n + 1):
+        cur = {}
+        lo, hi = max(0, i - band), min(m, i + band)
+        for j in range(lo, hi + 1):
+            best, how = INF, ""
+            if j == 0:
+                best, how = i, "U"
+            else:
+                d = prev.get(j - 1, INF) + (q[i - 1] != p[j - 1])
+                if d < best:
+                    best, how = d, "D" if q[i - 1] == p[j - 1] else "S"
+                l = cur.get(j - 1, INF) + 1
+                if l < best:
+                    best, how = l, "L"
+            u = prev.get(j, INF) + 1
+            if u < best:
+                best, how = u, "U"
+            cur[j] = best
+            back[i][j] = how
+        prev = cur
+    flags = [False] * n
+    i, j = n, m
+    pending_del = False
+    while i > 0 or j > 0:
+        how = back[i].get(j, "U" if i else "L")
+        if how == "D":
+            flags[i - 1] = not pending_del
+            pending_del = False
+            i, j = i - 1, j - 1
+        elif how == "S":
+            flags[i - 1] = False
+            pending_del = False
+            i, j = i - 1, j - 1
+        elif how == "U":
+            flags[i - 1] = False
+            pending_del = False
+            i -= 1
+        else:
+            pending_del = True
+            j -= 1
+    return flags
+
+
+def chimera_scan(seqs: list[str], abund: list[int], fixed: bool = False,
+                 skew: float = 2.0, max_model_diffs: int = 2,
+                 min_gain: int = 3, max_parents: int = 6) -> dict:
+    """Which of a sample's sequences are chimeras of two others.
+
+    De novo, in the manner of UCHIME: a PCR chimera is made after its
+    parents, so it is rarer than they are, and it is explained better by
+    a join of two of them than by either alone. For each sequence, in
+    decreasing abundance, the candidate parents are those at least `skew`
+    times as abundant, the closest few by shared 8-mers. Each is aligned
+    to it base for base (match_flags), and the best single parent is
+    compared with the best two-parent model - left of a breakpoint from
+    one, right of it from the other, either way round. A chimera when
+
+      * the two-parent model leaves at most max_model_diffs differences;
+      * it explains at least min_gain more bases than the best single
+        parent - otherwise the sequence is simply a variant of one;
+      * and each side of the breakpoint holds a base its own parent has
+        and the other does not - both parents are really used.
+
+    Returns {index: (parent_left, parent_right, breakpoint, diffs_single,
+    diffs_model)} for each chimera, parents indexing `seqs`. A parent is
+    never itself a chimera found here.
+    """
+    order = sorted(range(len(seqs)), key=lambda k: (-abund[k], k))
+    kmers = [set(s[i:i + 8] for i in range(len(s) - 7)) for s in seqs]
+    found: dict = {}
+    for rank_q, q in enumerate(order):
+        cand = [p for p in order[:rank_q]
+                if p not in found and abund[p] >= skew * abund[q]]
+        if len(cand) < 2:
+            continue
+        cand.sort(key=lambda p: -len(kmers[q] & kmers[p]))
+        cand = cand[:max_parents]
+        qs = seqs[q]
+        L = len(qs)
+        vecs = {p: (match_flags(qs, seqs[p], 0) if fixed and
+                    len(seqs[p]) == L else match_flags(qs, seqs[p]))
+                for p in cand}
+        single = max(sum(v) for v in vecs.values())
+        if L - single <= max_model_diffs:
+            continue            # explained by one parent: not a chimera
+        best = None
+        for a in cand:
+            va = vecs[a]
+            pre = [0]
+            for x in va:
+                pre.append(pre[-1] + x)
+            for b in cand:
+                if a == b:
+                    continue
+                vb = vecs[b]
+                suf = [0] * (L + 1)
+                for i in range(L - 1, -1, -1):
+                    suf[i] = suf[i + 1] + vb[i]
+                for i in range(1, L):
+                    sc = pre[i] + suf[i]
+                    if best is None or sc > best[0]:
+                        best = (sc, a, b, i)
+        sc, a, b, i = best
+        model_diffs = L - sc
+        if model_diffs > max_model_diffs or sc - single < min_gain:
+            continue
+        va, vb = vecs[a], vecs[b]
+        left_ok = any(va[k] and not vb[k] for k in range(i))
+        right_ok = any(vb[k] and not va[k] for k in range(i, L))
+        if left_ok and right_ok:
+            found[q] = (a, b, i, L - single, model_diffs)
+    return found
+
+
+def parents_differ(call_a: dict, call_b: dict, tax: dict) -> bool:
+    """Do a chimera's two parents belong to different genera (or higher)?
+
+    Compared rank by rank down to genus, over the ranks BOTH parents were
+    named to. A join of two genera is a PCR artefact that would otherwise
+    read as a taxon, and is excluded. A join within one genus is kept: the
+    test cannot tell it from real variation (18S is multi-copy, and a
+    sample can carry genuine recombinant-looking haplotypes), V4 barely
+    separates species, and the database's species labels are its least
+    reliable part - Blastocystis ST2 x "Blastocystis sp." would otherwise
+    be excluded purely because one parent's species is missing. A parent
+    named only above genus counts as possibly the same genus, so doubt
+    about the parents never removes reads - with one exception: when BOTH
+    parents are "unclassified" (stopped above family because no record is
+    close), the join is excluded. Nothing places either parent, so there
+    is no genus to share, and on a real flow cell these were mostly joins
+    between unplaced gut bacteria (decided 2026-10-29).
+    """
+    lab_depth = RANKS.index("family")
+    if all(label_for(c, tax, lab_depth)[1].startswith("unclassified")
+           for c in (call_a, call_b)):
+        return True
+    la = tax.get(call_a.get("best_hit", ""), {})
+    lb = tax.get(call_b.get("best_hit", ""), {})
+    da, db = call_a.get("depth", -1), call_b.get("depth", -1)
+    for d in range(0, min(da, db, RANKS.index("genus")) + 1):
+        r = RANKS[d]
+        if la.get(r) and lb.get(r) and la[r] != lb[r]:
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------
 # classification
 # --------------------------------------------------------------------------
 
@@ -662,6 +832,8 @@ def main(argv=None) -> int:
                     "by three or more: at 2 a fifth of a real run's reads "
                     "were dropped as no_primer instead of counted as "
                     "bacteria")
+    ap.add_argument("--no-chimera-check", action="store_true",
+                    help="do not test consensus sequences for PCR chimeras")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args(argv)
     t0 = time.time()
@@ -761,12 +933,35 @@ def main(argv=None) -> int:
     label_depth = RANKS.index("family")
     total = sum(counts.values())
     order = sorted(keep, key=lambda k: (-counts[k], clusters[k]["consensus"]))
+    cid = {k: f"{sid}_c{n}" for n, k in enumerate(order, 1)}
+    # PCR chimeras among the final consensus sequences (chimera_scan): a
+    # chimera is kept and its reads counted, but it is not named - its
+    # label says which two clusters it joins - and synthesis keeps it out
+    # of every composition.
+    chim = {} if args.no_chimera_check else chimera_scan(
+        [clusters[k]["consensus"] for k in order], [counts[k] for k in order])
+    chim = {order[q]: (order[a], order[b], bp) for q, (a, b, bp, *_r)
+            in chim.items()}
+    # Only joins of two genera are excluded (parents_differ); a join
+    # within a genus is kept, named as usual, and marked.
+    kept_joins = {k: v for k, v in chim.items()
+                  if not parents_differ(calls[v[0]], calls[v[1]], tax)}
+    chim = {k: v for k, v in chim.items() if k not in kept_joins}
     rows = []
     for n, k in enumerate(order, 1):
         c, call = clusters[k], calls[k]
         taxon, label = label_for(call, tax, label_depth)
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
+        chimera_of = ""
+        if k in kept_joins:
+            a, b, bp = kept_joins[k]
+            chimera_of = f"{cid[a]}+{cid[b]}@{bp} within genus, kept"
+        if k in chim:
+            a, b, bp = chim[k]
+            chimera_of = f"{cid[a]}+{cid[b]}@{bp}"
+            taxon, label, d = "", f"chimera of {cid[a]} and {cid[b]}", -1
+            call = {**call, "rank": ""}
         rows.append({
             "sample_id": sid, "cluster": f"{sid}_c{n}",
             "reads": counts[k],
@@ -780,7 +975,9 @@ def main(argv=None) -> int:
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
             "db_resolution": resolution.get(call["best_hit"], ""),
-            "origin": c["origin"], "merged": c["merged"],
+            "origin": "chimera" if k in chim else c["origin"],
+            "merged": c["merged"],
+            "chimera_of": chimera_of,
             "length": len(c["consensus"]),
             "database_version": version,
             "consensus": c["consensus"],
@@ -788,7 +985,8 @@ def main(argv=None) -> int:
     cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
             "label", "identity", "coverage", "lineage", "best_hit",
             "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "origin", "merged", "length", "database_version", "consensus"]
+            "origin", "merged", "chimera_of", "length", "database_version",
+            "consensus"]
     with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
               encoding="utf-8") as fh:
         w = writer(fh, cols)
@@ -847,6 +1045,11 @@ def main(argv=None) -> int:
         "clusters": len(rows),
         "groups": len(heads),
         "haplotype_splits": cb.splits,
+        "chimeras": {"sequences": len(chim),
+                     "reads": sum(counts[k] for k in chim),
+                     "within_genus_kept": {
+                         "sequences": len(kept_joins),
+                         "reads": sum(counts[k] for k in kept_joins)}},
         "minimap2_calls": mm.calls,
         "settings": {**st.as_dict(), "floors": floors,
                      "lca_margin": args.lca_margin,

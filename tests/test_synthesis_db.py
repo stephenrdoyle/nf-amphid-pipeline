@@ -280,7 +280,8 @@ def test_groups() -> None:
         wells = {
             "S1": [cluster("S1", 1, "bt", 900), cluster("S1", 2, "hc", 75),
                    cluster("S1", 3, "tg", 25, rank="family", ident="0.9600")],
-            "S2": [cluster("S2", 1, "hc", 400), cluster("S2", 2, "ec", 100)],
+            "S2": [cluster("S2", 1, "hc", 400), cluster("S2", 2, "ec", 100),
+                   cluster("S2", 3, "sc", 60)],
         }
         calls, w, qc = run(write_case(tmp, wells,
                                       {"S1": "unknown", "S2": "unknown"}))
@@ -310,6 +311,177 @@ def test_groups() -> None:
                             "microsporidia", "offtarget"))
               and "Presence by sample" in doc
               and "No protists were classified" in doc)
+        fungal = [r for r in csv.DictReader(open(os.path.join(
+            tmp, "synthesis", "db_wells.tsv")), delimiter="\t")]
+        check("fungi get a section of their own, with richness per well",
+              "id='fungi'" in doc and "fungal ranks are shifted" in doc
+              and doc.find("id='fungi'") < doc.find("id='offtarget'")
+              and [r["fungi_richness"] for r in fungal] == ["0", "1"]
+              and "Saccharomyces_cerevisiae" in doc[doc.find("id='fungi'"):
+                                                    doc.find("id='offtarget'")],
+              str([r["fungi_richness"] for r in fungal]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_chimera_rows() -> None:
+    print("\nchimeras in synthesis")
+    tmp = tempfile.mkdtemp()
+    try:
+        ch = cluster("S1", 3, "tg", 30)
+        ch.update({"origin": "chimera", "rank": "", "taxon": "",
+                   "label": "chimera of S1_c1 and S1_c2", "lineage": ""})
+        wells = {"S1": [cluster("S1", 1, "hc", 600), cluster("S1", 2, "sc", 300),
+                        ch]}
+        calls, w, qc = run(write_case(tmp, wells, {"S1": "unknown"}))
+        c = [x for x in calls if x["group"] == "chimera"]
+        check("a chimera is its own group and call, never a detection",
+              len(c) == 1 and c[0]["call"] == "chimera" and c[0]["reads"] == "30",
+              str(c))
+        check("and stays out of every target group's composition",
+              w["S1"]["helminths_reads"] == "600"
+              and w["S1"]["chimera_reads"] == "30", str(w["S1"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_read_funnel() -> None:
+    print("\nthe read funnel")
+    tmp = tempfile.mkdtemp()
+    try:
+        ch = cluster("S1", 3, "tg", 30)
+        ch.update({"origin": "chimera", "rank": "", "taxon": "",
+                   "label": "chimera of S1_c1 and S1_c2", "lineage": ""})
+        wells = {"S1": [cluster("S1", 1, "hc", 600), cluster("S1", 2, "bt", 300),
+                        ch],
+                 "S2": [cluster("S2", 1, "ec", 40, rank="family",
+                                label="unclassified, 90% to Escherichia")]}
+        args = write_case(tmp, wells, {"S1": "unknown", "S2": "unknown"})
+        # S2 is mostly primer dimer: 60 of its 100 reads have no primer pair.
+        js = os.path.join(tmp, "assign_db", "S2.assign_db.json")
+        with open(js) as fh:
+            d = json.load(fh)
+        d["reads"].update(reads_in=100, no_primer=60)
+        with open(js, "w") as fh:
+            json.dump(d, fh)
+        # Without a demultiplexer (Illumina) the funnel starts at the
+        # pairs assignment read, and ends at the target groups.
+        _c, _w, qc = run(args)
+        st = qc["read_funnel"]["stages"]
+        check("Illumina: the funnel starts at the pairs in",
+              st[0]["stage"] == "read pairs in" and st[0]["reads"] == 1035,
+              str(st[0]))
+        main_st = [x for x in st if not x.get("sub")]
+        check("primer losses, chimeras and off-target are each a stage",
+              [x["reads"] for x in main_st] == [1035, 970, 970, 940, 600]
+              and main_st[3]["lost_here"] == {"PCR chimeras": 30}
+              and main_st[4]["lost_here"] == {"host": 300,
+                                              "bacteria / archaea": 40},
+              str(st))
+        sub = {x["stage"]: x for x in st if x.get("sub")}
+        check("each target group is a row, by the rank it was named to",
+              sub["helminths"]["reads"] == 600
+              and sub["helminths"]["lost_here"] == {"species": 600}
+              and sub["microsporidia"]["reads"] == 0, str(sub))
+        check("and unclassified reads are a row of their own",
+              sub["of which unclassified (under the family floor, named to "
+                  "no family)"][
+                  "reads"] == 40 and sub["of which unclassified (under the family floor, "
+                  "named to no family)"]["lost_here"] == {"bacteria / archaea": 40},
+              str(sub))
+        check("a well that classified under half its reads is named",
+              [b["sample_id"] for b in
+               qc["read_funnel"]["wells_losing_over_half"]] == ["S2"],
+              str(qc["read_funnel"]["wells_losing_over_half"]))
+        check("with no demultiplexer there is no handoff to check",
+              "handoff_balances" not in qc["read_funnel"])
+        # Nanopore: from the sequencer, through the split and the demux.
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump({"per_sample": {"S1": 935, "S2": 100},
+                       "total_reads": 1155, "assigned_reads": 1035,
+                       "by_tier": {"A": 1035, "B": 100, "D": 20},
+                       "tier_meaning": {"B": "one end only - truncated"}}, fh)
+        with open(os.path.join(tmp, "split.json"), "w") as fh:
+            json.dump({"reads_in": 1050, "pieces_out": 1155,
+                       "pieces_dropped_below_min_length": 7}, fh)
+        args += ["--demux-summary", os.path.join(tmp, "demux.json"),
+                 "--split-summary", os.path.join(tmp, "split.json")]
+        _c, _w, qc = run(args)
+        fn = qc["read_funnel"]
+        st = fn["stages"]
+        check("nanopore: from the sequencer, through split and demux",
+              [s["reads"] for s in st[:3]] == [1050, 1155, 1035]
+              and st[2]["lost_here"] == {"one end only (tier B)": 100,
+                                         "tier D": 20}, str(st[:3]))
+        check("percentages are of the reads off the sequencer",
+              [x for x in st if x["stage"].startswith("target")][0][
+                  "percent_of_start"] == round(100 * 600 / 1050, 2))
+        check("the demux-to-assignment handoff balances", fn[
+            "handoff_balances"] is True, str(fn.get("handoff")))
+        check("no end reasons, no barcode-ends section",
+              "barcode_ends" not in fn)
+        # Why reads reached one barcode: the demultiplexer's per-end
+        # reasons, and whether the plate design could use one end.
+        ends = {"total_reads": 1155, "assigned_reads": 1035,
+                "by_tier": {"A": 1035, "B": 120},
+                "per_sample": {"S1": 935, "S2": 100},
+                "i5_end_reasons": {"ok": 1100, "anchor_not_found": 55},
+                "i7_end_reasons": {"ok": 1000, "ok_single_copy": 30,
+                                   "anchor_not_found": 100,
+                                   "barcode_off_read": 25},
+                "combination_check": {"resolved": 3},
+                "combination_grid": {"i5_used": 2, "i7_used": 2,
+                                     "wells_declared": 4}}
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump(ends, fh)
+        with open(os.path.join(tmp, "split.json"), "w") as fh:
+            json.dump({"reads_in": 1050, "pieces_out": 1155,
+                       "basecalling": {"basecall_model":
+                                       "dna_r10.4.1_e8.2_400bps_hac@v5.2.0"}},
+                      fh)
+        _c, _w, qc = run(args)
+        be = qc["read_funnel"].get("barcode_ends") or {}
+        check("per-end reasons are carried, whole run",
+              be.get("i7", {}).get("anchor_not_found") == 100
+              and be.get("one_end") == 120 and be.get("wells_declared") == 4,
+              str(be))
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("the report says why reads reached one barcode",
+              "Why reads reached only one barcode" in html
+              and "row or column" in html and "SUP model" in html
+              and "i7 end fails" in html)
+        ends["combination_grid"] = {"i5_used": 4, "i7_used": 4,
+                                    "wells_declared": 4}
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump(ends, fh)
+        run(args)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("with unique dual indexes it says one end would do",
+              "one well only, so a single readable end" in html
+              and "row or column" not in html)
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump({"per_sample": {"S1": 935, "S2": 100},
+                       "total_reads": 1155, "assigned_reads": 1045,
+                       "by_tier": {"A": 1045}}, fh)
+        _c, _w, qc = run(args)
+        check("and reads lost between the steps are caught",
+              qc["read_funnel"]["handoff_balances"] is False)
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("the report shows the funnel before the warnings",
+              0 < html.find("Where the reads went") < html.find(
+                  "Before reading the results")
+              and "MISMATCH" in html and "reads off the sequencer" in html)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -318,6 +490,8 @@ def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
     test_groups()
+    test_chimera_rows()
+    test_read_funnel()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
