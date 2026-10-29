@@ -75,7 +75,8 @@ def cluster(sid, k, key, reads, rank="species", ident="1.0000", label=None):
             "label": label or taxon, "identity": ident, "coverage": "1.000",
             "lineage": ";".join(lin[:d + 1]), "best_hit": HITS[key],
             "best_hit_lineage": LIN[key], "near_hits": 1,
-            "lca_rank": rank, "db_resolution": "species", "origin": "group",
+            "lca_rank": rank, "db_resolution": "species", "db_margin": "",
+            "origin": "group",
             "merged": 0, "length": 500, "database_version": "t-1",
             "consensus": "ACGT"}
 
@@ -486,12 +487,58 @@ def test_read_funnel() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_v080_margin_and_ranks() -> None:
+    print("\nrelease v0.8.0: fragile species and real ranks")
+    tmp = tempfile.mkdtemp()
+    try:
+        hc = cluster("S1", 1, "hc", 600)
+        hc["db_margin"] = "1"
+        tg = cluster("S1", 2, "tg", 300, rank="family")
+        tg["label"] = "Chromadorea, unnamed order (nearest Teladorsagia)"
+        wells = {"S1": [hc, tg]}
+        args = write_case(tmp, wells, {"S1": "unknown"})
+        with open(os.path.join(tmp, "release", "rank_names.tsv"), "w") as fh:
+            fh.write("# what the columns hold\nmatch_column\tmatch_value\t"
+                     "subdivision\tclass\torder\tfamily\tnote\n"
+                     "class\tNematoda\tkingdom\tphylum\tclass\t"
+                     "order|placeholder\t\n")
+        calls, w, qc = run(args)
+        c = call_of(calls, "S1", "Haemonchus_contortus")
+        check("a species call carries its margin", c["margin"] == "1", str(c))
+        check("and one on 1-2 edits is listed as fragile",
+              [f["taxon"] for f in qc["fragile_species_calls"]]
+              == ["Haemonchus_contortus"], str(qc["fragile_species_calls"]))
+        t = call_of(calls, "S1", "Trichostrongylidae")
+        check("the real rank is given where PR2's column differs",
+              t["rank"] == "family" and t["rank_meaning"]
+              == "order|placeholder", str(t))
+        check("and naming depth counts it above family",
+              w["S1"]["rank_family"] == "0" and w["S1"]["rank_above"] == "300",
+              str({k: w["S1"][k] for k in w["S1"] if k.startswith("rank_")}))
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("the report warns of the fragile name and shows the real rank",
+              "fragile species" in html and "by 1 edit" in html
+              and "= order or placeholder" in html)
+        check("synthesis.depth_bucket: only a real family counts as family",
+              syn.depth_bucket("family", "") == "family"
+              and syn.depth_bucket("family", "family") == "family"
+              and syn.depth_bucket("family", "class|order") == "above family"
+              and syn.depth_bucket("genus", "") == "genus")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
     test_groups()
     test_chimera_rows()
     test_read_funnel()
+    test_v080_margin_and_ranks()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

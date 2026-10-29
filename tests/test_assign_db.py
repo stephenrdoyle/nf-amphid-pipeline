@@ -561,6 +561,58 @@ def test_chimeras() -> None:
           f.count(False) == 1, str(f))
 
 
+def test_release_v080_columns() -> None:
+    print("\nrelease v0.8.0: margin and rank_names")
+    # margin: species calls only; blank on a species row is "large";
+    # a release without the column gives no margin at all.
+    res = {"A": ("species", "1"), "B": ("species", ""), "C": ("genus", ""),
+           "D": ("species", None)}
+    check("a species call carries its record's margin",
+          adb.margin_of("species", "A", res) == "1")
+    check("a blank margin on a species row is large, not unknown",
+          adb.margin_of("species", "B", res) == "large")
+    check("no margin above species, nor before v0.8.0",
+          adb.margin_of("genus", "A", res) == ""
+          and adb.margin_of("species", "C", res) == ""
+          and adb.margin_of("species", "D", res) == "")
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp, "rank_names.tsv"), "w") as fh:
+            fh.write("# comment\nmatch_column\tmatch_value\tsubdivision\t"
+                     "class\torder\tfamily\tnote\n"
+                     "class\tNematoda\tkingdom\tphylum\tclass\t"
+                     "order|placeholder\t\n"
+                     "subdivision\tApicomplexa\tphylum\tclass\torder\t"
+                     "family\tas named\n")
+        rn = al.load_rank_names(tmp)
+        lin = ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Chromadorea;"
+               "Chromadorea_X;Haemonchus;Haemonchus_contortus").split(";")
+        check("rank_names.tsv is read past its comments",
+              len(rn) == 2 and al.rank_meaning(rn, lin, "family")
+              == "order|placeholder", str(rn))
+        check("the rank to say: a nematode's family column is an order",
+              al.rank_word(rn, lin, "family") == "order"
+              and al.rank_word(rn, lin, "order") == "class"
+              and al.rank_word(rn, ["Eukaryota"], "family") == "family")
+        check("no table, no change", al.load_rank_names(
+            os.path.join(tmp, "nowhere")) == [])
+        ptax = {"H": dict(zip(al.RANKS, lin))}
+        _t, label = adb.label_for({"best_hit": "H", "depth": 6,
+                                   "lca_depth": 6, "identity": 1.0},
+                                  ptax, 6, rn)
+        check("a nematode placeholder family is an unnamed order",
+              label == "Chromadorea, unnamed order (nearest Haemonchus)",
+              label)
+        _t, label = adb.label_for({"best_hit": "H", "depth": 5,
+                                   "lca_depth": 5, "identity": 1.0},
+                                  ptax, 6, rn)
+        check("and a tie at its order column is unresolved below class",
+              label == "Chromadorea, unresolved below class "
+                       "(100% to Haemonchus)", label)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_pileup_consensus()
     test_binomial()
@@ -570,6 +622,7 @@ def main() -> int:
     test_floor_parsing()
     test_trim_reads()
     test_chimeras()
+    test_release_v080_columns()
     test_end_to_end()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

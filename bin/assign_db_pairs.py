@@ -68,8 +68,8 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, load_assay, load_primers, load_release_manifest, load_taxonomy,
-    read_table, release_version, revcomp, writer,
+    RANKS, load_assay, load_primers, load_rank_names, load_release_manifest,
+    load_taxonomy, read_table, release_version, revcomp, writer,
 )
 import assign_db as adb  # noqa: E402
 from prep_illumina import paired_reads, trim_readthrough  # noqa: E402
@@ -365,6 +365,7 @@ def main(argv=None) -> int:
     w1 = args.window_r1 or int(win[0])
     w2 = args.window_r2 or int(win[1])
     tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"))
+    rank_names = load_rank_names(args.database)
     floors = adb.parse_floors(args.floors)
     ps = load_primers(args.primers)
     ps.max_edits = args.primer_max_edits
@@ -564,7 +565,9 @@ def main(argv=None) -> int:
         rl2 = w2 + len(next(iter(rev_seq.values()), ""))
     rpath = os.path.join(args.database, f"resolution_illumina_{rl1}x{rl2}.tsv")
     if os.path.exists(rpath):
-        resolution = {r["id"]: r.get("deepest_rank", "") for r in read_table(rpath)}
+        # id -> (deepest rank, margin); see assign_db.margin_of.
+        resolution = {r["id"]: (r.get("deepest_rank", ""), r.get("margin"))
+                      for r in read_table(rpath)}
     total = fate["clustered"]
     order = sorted(range(len(centroids)), key=lambda k: (-centroids[k][2], k))
     cid = {k: f"{sid}_p{n}" for n, k in enumerate(order, 1)}
@@ -593,7 +596,7 @@ def main(argv=None) -> int:
     for n, k in enumerate(order, 1):
         x, y, cnt = centroids[k]
         call = calls[k]
-        taxon, label = adb.label_for(call, tax, label_depth)
+        taxon, label = adb.label_for(call, tax, label_depth, rank_names)
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
         chimera_of = ""
@@ -626,7 +629,9 @@ def main(argv=None) -> int:
             "best_hit_lineage": ";".join(lin.get(r, "") for r in RANKS),
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
-            "db_resolution": resolution.get(call["best_hit"], ""),
+            "db_resolution": resolution.get(call["best_hit"], ("",))[0],
+            "db_margin": adb.margin_of(call["rank"], call["best_hit"],
+                                       resolution),
             "origin": ("chimera" if k in chim else "whole_insert" if not y
                        else "pair_split" if call.get("split_mates") else "pair"),
             "merged": 0,
@@ -639,8 +644,8 @@ def main(argv=None) -> int:
     cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
             "label", "identity", "coverage", "lineage", "best_hit",
             "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "origin", "merged", "chimera_of", "length", "database_version",
-            "consensus"]
+            "db_margin", "origin", "merged", "chimera_of", "length",
+            "database_version", "consensus"]
     with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
               encoding="utf-8") as fh:
         w = writer(fh, cols)

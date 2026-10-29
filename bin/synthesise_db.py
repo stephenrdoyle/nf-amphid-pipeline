@@ -77,8 +77,8 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, load_release_manifest, read_table, release_version,
-    restore_declared_ids, writer,
+    RANKS, load_rank_names, load_release_manifest, rank_meaning, read_table,
+    release_version, restore_declared_ids, writer,
 )
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
@@ -176,11 +176,14 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
         else:
             key = (c["rank"], c["taxon"], c["label"])
         a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
-                                 "lineage": c["lineage"], "best_hits": []})
+                                 "lineage": c["lineage"], "best_hits": [],
+                                 "margins": []})
         a["reads"] += int(c["reads"])
         a["clusters"] += 1
         a["identity"] = max(a["identity"], float(c["identity"] or 0))
         a["best_hits"].append(c["best_hit"])
+        if c.get("db_margin"):
+            a["margins"].append(c["db_margin"])
     out = []
     for (rank, taxon, label), a in agg.items():
         fits = sorted({primer_fit.get(h, "") for h in a["best_hits"]} - {""})
@@ -190,8 +193,47 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
                     "group": "chimera" if label == "chimera" else organism_group(
                         [x for x in a["lineage"].split(";")] if a["lineage"]
                         else [], host_clade),
-                    "primer_fit": ",".join(fits)})
+                    "primer_fit": ",".join(fits),
+                    "margin": weakest_margin(a["margins"])})
     return out
+
+
+def weakest_margin(margins: list[str]) -> str:
+    """A species call pooled from several clusters is as fragile as its
+    most fragile best hit: the fewest edits, or "large" when none has
+    another species near."""
+    nums = [int(m) for m in margins if m.isdigit()]
+    return str(min(nums)) if nums else ("large" if margins else "")
+
+
+def depth_bucket(rank: str, meaning: str) -> str:
+    """Species, genus, family or "above family", for the naming-depth
+    summaries, read through rank_names.tsv: PR2's family column holds an
+    order in nematodes and a class in most fungi, so a call there is
+    above family unless the table says the column is a family (or has no
+    row for the clade, when it means roughly what it says)."""
+    if rank in ("species", "genus"):
+        return rank
+    if rank == "family":
+        real = [x for x in meaning.split("|") if x and x != "placeholder"]
+        return "family" if not real or real[0] == "family" else "above family"
+    return "above family"
+
+
+def fragile_species(calls: list[dict]) -> list[dict]:
+    """Detected species calls whose name rests on 1-2 edits, by species:
+    the margin, the samples, and the group, most samples first."""
+    by: dict = {}
+    for c in calls:
+        if c["call"] == "detected" and c["margin"] in ("1", "2"):
+            f = by.setdefault(c["taxon"], {"taxon": c["taxon"],
+                                           "label": c["label"],
+                                           "group": c["group"],
+                                           "margin": int(c["margin"]),
+                                           "samples": []})
+            f["margin"] = min(f["margin"], int(c["margin"]))
+            f["samples"].append(c["sample_id"])
+    return sorted(by.values(), key=lambda f: (-len(f["samples"]), f["taxon"]))
 
 
 def blank_limits(wells: dict, rows: dict, min_fraction_depth: int) -> dict:
@@ -315,9 +357,8 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict,
             unclass[c["group"]] += n
             depth[c["group"]]["unclassified"] += n
         else:
-            depth[c["group"]][c["rank"] if c["rank"] in
-                              ("species", "genus", "family")
-                              else "above family"] += n
+            depth[c["group"]][c.get("depth") or depth_bucket(
+                c["rank"], c.get("rank_meaning", ""))] += n
     if calls is not None:
         stages.append({
             # Named by the floor it missed, from the run's own settings:
@@ -459,6 +500,18 @@ def main(argv=None) -> int:
 
     rows = {sid: taxon_rows(w, args.host_clade, primer_fit)
             for sid, w in wells.items()}
+    # What the rank reached actually is, where PR2's column is not that
+    # rank (rank_names.tsv, v0.8.0 on): "order" for a nematode's family
+    # column. Blank where the table has no row or no table exists.
+    rank_names = load_rank_names(args.database)
+    for rs in rows.values():
+        for r in rs:
+            lin = r["lineage"].split(";") if r["lineage"] else []
+            m = (rank_meaning(rank_names, lin, r["rank"])
+                 if r["rank"] in ("subdivision", "class", "order", "family")
+                 else "")
+            r["rank_meaning"] = "" if m == r["rank"] else m
+            r["depth"] = depth_bucket(r["rank"], m)
     limits, n_blanks = blank_limits(wells, rows, args.min_depth)
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -466,7 +519,7 @@ def main(argv=None) -> int:
                  "label", "reads", "rel_abundance", "call", "limit_reads",
                  "limit_basis", "identity", "clusters", "lineage",
                  "group", "group_reads", "group_share", "primer_fit",
-                 "database_version"]
+                 "margin", "rank_meaning", "database_version"]
     calls = []
     for sid in sorted(wells):
         w = wells[sid]
@@ -514,7 +567,14 @@ def main(argv=None) -> int:
                 # protozoa-only panels show it.
                 "group_share": f"{r['reads'] / in_group[r['group']]:.6f}"
                 if in_group[r["group"]] else "",
-                "primer_fit": r["primer_fit"], "database_version": version})
+                "primer_fit": r["primer_fit"],
+                # Edits from the best record to the nearest other species
+                # (species calls, v0.8.0 releases on). 1-2 is fragile.
+                "margin": r["margin"],
+                # What the rank column really is for this clade, where it
+                # is not what it says (rank_names.tsv).
+                "rank_meaning": r["rank_meaning"],
+                "database_version": version})
     with open(os.path.join(args.outdir, "db_calls.tsv"), "w",
               encoding="utf-8") as fh:
         wr = writer(fh, call_cols)
@@ -543,8 +603,8 @@ def main(argv=None) -> int:
             off[r["group"]] += r["reads"]
             if r["label"].startswith("unclassified"):
                 unclass += r["reads"]
-            ranks[r["rank"] if r["rank"] in ("species", "genus", "family")
-                  else "above"] += r["reads"]
+            ranks[{"above family": "above"}.get(r["depth"], r["depth"])] += \
+                r["reads"]
         d = w.depth or 1
         wells_out.append({
             "run_id": args.run_id, "sample_id": sid,
@@ -675,6 +735,9 @@ def main(argv=None) -> int:
             wells_out, demux, split, calls,
             (next((w.summary.get("settings", {}).get("floors") for w in
                    wells.values() if w.summary), None) or {}).get("family")),
+        # Detected species calls whose name rests on 1-2 edits: the
+        # nearest other species in the release is that close.
+        "fragile_species_calls": fragile_species(calls),
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),

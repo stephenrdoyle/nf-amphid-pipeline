@@ -1437,6 +1437,49 @@ LOOKALIKE_COLUMNS = ["seq_id", "anchor", "strand", "position", "edits",
                      "context"]
 
 
+def load_rank_names(release: str) -> list[dict]:
+    """The release's rank_names.tsv (v0.8.0 on): what each positional
+    taxonomy column holds, by clade. [] when the release has none.
+
+    The nine columns of taxonomy.tsv are PR2's positional levels, not
+    Linnaean ranks. In nematodes `family` holds an order (Rhabditida) or
+    a placeholder; in Ascomycota `order` holds the subphylum and `family`
+    the class. Read as named, "Chromadorea, unnamed family" is really an
+    unnamed order, and a call "at family" in the fungi is at class. Rows
+    are matched in order on one lineage column (`match_column` equal to
+    `match_value`); the values may list several ranks, commonest first
+    ("class|order"), or "placeholder" where the column carries nothing.
+    """
+    path = os.path.join(release, "rank_names.tsv")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        lines = [l for l in fh if l.strip() and not l.startswith("#")]
+    return list(csv.DictReader(lines, delimiter="\t"))
+
+
+def rank_meaning(rank_names: list[dict], lineage: list[str],
+                 column: str) -> str:
+    """What `column` holds for a lineage, from rank_names.tsv: "order",
+    "class|order", "placeholder"... or "" where no row applies (the
+    column then means roughly what it says)."""
+    for row in rank_names:
+        k = RANKS.index(row["match_column"]) if row.get(
+            "match_column") in RANKS else -1
+        if 0 <= k < len(lineage) and lineage[k] == row.get("match_value"):
+            return row.get(column, "") or ""
+    return ""
+
+
+def rank_word(rank_names: list[dict], lineage: list[str], column: str) -> str:
+    """The rank to SAY for a positional column: its commonest real rank
+    from rank_names.tsv, or the column's own name. "family" for a
+    nematode is "order"; for Apicomplexa, or with no table, "family"."""
+    m = rank_meaning(rank_names, lineage, column)
+    real = [x for x in m.split("|") if x and x != "placeholder"]
+    return real[0] if real else column
+
+
 def load_release_manifest(release: str) -> dict:
     """manifest.json of a release, or ValueError saying what is wrong."""
     path = os.path.join(release, "manifest.json")
