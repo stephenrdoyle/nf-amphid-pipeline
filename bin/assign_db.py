@@ -595,8 +595,16 @@ def parents_differ(call_a: dict, call_b: dict, tax: dict) -> bool:
     reliable part - Blastocystis ST2 x "Blastocystis sp." would otherwise
     be excluded purely because one parent's species is missing. A parent
     named only above genus counts as possibly the same genus, so doubt
-    about the parents never removes reads.
+    about the parents never removes reads - with one exception: when BOTH
+    parents are "unclassified" (stopped above family because no record is
+    close), the join is excluded. Nothing places either parent, so there
+    is no genus to share, and on a real flow cell these were mostly joins
+    between unplaced gut bacteria (decided 2026-10-29).
     """
+    lab_depth = RANKS.index("family")
+    if all(label_for(c, tax, lab_depth)[1].startswith("unclassified")
+           for c in (call_a, call_b)):
+        return True
     la = tax.get(call_a.get("best_hit", ""), {})
     lb = tax.get(call_b.get("best_hit", ""), {})
     da, db = call_a.get("depth", -1), call_b.get("depth", -1)

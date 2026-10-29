@@ -575,7 +575,12 @@ genuine recombinant-looking haplotypes - V4 barely separates species, and
 the database's species labels are its least reliable part (Blastocystis
 ST2 x "Blastocystis sp." would otherwise be excluded purely because one
 parent's species is missing). A parent named only above genus counts as
-possibly the same genus, so doubt about the parents never removes reads.
+possibly the same genus, so doubt about the parents never removes reads
+- except when both parents are "unclassified" (stopped above family for
+want of a close record): nothing places either, so there is no genus to
+share, and the join is excluded (decided 2026-10-29; on the VESPA
+nanopore flow cell these were mostly joins between unplaced gut
+bacteria). Parents stopped by a tie ("unresolved") still go by genus.
 
 An excluded chimera's reads are counted, never named: its label is
 "chimera of <cluster> and <cluster>", its call `chimera`, its group

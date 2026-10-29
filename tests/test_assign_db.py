@@ -546,6 +546,13 @@ def test_chimeras() -> None:
           "reads)", not adb.parents_differ(c("N", 8), c("F", 6), lt))
     check("a parent named only to family, different family: excluded",
           adb.parents_differ(c("A", 8), c("F", 6), lt))
+    u1 = {"best_hit": "N", "depth": 4, "lca_depth": 8, "identity": 0.9}
+    u2 = {"best_hit": "A", "depth": 4, "lca_depth": 8, "identity": 0.88}
+    check("both parents unclassified: excluded",
+          adb.parents_differ(u1, u2, lt))
+    tie = {"best_hit": "N", "depth": 4, "lca_depth": 4, "identity": 1.0}
+    check("an unclassified parent with an unresolved (tied) one: by genus "
+          "as before", not adb.parents_differ(u1, tie, lt))
     f = adb.match_flags("ACGTACGT", "ACGAACGT", 0)
     check("match_flags base for base", f == [True, True, True, False,
                                              True, True, True, True])
