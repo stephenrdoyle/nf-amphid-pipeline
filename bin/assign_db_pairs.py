@@ -547,7 +547,29 @@ def main(argv=None) -> int:
             worse = min(one, key=lambda c: c["identity"])
             calls[k] = {**worse, "depth": depth,
                         "rank": RANKS[depth] if depth >= 0 else "",
-                        "lca_depth": depth, "split_mates": True}
+                        "lca_depth": depth, "split_mates": True,
+                        # Each window's own call, for the label: two
+                        # windows that disagree below what they share
+                        # are usually a chimera or an artefact.
+                        "windows": [(c["best_hit"], c["identity"],
+                                     c["depth"]) for c in one]}
+        # Identity from a full alignment of the windows to the best
+        # record, where that is higher than minimap2's: -x sr clips a
+        # divergent end and identity() charges all of it
+        # (adb.aligned_identity). Joined pairs and whole inserts only; a
+        # pair whose windows disagree has no one record to align to.
+        need = {c["best_hit"] for c in calls.values()
+                if c["best_hit"] and not c.get("split_mates")}
+        recs = {i: s for i, s in adb.read_fasta(
+            os.path.join(args.database, "refdb.fasta")) if i in need}
+        for k, (x, y, _n) in enumerate(centroids):
+            c = calls.get(k)
+            if not c or c.get("split_mates"):
+                continue
+            parts = [(x, "start"), (revcomp(y), "end")] if y else \
+                [(x, "whole")]
+            calls[k] = adb.refine_identity(c, parts,
+                                           recs.get(c["best_hit"]), floors)
         mm_version = mm.version()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -597,6 +619,19 @@ def main(argv=None) -> int:
         x, y, cnt = centroids[k]
         call = calls[k]
         taxon, label = adb.label_for(call, tax, label_depth, rank_names)
+        ws = call.get("windows") or []
+        if len(ws) == 2 and call["depth"] < min(w[2] for w in ws):
+            # The windows point at different records, and the call is
+            # only what they share - often just "Eukaryota". That is not
+            # a tie the database cannot settle, nor a taxon it lacks:
+            # BLASTing the largest of these on VESPA's data found yeast
+            # and Blastocystis fragments joined in the gap, and one
+            # apparent nematode that was no nematode. Say what it is.
+            label = "windows disagree: " + ", ".join(
+                f"{r} {100 * i:.0f}% to "
+                f"{adb.nearest_name(tax.get(h, {})) or h}"
+                for r, (h, i, _d) in zip(("R1", "R2"), ws)) \
+                + " (likely chimera or artefact)"
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
         chimera_of = ""

@@ -738,6 +738,13 @@ def main(argv=None) -> int:
         # Detected species calls whose name rests on 1-2 edits: the
         # nearest other species in the release is that close.
         "fragile_species_calls": fragile_species(calls),
+        # Illumina pairs whose two windows point at different records
+        # (assign_db_pairs): usually chimeras or artefacts, not gaps.
+        "windows_disagree": {
+            "reads": sum(int(c["reads"]) for c in calls
+                         if c["label"].startswith("windows disagree")),
+            "samples": len({c["sample_id"] for c in calls
+                            if c["label"].startswith("windows disagree")})},
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),

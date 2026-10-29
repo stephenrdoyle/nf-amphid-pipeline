@@ -672,6 +672,65 @@ def classify_hits(hits: list[dict], tax: dict, floors: dict,
     }
 
 
+def aligned_identity(parts: list[tuple[str, str]], record: str,
+                     max_frac: float = 0.35) -> float | None:
+    """Identity of a consensus against one record, from a full alignment
+    of each piece rather than minimap2's local block.
+
+    identity() charges every base minimap2 leaves unaligned at an end as
+    a difference. For a sequence close to its record that is nothing -
+    the alignment runs end to end - but -x sr stops extending at the
+    first divergent stretch, so a sequence 6% from its nearest record
+    was charged for a whole clipped end it would have matched most of:
+    VESPA's Entamoeba-like candidates read 90% where BLAST gives 95% and
+    an end-to-end alignment 94%, enough to fall under the family floor
+    and read as unclassified. Here each piece is aligned in full
+    (bounded_edit, unit costs):
+
+      "whole"  against the whole record (a primer-to-primer insert);
+      "start"  against the record's start, its tail free (R1's window);
+      "end"    against the record's end, its head free (R2's window,
+               given in the insert's orientation).
+
+    Edits over the pieces' length; None when a piece is further than
+    max_frac from the record, where no floor could be cleared anyway.
+    """
+    edits = length = 0
+    for seq, where in parts:
+        if not seq:
+            continue
+        cap = max(1, int(max_frac * len(seq)))
+        if where == "whole":
+            d = bounded_edit(seq, record, cap)
+        elif where == "start":
+            d = bounded_edit(seq, record, cap, free_b_suffix=True)
+        else:
+            d = bounded_edit(seq[::-1], record[::-1], cap, free_b_suffix=True)
+        if d > cap:
+            return None
+        edits += d
+        length += len(seq)
+    return 1 - edits / length if length else None
+
+
+def refine_identity(call: dict, parts: list[tuple[str, str]],
+                    record: str | None, floors: dict) -> dict:
+    """Raise a call's identity to its full-alignment value, and re-apply
+    the floors from its LCA. Never lowers it: where minimap2 aligned end
+    to end the two measures agree, and the floors were calibrated on
+    those calls, so they stay exactly as they were."""
+    if not record or not call.get("best_hit"):
+        return call
+    new = aligned_identity(parts, record)
+    if new is None or new <= call["identity"] + 1e-9:
+        return call
+    depth = (apply_floors(call["lca_depth"], new, floors)
+             if call.get("lca_depth", -1) >= 0 else call["depth"])
+    return {**call, "identity": new, "depth": depth,
+            "rank": RANKS[depth] if depth >= 0 else "",
+            "identity_minimap2": call["identity"]}
+
+
 def deepest_named(lineage: dict) -> str:
     for r in reversed(RANKS):
         if lineage.get(r):
@@ -687,6 +746,15 @@ _PLACEHOLDER = re.compile(r"_X+$")
 
 def is_placeholder(name: str) -> bool:
     return bool(_PLACEHOLDER.search(name or ""))
+
+
+def nearest_name(lin: dict) -> str:
+    """A record named by its deepest real name: genus if it has one, else
+    up the tree past any placeholder ("90% to Prevotellaceae", not "90%
+    to Prevotellaceae_X")."""
+    return next((lin.get(r) for r in ("genus",) + tuple(reversed(RANKS[:7]))
+                 if lin.get(r) and not is_placeholder(lin.get(r))),
+                "") or deepest_named(lin)
 
 
 def margin_of(call_rank: str, best_hit: str, resolution: dict) -> str:
@@ -744,12 +812,7 @@ def label_for(call: dict, tax: dict, label_depth: int,
 
     def word(k: int) -> str:
         return rank_word(rank_names or [], lineage, RANKS[k])
-    # The nearest record named by its deepest real name: genus if it has
-    # one, else up the tree past any placeholder ("90% to Prevotellaceae",
-    # not "90% to Prevotellaceae_X").
-    near = next((lin.get(r) for r in ("genus",) + tuple(reversed(RANKS[:7]))
-                 if lin.get(r) and not is_placeholder(lin.get(r))),
-                "") or deepest_named(lin) or call["best_hit"] or "nothing"
+    near = nearest_name(lin) or call["best_hit"] or "nothing"
     if d >= label_depth:
         if not is_placeholder(taxon):
             return taxon, taxon
@@ -960,6 +1023,14 @@ def main(argv=None) -> int:
             for k in keep:
                 calls[k] = classify_hits(hits.get(f"c{k}", []), tax, floors,
                                          args.lca_margin)
+            # Identity from a full alignment to the best record, where
+            # that is higher than minimap2's (aligned_identity).
+            need = {c["best_hit"] for c in calls.values() if c["best_hit"]}
+            recs = {i: s for i, s in read_fasta(db_fasta) if i in need}
+            for k in keep:
+                calls[k] = refine_identity(
+                    calls[k], [(clusters[k]["consensus"], "whole")],
+                    recs.get(calls[k]["best_hit"]), floors)
         mm_version = mm.version()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

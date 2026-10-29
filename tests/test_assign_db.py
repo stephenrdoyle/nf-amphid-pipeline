@@ -613,6 +613,44 @@ def test_release_v080_columns() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_aligned_identity() -> None:
+    print("\nidentity from a full alignment")
+    rng = random.Random(7)
+    rec = "".join(rng.choice("ACGT") for _ in range(500))
+    # A window 250bp from the record's start with every 10th base changed
+    # from 150 on: 10 differences, a divergent stretch -x sr would clip.
+    w = list(rec[:250])
+    for i in range(150, 250, 10):
+        w[i] = {"A": "C", "C": "G", "G": "T", "T": "A"}[w[i]]
+    w = "".join(w)
+    check("a window is aligned to the record's start, its tail free",
+          abs(adb.aligned_identity([(w, "start")], rec) - 0.96) < 1e-9)
+    check("and an R2 window to its end, its head free",
+          abs(adb.aligned_identity([(rec[-200:], "end")], rec) - 1.0) < 1e-9)
+    check("a whole insert end to end",
+          adb.aligned_identity([(rec, "whole")], rec) == 1.0)
+    check("too far to clear any floor: None",
+          adb.aligned_identity([("".join(rng.choice("ACGT")
+                                         for _ in range(250)), "start")],
+                               rec) is None)
+    tax = {"R": {r: f"{r}1" for r in al.RANKS}}
+    floors = {"species": 0.997, "genus": 0.995, "family": 0.95}
+    # minimap2 charged a clipped 100bp end: 150/250 -> no floor cleared.
+    call = {"best_hit": "R", "identity": 0.60, "depth": 5, "lca_depth": 8,
+            "rank": "order"}
+    r = adb.refine_identity(call, [(w, "start")], rec, floors)
+    check("a clipped end no longer drags a call under the family floor",
+          r["identity"] > 0.95 and r["rank"] == "family"
+          and r["identity_minimap2"] == 0.60, str(r))
+    hi = {"best_hit": "R", "identity": 0.999, "depth": 8, "lca_depth": 8,
+          "rank": "species"}
+    check("and never lowers an identity minimap2 gave",
+          adb.refine_identity(hi, [(w, "start")], rec, floors) == hi)
+    check("the nearest record is named past placeholders",
+          adb.nearest_name({"domain": "Bacteria", "family": "Prevotellaceae",
+                            "genus": "Prevotellaceae_X"}) == "Prevotellaceae")
+
+
 def main() -> int:
     test_pileup_consensus()
     test_binomial()
@@ -623,6 +661,7 @@ def main() -> int:
     test_trim_reads()
     test_chimeras()
     test_release_v080_columns()
+    test_aligned_identity()
     test_end_to_end()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

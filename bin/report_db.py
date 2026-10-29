@@ -472,6 +472,16 @@ def build(args) -> str:
             "and kept out of every composition."
             + (" Over 5% in: " + esc(", ".join(chq["wells_over_5pct"])) + "."
                if chq.get("wells_over_5pct") else ""))
+    wd = qc.get("windows_disagree") or {}
+    if wd.get("reads"):
+        items.append(
+            flag("warn", "windows disagree") + f" {fmt(wd['reads'])} read "
+            f"pairs in {wd['samples']} sample(s) have windows that point at "
+            "different records, so the call is only what the two share - "
+            "often just a domain. These are usually PCR chimeras or "
+            "artefacts rather than organisms missing from the database; "
+            "their labels say \"windows disagree\" and name each window's "
+            "nearest record.")
     frag = qc.get("fragile_species_calls") or []
     tf = [f for f in frag if f["group"] in TARGET]
     if tf:

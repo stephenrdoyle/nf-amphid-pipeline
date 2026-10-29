@@ -626,3 +626,12 @@ Two additive release files, read when present and ignored by older releases.
   - `db_calls.tsv` gains `rank_meaning` where the column differs;
   - naming-depth summaries (`rank_*` in `db_wells.tsv`, the funnel's target-group rows, the rank chart) count a family-column call as family only when the table says it is one, or has no row for the clade.
 - **Not changed:** the identity floors still apply to the columns (`family` 0.95). For nematodes and fungi that holds an order or class call to a family-level floor, which is stricter than needed rather than wrong.
+
+### 11.8 Identity from a full alignment, and windows that disagree
+
+- **Identity.** `identity()` charges every base minimap2 leaves unaligned at an end as a difference. For a sequence close to its record the alignment runs end to end and nothing is charged. But `-x sr` stops extending at the first divergent stretch, so a sequence ~6% from its nearest record was charged for a whole clipped end. VESPA's *Entamoeba*-like candidates read 90%, where BLAST gives 95% and an end-to-end alignment 94%. That is under the family floor, so they read as unclassified.
+  - Each call's best record is now aligned in full (`aligned_identity`, the bit-parallel `bounded_edit`): R1's window against the record's start, R2's against its end, a whole insert or nanopore consensus end to end. The identity is edits over length.
+  - It only ever raises minimap2's value (`refine_identity`), and the floors are re-applied from the LCA. Calls minimap2 aligned end to end, which are the ones the floors were calibrated on, are unchanged.
+- **Windows that disagree** (Illumina): when no record carries both windows, each is classified alone and the call is what they share, often just a domain. The label used to say "Eukaryota, unresolved below domain (37% to X)", which reads as a tie or a gap. BLASTing the largest of these on VESPA's data found yeast and *Blastocystis* fragments joined in the gap, and one apparent nematode that was no nematode.
+  - The label is now "windows disagree: R1 NN% to X, R2 NN% to Y (likely chimera or artefact)".
+  - The report counts these reads before the results.
