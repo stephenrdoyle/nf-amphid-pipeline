@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
     LOOKALIKE_COLUMNS, LOOKALIKE_MAX_EDITS, RANKS, REFDB_EXPECTED,
     REFDB_REQUIRED, delimiter_for, find_anchor_cost, find_anchor_lookalikes,
-    load_release_manifest, release_version, sanitise_id,
+    illumina_windows, load_release_manifest, release_version, sanitise_id,
 )
 from ampseqlib import load_assay as library_config  # noqa: E402
 from itertools import product
@@ -2079,19 +2079,24 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
     lf = len((prim.get("forward") or {}).get("sequence", ""))
     lr = len((prim.get("reverse") or {}).get("sequence", ""))
     L = args.illumina_read_length
-    for mate, w, lp in (("R1", int(win[0]), lf), ("R2", int(win[1]), lr)):
+    # The windows assign_db_pairs.py will take at this read length.
+    w1, w2, table = illumina_windows(man, L)
+    for mate, w, lp in (("R1", w1, lf), ("R2", w2, lr)):
         if L and w + lp > L:
             diag.warn(
                 f"database mode: the release's {mate} window is {w}bp of insert "
                 f"after a {lp}bp primer, longer than --illumina_read_length "
                 f"{L}; set --db_window_r1/--db_window_r2 to fit, or every "
                 "pair will be too short")
-    table = f"resolution_illumina_{L}x{L}.tsv"
-    if L and not os.path.isfile(os.path.join(args.reference_database, table)):
+    if not man.get("illumina_geometries"):
+        table = f"resolution_illumina_{L}x{L}.tsv"
+    if L and not (table and os.path.isfile(
+            os.path.join(args.reference_database, table))):
         diag.warn(
-            f"database mode: the release has no {table}, so the report "
-            f"cannot say how far {L}bp pairs resolve each record. Calls "
-            "are still made; their resolution column is left blank")
+            f"database mode: the release has no resolution table for "
+            f"{w1}/{w2} windows ({L}bp reads), so the report cannot say how "
+            "far the pairs resolve each record. Calls are still made; their "
+            "resolution column is left blank")
 
 
 def check_database_samples(samples: list, diag: Diagnostics) -> None:

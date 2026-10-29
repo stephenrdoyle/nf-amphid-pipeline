@@ -68,7 +68,8 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, load_assay, load_primers, load_rank_names, load_release_manifest,
+    RANKS, illumina_windows, load_assay, load_primers, load_rank_names,
+    load_release_manifest,
     load_taxonomy, read_table, release_version, revcomp, writer,
 )
 import assign_db as adb  # noqa: E402
@@ -326,13 +327,13 @@ def main(argv=None) -> int:
     ap.add_argument("--minimap2", default="minimap2")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--window-r1", type=int,
-                    help="insert bases kept from R1 (default: the release's "
-                    "illumina_windows)")
+                    help="insert bases kept from R1 (default: the windows of "
+                    "the release's longest illumina_geometries entry within "
+                    "--read-length, else its illumina_windows)")
     ap.add_argument("--window-r2", type=int)
     ap.add_argument("--read-length", type=int,
-                    help="sequenced read length, to find the release's "
-                    "resolution_illumina_<L>x<L>.tsv (default: window + "
-                    "primer)")
+                    help="sequenced read length: picks the release's windows "
+                    "and resolution table (2x301 reads take the 300 geometry)")
     ap.add_argument("--max-ee", type=float, default=2.0,
                     help="expected errors allowed over both windows")
     ap.add_argument("--min-size", type=int, default=2,
@@ -361,9 +362,10 @@ def main(argv=None) -> int:
     os.makedirs(args.outdir, exist_ok=True)
     man = load_release_manifest(args.database)
     version = release_version(man)
-    win = man.get("illumina_windows") or [132, 128]
-    w1 = args.window_r1 or int(win[0])
-    w2 = args.window_r2 or int(win[1])
+    # The windows of the longest geometry the release resolved that the
+    # reads can hold (250/200 at 2x300), unless set here.
+    w1, w2, rtable = illumina_windows(man, args.read_length,
+                                      args.window_r1, args.window_r2)
     tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"))
     rank_names = load_rank_names(args.database)
     floors = adb.parse_floors(args.floors)
@@ -590,17 +592,18 @@ def main(argv=None) -> int:
 
     # Outputs in assign_db.py's shape, so synthesis reads either platform.
     resolution = {}
-    # The release names its resolution tables by READ length
-    # (resolution_illumina_150x150, _300x300). Given --read-length that
-    # is used; otherwise it is inferred as window + primer, which is right
-    # only when the windows fill the reads (the 2x150 defaults).
-    if args.read_length:
-        rl1 = rl2 = args.read_length
-    else:
-        rl1 = w1 + len(next(iter(fwd_seq.values()), ""))
-        rl2 = w2 + len(next(iter(rev_seq.values()), ""))
-    rpath = os.path.join(args.database, f"resolution_illumina_{rl1}x{rl2}.tsv")
-    if os.path.exists(rpath):
+    # The resolution table of the windows used. A release that lists no
+    # geometries names its tables by READ length: --read-length, or else
+    # window + primer, which is right only when the windows fill the reads.
+    if rtable is None and not man.get("illumina_geometries"):
+        if args.read_length:
+            rl1 = rl2 = args.read_length
+        else:
+            rl1 = w1 + len(next(iter(fwd_seq.values()), ""))
+            rl2 = w2 + len(next(iter(rev_seq.values()), ""))
+        rtable = f"resolution_illumina_{rl1}x{rl2}.tsv"
+    rpath = os.path.join(args.database, rtable or "")
+    if rtable and os.path.exists(rpath):
         # id -> (deepest rank, margin); see assign_db.margin_of.
         resolution = {r["id"]: (r.get("deepest_rank", ""), r.get("margin"))
                       for r in read_table(rpath)}

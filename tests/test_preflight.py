@@ -2411,6 +2411,37 @@ def test_reference_database_mode() -> None:
         check("reads too short for the release's windows are warned about",
               any("longer than --illumina_read_length 100" in w
                   for w in summ["warnings"]), str(summ["warnings"]))
+        # a release with a 2x300 geometry: 2x300 runs take its 250/200
+        # windows and table, 2x250 runs the 2x150 windows - neither warned
+        geo = os.path.join(tmp, "geo")
+        shutil.copytree(rel, geo)
+        shutil.copy(os.path.join(geo, "resolution_illumina_150x150.tsv"),
+                    os.path.join(geo, "resolution_illumina_300x300.tsv"))
+        with open(os.path.join(geo, "manifest.json")) as fh:
+            gm = _json.load(fh)
+        gm["files"]["resolution_illumina_300x300.tsv"] = \
+            gm["files"]["resolution_illumina_150x150.tsv"]
+        gm["illumina_geometries"] = [
+            {"read_length": 150, "windows": gm["illumina_windows"],
+             "file": "resolution_illumina_150x150.tsv"},
+            {"read_length": 300, "windows": [250, 200],
+             "file": "resolution_illumina_300x300.tsv"}]
+        with open(os.path.join(geo, "manifest.json"), "w") as fh:
+            _json.dump(gm, fh)
+        for L in ("300", "250"):
+            code, summ, _ = go("--illumina-read-length", L, release=geo,
+                               runs_path=ill, sheet_path=il_sheet,
+                               label="geo" + L)
+            check(f"2x{L} reads against a release with a 2x300 geometry: "
+                  "windows that fit and a resolution table",
+                  not any("window is" in w or "resolution table" in w
+                          for w in summ["warnings"])
+                  and not errs(summ, "Illumina"), str(summ["warnings"]))
+        code, summ, _ = go("--illumina-read-length", "300", runs_path=ill,
+                           sheet_path=il_sheet, label="i3")
+        check("a release without a 2x300 table says the resolution is blank",
+              any("no resolution table" in w for w in summ["warnings"]),
+              str(summ["warnings"]))
 
         # no negative controls: warned, not refused
         noneg = os.path.join(tmp, "ss_noneg.tsv")
