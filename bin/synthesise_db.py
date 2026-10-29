@@ -208,7 +208,8 @@ def blank_limits(wells: dict, rows: dict, min_fraction_depth: int) -> dict:
 
 
 def read_funnel(wells_out: list[dict], demux: dict, split: dict,
-                calls: list[dict] | None = None) -> dict:
+                calls: list[dict] | None = None,
+                family_floor: float | None = None) -> dict:
     """Every read from the sequencer to a classified target, and where
     the rest went.
 
@@ -227,7 +228,7 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict,
       both primers found            no primer pair, too short, low quality
       in a consensus sequence       too few reads to form one
       classified                    PCR chimeras removed
-        of which unclassified       no rank met its identity floor
+        of which unclassified       under the family floor to every record
       target organisms              host, bacteria, plants... by group
         helminths, protists, microsporidia, each by the rank reached
     Rows marked "sub" are a breakdown of the stage above, not a further
@@ -315,7 +316,14 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict,
                               else "above family"] += n
     if calls is not None:
         stages.append({
-            "stage": "of which unclassified (no rank met its floor)",
+            # Named by the floor it missed, from the run's own settings:
+            # under the family floor a sequence is named to no family,
+            # and is "unclassified, NN% to X". A tie stopped above
+            # family is not counted here - the database holds it.
+            "stage": "of which unclassified ("
+                     + (f"under {100 * family_floor:.0f}% to any record"
+                        if family_floor else "under the family floor")
+                     + ", named to no family)",
             "reads": sum(unclass.values()), "sub": True,
             "lost_here": {g.replace("_", " / "): unclass[g]
                           for g in GROUPS if unclass[g]}})
@@ -659,7 +667,10 @@ def main(argv=None) -> int:
             "mask_rows": (pf_summary.get("reference_database") or {}).get(
                 "lookalikes"),
         },
-        "read_funnel": read_funnel(wells_out, demux, split, calls),
+        "read_funnel": read_funnel(
+            wells_out, demux, split, calls,
+            (next((w.summary.get("settings", {}).get("floors") for w in
+                   wells.values() if w.summary), None) or {}).get("family")),
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),

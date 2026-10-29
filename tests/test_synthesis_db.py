@@ -374,9 +374,10 @@ def test_read_funnel() -> None:
               and sub["helminths"]["lost_here"] == {"species": 600}
               and sub["microsporidia"]["reads"] == 0, str(sub))
         check("and unclassified reads are a row of their own",
-              sub["of which unclassified (no rank met its floor)"][
-                  "reads"] == 40 and sub["of which unclassified (no rank "
-                  "met its floor)"]["lost_here"] == {"bacteria / archaea": 40},
+              sub["of which unclassified (under the family floor, named to "
+                  "no family)"][
+                  "reads"] == 40 and sub["of which unclassified (under the family floor, "
+                  "named to no family)"]["lost_here"] == {"bacteria / archaea": 40},
               str(sub))
         check("a well that classified under half its reads is named",
               [b["sample_id"] for b in
