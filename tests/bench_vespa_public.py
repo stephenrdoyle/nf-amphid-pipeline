@@ -29,7 +29,12 @@ correspondence is inferred: each BioProject sample is paired one to one
 with the paper's sample whose category profile, helminth genera and
 protozoa genera fit it best (a greedy matching over all pairs, closest
 first), and the pairing is written out with its distance - a pair whose
-distance is large is a guess, and is flagged.
+distance is large is a guess, and is flagged. The pairing is decided ONCE
+per invocation - on the first window set, or --pair-on - and every window
+set is scored with it; paired per window set, half the NHP samples changed
+partner between 132x128 and 250x200, and the "difference" between window
+sets was the re-pairing. --nhp-mapping takes a pairing from an earlier
+run, so releases are scored against the same partners too.
 
 Comparison is at GENUS: VESPA names some taxa to species and some to
 genus, and this pipeline stops where its floors say; a genus is the
@@ -217,6 +222,20 @@ def remap(runs, vespa, out, min_rel) -> dict:
     return got
 
 
+def read_mapping(path: str) -> dict:
+    """bioproject sample -> (paper sample, distance), as written below."""
+    with open(path) as fh:
+        return {r["bioproject_sample"]: (r["paper_sample"], float(r["distance"]))
+                for r in csv.DictReader(fh, delimiter="\t")}
+
+
+def write_mapping(path: str, got: dict) -> None:
+    with open(path, "w") as fh:
+        fh.write("bioproject_sample\tpaper_sample\tdistance\n")
+        for sid in sorted(got, key=lambda x: (x[:3], int(re.sub(r"\D", "", x) or 0))):
+            fh.write(f"{sid}\t{got[sid][0]}\t{got[sid][1]:.3f}\n")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--reads", required=True)
@@ -235,6 +254,10 @@ def main(argv=None) -> int:
     ap.add_argument("--min-rel", type=float, default=0.001)
     ap.add_argument("--no-remap", action="store_true",
                     help="trust the NHP names as given")
+    ap.add_argument("--pair-on", help="window set the NHP pairing is decided "
+                    "on, e.g. 132x128 (default: the first of --windows)")
+    ap.add_argument("--nhp-mapping", help="a pairing written by an earlier "
+                    "run (nhp_mapping.tsv), used as is")
     args = ap.parse_args(argv)
 
     ap_remap = not args.no_remap
@@ -243,7 +266,8 @@ def main(argv=None) -> int:
                 for r in csv.DictReader(fh, delimiter="\t")}
     vespa = vespa_tables(args.source_data)
     summary = {}
-    for spec in args.windows.split(","):
+    specs = args.windows.split(",")
+    for spec in specs:
         w1, w2 = (int(x) for x in spec.split("x"))
         tag = f"w{w1}x{w2}"
         a = {"outdir": args.outdir, "tag": tag, "release": args.release,
@@ -258,15 +282,24 @@ def main(argv=None) -> int:
         with ProcessPoolExecutor(args.jobs) as ex:
             for sid in ex.map(run_one, jobs):
                 pass
+    # One pairing for every window set (see the docstring).
+    name = {sid: sid for sid in runs}
+    if args.nhp_mapping:
+        got = read_mapping(args.nhp_mapping)
+        got = {sid: got.get(sid, (sid, 0.0)) for sid in runs}
+        write_mapping(os.path.join(args.outdir, "nhp_mapping.tsv"), got)
+        name = {sid: v[0] for sid, v in got.items()}
+    elif ap_remap:
+        pair_on = args.pair_on or specs[0]
+        if pair_on not in specs:
+            ap.error(f"--pair-on {pair_on} is not one of --windows")
+        got = remap(runs, vespa, os.path.join(args.outdir, f"w{pair_on}"),
+                    args.min_rel)
+        write_mapping(os.path.join(args.outdir, "nhp_mapping.tsv"), got)
+        name = {sid: v[0] for sid, v in got.items()}
+    for spec in specs:
+        tag = "w" + spec
         out = os.path.join(args.outdir, tag)
-        name = {sid: sid for sid in runs}
-        if ap_remap:
-            name = remap(runs, vespa, out, args.min_rel)
-            with open(os.path.join(args.outdir, f"{tag}.nhp_mapping.tsv"), "w") as fh:
-                fh.write("bioproject_sample\tpaper_sample\tdistance\n")
-                for sid in sorted(name, key=lambda x: (x[:3], int(re.sub(r"\D", "", x)))):
-                    fh.write(f"{sid}\t{name[sid][0]}\t{name[sid][1]:.3f}\n")
-            name = {sid: v[0] for sid, v in name.items()}
         rows, agree = [], Counter()
         missed: dict = defaultdict(Counter)
         diffs = defaultdict(list)
