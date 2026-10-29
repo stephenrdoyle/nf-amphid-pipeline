@@ -478,10 +478,12 @@ def build(args) -> str:
             flag("warn", "windows disagree") + f" {fmt(wd['reads'])} read "
             f"pairs in {wd['samples']} sample(s) have windows that point at "
             "different records, so the call is only what the two share - "
-            "often just a domain. These are usually PCR chimeras or "
-            "artefacts rather than organisms missing from the database; "
-            "their labels say \"windows disagree\" and name each window's "
-            "nearest record.")
+            "often just a domain. They are PCR chimeras, artefacts, or a "
+            "region the database has nothing close to (gregarine R1 "
+            "windows, for one) - the data cannot tell which. Their labels "
+            "say \"windows disagree\" and give each window's identity to "
+            "its nearest record; read a high R2 with a low R1 as the R2 "
+            "organism with an uncertain partner.")
     frag = qc.get("fragile_species_calls") or []
     tf = [f for f in frag if f["group"] in TARGET]
     if tf:

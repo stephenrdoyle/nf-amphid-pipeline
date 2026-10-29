@@ -560,10 +560,24 @@ def main(argv=None) -> int:
         # pair whose windows disagree has no one record to align to.
         need = {c["best_hit"] for c in calls.values()
                 if c["best_hit"] and not c.get("split_mates")}
+        need |= {h for c in calls.values() for h, _i, _d in
+                 c.get("windows") or [] if h}
         recs = {i: s for i, s in adb.read_fasta(
             os.path.join(args.database, "refdb.fasta")) if i in need}
         for k, (x, y, _n) in enumerate(centroids):
             c = calls.get(k)
+            if c and c.get("windows") and len(c["windows"]) == 2:
+                # Each window against its own best record, so the label's
+                # "R1 NN%" is not minimap2's clipped figure: a gregarine
+                # R1 read "37%" where it aligns 74% end to end.
+                ws = []
+                for (h, i, dd), part in zip(c["windows"], ((x, "start"),
+                                                           (revcomp(y), "end"))):
+                    v = adb.aligned_identity([part], recs.get(h, ""), 0.5) \
+                        if recs.get(h) else None
+                    ws.append((h, max(i, v or 0.0), dd))
+                calls[k] = {**c, "windows": ws,
+                            "identity": min(w[1] for w in ws)}
             if not c or c.get("split_mates"):
                 continue
             parts = [(x, "start"), (revcomp(y), "end")] if y else \
@@ -623,15 +637,20 @@ def main(argv=None) -> int:
         if len(ws) == 2 and call["depth"] < min(w[2] for w in ws):
             # The windows point at different records, and the call is
             # only what they share - often just "Eukaryota". That is not
-            # a tie the database cannot settle, nor a taxon it lacks:
-            # BLASTing the largest of these on VESPA's data found yeast
-            # and Blastocystis fragments joined in the gap, and one
-            # apparent nematode that was no nematode. Say what it is.
+            # a tie the database cannot settle. BLASTing the largest of
+            # these on VESPA's data found yeast and Blastocystis fragments
+            # joined in the gap, and one apparent nematode that was no
+            # nematode. But on the primate samples most are gregarines
+            # (R2 97% to Leidyana) whose R1 aligns 74-81% to the same
+            # record - barely above the 64% (p99 74%) any unrelated 18S
+            # record gives, so a divergent region of one organism cannot
+            # be told from a join. The label says what is known.
             label = "windows disagree: " + ", ".join(
                 f"{r} {100 * i:.0f}% to "
                 f"{adb.nearest_name(tax.get(h, {})) or h}"
-                for r, (h, i, _d) in zip(("R1", "R2"), ws)) \
-                + " (likely chimera or artefact)"
+                for r, (h, i, _d) in zip(("R1", "R2"), ws)) + (
+                " (a chimera, an artefact, or a stretch the database has "
+                "nothing close to)")
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
         chimera_of = ""
