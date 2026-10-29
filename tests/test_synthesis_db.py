@@ -280,7 +280,8 @@ def test_groups() -> None:
         wells = {
             "S1": [cluster("S1", 1, "bt", 900), cluster("S1", 2, "hc", 75),
                    cluster("S1", 3, "tg", 25, rank="family", ident="0.9600")],
-            "S2": [cluster("S2", 1, "hc", 400), cluster("S2", 2, "ec", 100)],
+            "S2": [cluster("S2", 1, "hc", 400), cluster("S2", 2, "ec", 100),
+                   cluster("S2", 3, "sc", 60)],
         }
         calls, w, qc = run(write_case(tmp, wells,
                                       {"S1": "unknown", "S2": "unknown"}))
@@ -315,7 +316,10 @@ def test_groups() -> None:
         check("fungi get a section of their own, with richness per well",
               "id='fungi'" in doc and "fungal ranks are shifted" in doc
               and doc.find("id='fungi'") < doc.find("id='offtarget'")
-              and all("fungi_richness" in r for r in fungal))
+              and [r["fungi_richness"] for r in fungal] == ["0", "1"]
+              and "Saccharomyces_cerevisiae" in doc[doc.find("id='fungi'"):
+                                                    doc.find("id='offtarget'")],
+              str([r["fungi_richness"] for r in fungal]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
