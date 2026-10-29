@@ -615,3 +615,14 @@ With it, most are kept as within-genus joins and few are excluded:
 
 A parent named only above genus counts as possibly the same genus, so
 e.g. "Nematoda" x *Necator* (38 reads) is kept.
+
+### 11.7 Release v0.8.0: species margins and real ranks
+
+Two additive release files, read when present and ignored by older releases.
+
+- **`margin`** in each `resolution_*.tsv`: for a record that resolves to species, the edits to the nearest record of another species over that platform's view. A blank on a species row means no other species is near. A species call carries its best record's margin (`db_margin` in `clusters.tsv`, `margin` in `db_calls.tsv`; "large" when blank on a species row). Calls pooled from several clusters take the smallest. A detected species call on 1-2 edits is fragile: the report lists these in "Before reading the results" and marks them "by N edits" in the call table. About 30% of species-level records in v0.8.0 rest on 1-2 edits.
+- **`rank_names.tsv`**: what PR2's positional columns hold, by clade. In nematodes the family column holds an order (or a placeholder) and the order column the class; in Ascomycota, order holds the subphylum and family the class. With the table:
+  - labels name the real rank ("Chromadorea, unnamed order", "unresolved below class");
+  - `db_calls.tsv` gains `rank_meaning` where the column differs;
+  - naming-depth summaries (`rank_*` in `db_wells.tsv`, the funnel's target-group rows, the rank chart) count a family-column call as family only when the table says it is one, or has no row for the clade.
+- **Not changed:** the identity floors still apply to the columns (`family` 0.95). For nematodes and fungi that holds an order or class call to a family-level floor, which is stricter than needed rather than wrong.

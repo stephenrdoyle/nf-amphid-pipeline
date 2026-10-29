@@ -83,8 +83,9 @@ from itertools import combinations
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, bounded_edit, load_primers, load_release_manifest, load_taxonomy,
-    open_reads, read_fasta, read_table, release_version, writer,
+    RANKS, bounded_edit, load_primers, load_rank_names, load_release_manifest,
+    load_taxonomy, open_reads, rank_word, read_fasta, read_table,
+    release_version, writer,
 )
 
 # minimap2's index parameters for the database. k=19, w=10 gave the same
@@ -688,7 +689,28 @@ def is_placeholder(name: str) -> bool:
     return bool(_PLACEHOLDER.search(name or ""))
 
 
-def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
+def margin_of(call_rank: str, best_hit: str, resolution: dict) -> str:
+    """How far a species call's best record sits from the nearest record
+    of another species, in edits over this platform's view (the
+    release's `margin` column, from v0.8.0).
+
+    Only a species call has one. A species row the release leaves blank
+    has no other species near, which is "large", not unknown. Releases
+    before v0.8.0 have no column, and every margin is blank. About 30%
+    of species-level records rest on 1-2 edits, so a species name on one
+    of those is one base from being another species.
+    """
+    if call_rank != "species":
+        return ""
+    rank, margin = resolution.get(best_hit, ("", None))
+    if margin is None:          # pre-v0.8.0 release: no margin column
+        return ""
+    return margin or ("large" if rank == "species" else "")
+
+
+
+def label_for(call: dict, tax: dict, label_depth: int,
+              rank_names: list | None = None) -> tuple[str, str]:
     """(taxon at the rank reached, label for the report).
 
     Down to label_depth (family) a call is the taxon's name. Above it
@@ -709,10 +731,19 @@ def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
     And a call stopped above family by a TIE between records - the floors
     let it through, the LCA did not - is "X, unresolved below <rank>
     (NN% to Y)", not "unclassified": the database holds the sequence and
-    cannot choose between records, which is not the same as a gap.""" 
+    cannot choose between records, which is not the same as a gap.
+
+    With the release's rank_names.tsv (v0.8.0 on) the rank in a label is
+    the real one, not PR2's column: a nematode's "Chromadorea_X" in the
+    family column is an unnamed ORDER, and an ascomycete stopped at the
+    order column is "unresolved below subphylum".""" 
     lin = tax.get(call["best_hit"], {})
     d = call["depth"]
     taxon = lin.get(RANKS[d], "") if d >= 0 else ""
+    lineage = [lin.get(r, "") for r in RANKS]
+
+    def word(k: int) -> str:
+        return rank_word(rank_names or [], lineage, RANKS[k])
     # The nearest record named by its deepest real name: genus if it has
     # one, else up the tree past any placeholder ("90% to Prevotellaceae",
     # not "90% to Prevotellaceae_X").
@@ -727,7 +758,7 @@ def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
                      "")
         nearest = "" if not near or is_placeholder(near) or near == named \
             else f" (nearest {near})"
-        return taxon, f"{named or taxon}, unnamed {RANKS[d]}{nearest}"
+        return taxon, f"{named or taxon}, unnamed {word(d)}{nearest}"
     if not call["best_hit"]:
         return taxon, "unclassified, no database hit"
     if call.get("lca_depth", -2) == d and d >= 0:
@@ -738,7 +769,7 @@ def label_for(call: dict, tax: dict, label_depth: int) -> tuple[str, str]:
         named = next((lin.get(RANKS[k]) for k in range(d, -1, -1)
                       if lin.get(RANKS[k]) and not is_placeholder(lin.get(RANKS[k]))),
                      taxon)
-        return taxon, (f"{named}, unresolved below {RANKS[d]} "
+        return taxon, (f"{named}, unresolved below {word(d)} "
                        f"({100 * call['identity']:.0f}% to {near})")
     return taxon, f"unclassified, {100 * call['identity']:.0f}% to {near}"
 
@@ -843,7 +874,11 @@ def main(argv=None) -> int:
     man = load_release_manifest(args.database)
     version = release_version(man)
     tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"))
-    resolution = {r["id"]: r.get("deepest_rank", "")
+    rank_names = load_rank_names(args.database)
+    # id -> (deepest rank, margin). margin is None for a release without
+    # the column (before v0.8.0), so "no margin recorded" and "no other
+    # species near" stay different things.
+    resolution = {r["id"]: (r.get("deepest_rank", ""), r.get("margin"))
                   for r in read_table(os.path.join(args.database,
                                                    "resolution_nanopore.tsv"))}
     db_fasta = os.path.join(args.database, "refdb.fasta")
@@ -950,7 +985,7 @@ def main(argv=None) -> int:
     rows = []
     for n, k in enumerate(order, 1):
         c, call = clusters[k], calls[k]
-        taxon, label = label_for(call, tax, label_depth)
+        taxon, label = label_for(call, tax, label_depth, rank_names)
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
         chimera_of = ""
@@ -974,7 +1009,9 @@ def main(argv=None) -> int:
             "best_hit_lineage": ";".join(lin.get(r, "") for r in RANKS),
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
-            "db_resolution": resolution.get(call["best_hit"], ""),
+            "db_resolution": resolution.get(call["best_hit"], ("",))[0],
+            "db_margin": margin_of(call["rank"], call["best_hit"],
+                                   resolution),
             "origin": "chimera" if k in chim else c["origin"],
             "merged": c["merged"],
             "chimera_of": chimera_of,
@@ -985,8 +1022,8 @@ def main(argv=None) -> int:
     cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
             "label", "identity", "coverage", "lineage", "best_hit",
             "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "origin", "merged", "chimera_of", "length", "database_version",
-            "consensus"]
+            "db_margin", "origin", "merged", "chimera_of", "length",
+            "database_version", "consensus"]
     with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
               encoding="utf-8") as fh:
         w = writer(fh, cols)

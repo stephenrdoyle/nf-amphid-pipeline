@@ -218,6 +218,14 @@ ENDS_ORDER = (
      "an insertion or deletion shifted one copy"))
 
 
+def rank_cell(c: dict) -> str:
+    """PR2's column, and what it really is for this clade where that
+    differs (rank_names.tsv): "family = order" for a nematode."""
+    m = (c.get("rank_meaning") or "").replace("|", " or ")
+    return esc(c["rank"] or "—") + (
+        f" <span class='note'>= {esc(m)}</span>" if m else "")
+
+
 def barcode_ends_html(be: dict) -> str:
     """Why reads reached only one barcode, from the demultiplexer's
     reason for every end of every read.
@@ -464,6 +472,20 @@ def build(args) -> str:
             "and kept out of every composition."
             + (" Over 5% in: " + esc(", ".join(chq["wells_over_5pct"])) + "."
                if chq.get("wells_over_5pct") else ""))
+    frag = qc.get("fragile_species_calls") or []
+    tf = [f for f in frag if f["group"] in TARGET]
+    if tf:
+        items.append(
+            flag("warn", "fragile species") + " These species names rest on "
+            "1-2 edits: the release's nearest record of another species is "
+            "that close, so one or two bases decide the name. Read them as "
+            "the genus with a likely species, and confirm outside the "
+            "pipeline before relying on the species: "
+            + esc("; ".join(
+                f"{f['label']} ({f['margin']} edit"
+                f"{'' if f['margin'] == 1 else 's'}, {len(f['samples'])} "
+                f"sample{'' if len(f['samples']) == 1 else 's'})"
+                for f in tf[:20])) + (" …" if len(tf) > 20 else "") + ".")
     near = qc.get("near_3prime_calls") or []
     if near:
         items.append(flag("warn", "primer fit") + " Detected with a best hit "
@@ -537,8 +559,10 @@ def build(args) -> str:
                 "<i>order</i> the subphylum and <i>family</i> the class. A "
                 "fungal call shown \"at family\" - Eurotiomycetes, for "
                 "instance - is really at class, and many mould genera are "
-                "identical over V4, so that is often as far as it can go."
-                "</p>")
+                "identical over V4, so that is often as far as it can go. "
+                "With release v0.8.0 or later the call table gives the real "
+                "rank beside PR2's column, and naming depth counts these "
+                "calls as above family.</p>")
         totals = defaultdict(float)
         for c in gcalls:
             totals[(c["rank"], c["taxon"])] += float(c["group_share"] or 0)
@@ -667,7 +691,10 @@ def build(args) -> str:
         + esc(", ".join(f"{k} {v}" for k, v in fl.items()))
         + "). A genus call is not a failed species call: it says the "
         "database holds a close relative but not this sequence, or that V4 "
-        "cannot tell the species apart.</p>")
+        "cannot tell the species apart. <i>Family</i> means a real family: "
+        "where PR2's family column holds an order or a class (nematodes, "
+        "most fungi; the release's <code>rank_names.tsv</code>), the call "
+        "counts as above family.</p>")
 
     # -- the calls ---------------------------------------------------------
     P.append("<h2 id='calls'>Every call</h2>")
@@ -678,13 +705,18 @@ def build(args) -> str:
     for c in sorted(calls, key=lambda c: (c["sample_id"],
                                           order.get(c["group"], 99),
                                           -int(c["reads"]))):
-        notes = "primer fit" if "near_3prime" in c["primer_fit"] else ""
+        notes = "; ".join(
+            x for x in ("primer fit" if "near_3prime" in c["primer_fit"]
+                        else "",
+                        f"by {c['margin']} edit"
+                        f"{'' if c['margin'] == '1' else 's'}"
+                        if c.get("margin") in ("1", "2") else "") if x)
         cr.append(
             f"<tr><td>{esc(c['sample_id'])}</td>"
             f"<td><span class='sw' style='display:inline-block;background:"
             f"{GROUP_COLOUR.get(c['group'], OTHER_COLOUR)}'></span> "
             f"{esc(GROUP_LABEL.get(c['group'], c['group']))}</td>"
-            f"<td>{esc(c['rank'] or '—')}</td>"
+            f"<td>{rank_cell(c)}</td>"
             f"<td>{esc(c['label'] or '—')}</td>"
             f"<td class='num'>{fmt(c['reads'])}</td>"
             f"<td class='num'>{pct(c['rel_abundance'])}</td>"
@@ -702,7 +734,11 @@ def build(args) -> str:
     P.append(
         "<p class='note'><i>Identity</i> is the best database hit's, read "
         "beside the rank: a species call at 99.6% and one at 100% are not the "
-        "same claim. <i>Limit</i> is the fewest reads that beat the blanks "
+        "same claim. <i>By N edits</i> on a species call: the release's "
+        "nearest record of another species is that close, so 1-2 edits "
+        "is a fragile name (the <code>margin</code> column of "
+        "<code>db_calls.tsv</code>; blank before release v0.8.0). "
+        "<i>Limit</i> is the fewest reads that beat the blanks "
         "(hover for how it was set). The cluster sequences, best hits and "
         "full lineages are in <code>assign_db/&lt;sample&gt;.clusters.tsv</code>; "
         "this table is <code>synthesis/db_calls.tsv</code>.</p>")
