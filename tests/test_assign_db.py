@@ -300,8 +300,9 @@ def test_lca_and_floors() -> None:
           and taxon == "O", f"{c['rank']} {taxon!r} {label!r}")
     c = adb.classify_hits([hit("A1", 950, 485, 500)], tax, floors, 0.005)
     taxon, label = adb.label_for(c, tax, R.index("family"))
-    check("97% identity: named at family", c["rank"] == "family"
-          and taxon == label == "F1", f"{c['rank']} {label}")
+    check("97% identity: named at family, with the nearest genus",
+          c["rank"] == "family" and taxon == "F1"
+          and label == "F1 (97% to G1)", f"{c['rank']} {label}")
     c = adb.classify_hits([], tax, floors, 0.005)
     check("no hit at all", adb.label_for(c, tax, 6)[1] ==
           "unclassified, no database hit")
@@ -314,7 +315,7 @@ def test_lca_and_floors() -> None:
                                   "identity": 1.0}, ptax, 6)
     check("a placeholder family is labelled by its named parent and the "
           "nearest genus", taxon == "Chromadorea_X" and label ==
-          "Chromadorea, unnamed family (nearest Haemonchus)", label)
+          "Chromadorea, unnamed family (100% to Haemonchus)", label)
     taxon, label = adb.label_for({"best_hit": "H", "depth": 5, "lca_depth": 5,
                                   "identity": 1.0}, ptax, 6)
     check("stopped above family by a tie: unresolved, not unclassified",
@@ -601,7 +602,7 @@ def test_release_v080_columns() -> None:
                                    "lca_depth": 6, "identity": 1.0},
                                   ptax, 6, rn)
         check("a nematode placeholder family is an unnamed order",
-              label == "Chromadorea, unnamed order (nearest Haemonchus)",
+              label == "Chromadorea, unnamed order (100% to Haemonchus)",
               label)
         _t, label = adb.label_for({"best_hit": "H", "depth": 5,
                                    "lca_depth": 5, "identity": 1.0},
@@ -611,6 +612,44 @@ def test_release_v080_columns() -> None:
                        "(100% to Haemonchus)", label)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_aligned_identity() -> None:
+    print("\nidentity from a full alignment")
+    rng = random.Random(7)
+    rec = "".join(rng.choice("ACGT") for _ in range(500))
+    # A window 250bp from the record's start with every 10th base changed
+    # from 150 on: 10 differences, a divergent stretch -x sr would clip.
+    w = list(rec[:250])
+    for i in range(150, 250, 10):
+        w[i] = {"A": "C", "C": "G", "G": "T", "T": "A"}[w[i]]
+    w = "".join(w)
+    check("a window is aligned to the record's start, its tail free",
+          abs(adb.aligned_identity([(w, "start")], rec) - 0.96) < 1e-9)
+    check("and an R2 window to its end, its head free",
+          abs(adb.aligned_identity([(rec[-200:], "end")], rec) - 1.0) < 1e-9)
+    check("a whole insert end to end",
+          adb.aligned_identity([(rec, "whole")], rec) == 1.0)
+    check("too far to clear any floor: None",
+          adb.aligned_identity([("".join(rng.choice("ACGT")
+                                         for _ in range(250)), "start")],
+                               rec) is None)
+    tax = {"R": {r: f"{r}1" for r in al.RANKS}}
+    floors = {"species": 0.997, "genus": 0.995, "family": 0.95}
+    # minimap2 charged a clipped 100bp end: 150/250 -> no floor cleared.
+    call = {"best_hit": "R", "identity": 0.60, "depth": 5, "lca_depth": 8,
+            "rank": "order"}
+    r = adb.refine_identity(call, [(w, "start")], rec, floors)
+    check("a clipped end no longer drags a call under the family floor",
+          r["identity"] > 0.95 and r["rank"] == "family"
+          and r["identity_minimap2"] == 0.60, str(r))
+    hi = {"best_hit": "R", "identity": 0.999, "depth": 8, "lca_depth": 8,
+          "rank": "species"}
+    check("and never lowers an identity minimap2 gave",
+          adb.refine_identity(hi, [(w, "start")], rec, floors) == hi)
+    check("the nearest record is named past placeholders",
+          adb.nearest_name({"domain": "Bacteria", "family": "Prevotellaceae",
+                            "genus": "Prevotellaceae_X"}) == "Prevotellaceae")
 
 
 def main() -> int:
@@ -623,6 +662,7 @@ def main() -> int:
     test_trim_reads()
     test_chimeras()
     test_release_v080_columns()
+    test_aligned_identity()
     test_end_to_end()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

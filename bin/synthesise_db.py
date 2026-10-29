@@ -72,6 +72,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 
@@ -82,6 +83,15 @@ from ampseqlib import (  # noqa: E402
 )
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
+# The identity in a label ("97% to", "R1 74% to"), left out when pooling.
+LABEL_PCT = re.compile(r"\d+% to ")
+
+
+def run_label(label: str) -> str:
+    """A label for tables across samples: the identity differs from well
+    to well, so "Entamoebidae (97% to Entamoeba)" in one and "(99% to"
+    in another are one taxon, "Entamoebidae (nearest Entamoeba)"."""
+    return LABEL_PCT.sub("nearest ", label)
 
 CALLS = ("detected", "below_blanks", "below_floor", "low_depth", "chimera")
 CALL_MEANING = {
@@ -174,10 +184,16 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
         if c.get("origin") == "chimera":
             key = ("", "", "chimera")      # one row per well, all pooled
         else:
-            key = (c["rank"], c["taxon"], c["label"])
+            # Pooled on the label without its identity ("Hexamitidae (97%
+            # to Enteromonas)" and "(96% to Enteromonas)" are one call);
+            # the row keeps the label of its largest cluster.
+            key = (c["rank"], c["taxon"], LABEL_PCT.sub("", c["label"]))
         a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
                                  "lineage": c["lineage"], "best_hits": [],
-                                 "margins": []})
+                                 "margins": [], "label": c["label"],
+                                 "top": -1})
+        if key[2] != "chimera" and int(c["reads"]) > a["top"]:
+            a["label"], a["top"] = c["label"], int(c["reads"])
         a["reads"] += int(c["reads"])
         a["clusters"] += 1
         a["identity"] = max(a["identity"], float(c["identity"] or 0))
@@ -185,7 +201,8 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
         if c.get("db_margin"):
             a["margins"].append(c["db_margin"])
     out = []
-    for (rank, taxon, label), a in agg.items():
+    for (rank, taxon, _key), a in agg.items():
+        label = "chimera" if _key == "chimera" else a["label"]
         fits = sorted({primer_fit.get(h, "") for h in a["best_hits"]} - {""})
         out.append({"rank": rank, "taxon": taxon, "label": label,
                     "reads": a["reads"], "clusters": a["clusters"],
@@ -645,7 +662,7 @@ def main(argv=None) -> int:
     for c in calls:
         if c["sample_id"] not in tested:
             continue
-        k = (c["group"], c["rank"], c["taxon"], c["label"])
+        k = (c["group"], c["rank"], c["taxon"], run_label(c["label"]))
         p = prev.setdefault(k, {"detected": 0, "max_share": 0.0})
         if c["call"] == "detected":
             p["detected"] += 1
@@ -738,6 +755,13 @@ def main(argv=None) -> int:
         # Detected species calls whose name rests on 1-2 edits: the
         # nearest other species in the release is that close.
         "fragile_species_calls": fragile_species(calls),
+        # Illumina pairs whose two windows point at different records
+        # (assign_db_pairs): usually chimeras or artefacts, not gaps.
+        "windows_disagree": {
+            "reads": sum(int(c["reads"]) for c in calls
+                         if c["label"].startswith("windows disagree")),
+            "samples": len({c["sample_id"] for c in calls
+                            if c["label"].startswith("windows disagree")})},
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),

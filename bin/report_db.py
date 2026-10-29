@@ -67,6 +67,9 @@ TARGET = ("helminths", "protists", "microsporidia")
 # most of a sample, and what they are (moulds, yeasts, mushrooms) says
 # something about diet and how long a sample sat before collection.
 DETAIL = TARGET + ("fungi",)
+# The identity in a label, dropped where a label stands for many wells
+# (legends, presence rows); synthesise_db.run_label does the same.
+PCT_IN_LABEL = re.compile(r"\d+% to ")
 # Within a target group a run easily names more than the panel palette's
 # eight taxa, and the ninth onwards went grey - one helminth in three on
 # the fixture. Okabe-Ito, then Paul Tol's muted set, which stays
@@ -472,6 +475,18 @@ def build(args) -> str:
             "and kept out of every composition."
             + (" Over 5% in: " + esc(", ".join(chq["wells_over_5pct"])) + "."
                if chq.get("wells_over_5pct") else ""))
+    wd = qc.get("windows_disagree") or {}
+    if wd.get("reads"):
+        items.append(
+            flag("warn", "windows disagree") + f" {fmt(wd['reads'])} read "
+            f"pairs in {wd['samples']} sample(s) have windows that point at "
+            "different records, so the call is only what the two share - "
+            "often just a domain. They are PCR chimeras, artefacts, or a "
+            "region the database has nothing close to (gregarine R1 "
+            "windows, for one) - the data cannot tell which. Their labels "
+            "say \"windows disagree\" and give each window's identity to "
+            "its nearest record; read a high R2 with a low R1 as the R2 "
+            "organism with an uncertain partner.")
     frag = qc.get("fragile_species_calls") or []
     tf = [f for f in frag if f["group"] in TARGET]
     if tf:
@@ -573,7 +588,8 @@ def build(args) -> str:
         # (nearest Haemonchus)"), not PR2's placeholder name.
         label_of = {}
         for c in gcalls:
-            label_of.setdefault((c["rank"], c["taxon"]), c["label"])
+            label_of.setdefault((c["rank"], c["taxon"]),
+                                PCT_IN_LABEL.sub("nearest ", c["label"]))
         def name(k):
             lab = label_of.get(k, k[1])
             return lab if lab != k[1] else f"{k[1]} ({k[0]})"
