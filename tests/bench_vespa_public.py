@@ -163,7 +163,8 @@ def run_one(job):
                       "--index", a["index"], "--primers", a["primers"],
                       "--assay", a["assay"], "--sample-id", sid,
                       "--outdir", out, "--window-r1", str(a["w1"]),
-                      "--window-r2", str(a["w2"])])
+                      "--window-r2", str(a["w2"]),
+                      "--read-length", str(a["read_length"])])
     return sid
 
 
@@ -228,6 +229,9 @@ def main(argv=None) -> int:
     ap.add_argument("--windows", default="132x128,250x200")
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--jobs", type=int, default=6)
+    ap.add_argument("--read-length", type=int, default=300,
+                    help="read length of the deposited runs (2x301 MiSeq: "
+                    "the release's 300x300 table)")
     ap.add_argument("--min-rel", type=float, default=0.001)
     ap.add_argument("--no-remap", action="store_true",
                     help="trust the NHP names as given")
@@ -244,7 +248,10 @@ def main(argv=None) -> int:
         tag = f"w{w1}x{w2}"
         a = {"outdir": args.outdir, "tag": tag, "release": args.release,
              "index": args.index, "primers": args.primers,
-             "assay": args.assay, "w1": w1, "w2": w2}
+             "assay": args.assay, "w1": w1, "w2": w2,
+             # 2x150-equivalent windows are scored against the 2x150
+             # resolution table, the long ones against the reads' own.
+             "read_length": 150 if (w1, w2) == (132, 128) else args.read_length}
         jobs = [(sid, os.path.join(args.reads, f"{acc}_1.fastq.gz"),
                  os.path.join(args.reads, f"{acc}_2.fastq.gz"), a)
                 for sid, acc in sorted(runs.items())]

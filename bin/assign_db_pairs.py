@@ -329,6 +329,10 @@ def main(argv=None) -> int:
                     help="insert bases kept from R1 (default: the release's "
                     "illumina_windows)")
     ap.add_argument("--window-r2", type=int)
+    ap.add_argument("--read-length", type=int,
+                    help="sequenced read length, to find the release's "
+                    "resolution_illumina_<L>x<L>.tsv (default: window + "
+                    "primer)")
     ap.add_argument("--max-ee", type=float, default=2.0,
                     help="expected errors allowed over both windows")
     ap.add_argument("--min-size", type=int, default=2,
@@ -547,9 +551,16 @@ def main(argv=None) -> int:
 
     # Outputs in assign_db.py's shape, so synthesis reads either platform.
     resolution = {}
-    rpath = os.path.join(args.database,
-                         f"resolution_illumina_{w1 + len(next(iter(fwd_seq.values()), ''))}"
-                         f"x{w2 + len(next(iter(rev_seq.values()), ''))}.tsv")
+    # The release names its resolution tables by READ length
+    # (resolution_illumina_150x150, _300x300). Given --read-length that
+    # is used; otherwise it is inferred as window + primer, which is right
+    # only when the windows fill the reads (the 2x150 defaults).
+    if args.read_length:
+        rl1 = rl2 = args.read_length
+    else:
+        rl1 = w1 + len(next(iter(fwd_seq.values()), ""))
+        rl2 = w2 + len(next(iter(rev_seq.values()), ""))
+    rpath = os.path.join(args.database, f"resolution_illumina_{rl1}x{rl2}.tsv")
     if os.path.exists(rpath):
         resolution = {r["id"]: r.get("deepest_rank", "") for r in read_table(rpath)}
     total = fate["clustered"]
