@@ -813,14 +813,24 @@ def label_for(call: dict, tax: dict, label_depth: int,
     def word(k: int) -> str:
         return rank_word(rank_names or [], lineage, RANKS[k])
     near = nearest_name(lin) or call["best_hit"] or "nothing"
+    # Above genus, the nearest genus and how close: a family call reads
+    # "Hexamitidae (97% to Enteromonas)". Without it the reader cannot
+    # tell a sequence one base from Enteromonas, stopped by the 99.5%
+    # Illumina genus floor, from one 5% away. Naming the genus outright
+    # was weighed and refused: at a 95% genus floor, 41% of sequences
+    # whose genus is missing from the release get a wrong one.
+    pct = f"{100 * call.get('identity', 0.0):.0f}%"
+    above_genus = d < RANKS.index("genus")
     if d >= label_depth:
         if not is_placeholder(taxon):
+            if above_genus and near and near != taxon and not is_placeholder(near):
+                return taxon, f"{taxon} ({pct} to {near})"
             return taxon, taxon
         named = next((lin.get(RANKS[k]) for k in range(d - 1, -1, -1)
                       if lin.get(RANKS[k]) and not is_placeholder(lin.get(RANKS[k]))),
                      "")
         nearest = "" if not near or is_placeholder(near) or near == named \
-            else f" (nearest {near})"
+            else f" ({pct} to {near})"
         return taxon, f"{named or taxon}, unnamed {word(d)}{nearest}"
     if not call["best_hit"]:
         return taxon, "unclassified, no database hit"

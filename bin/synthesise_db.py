@@ -72,6 +72,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 
@@ -82,6 +83,8 @@ from ampseqlib import (  # noqa: E402
 )
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
+# The identity in a label ("97% to", "R1 74% to"), left out when pooling.
+LABEL_PCT = re.compile(r"\d+% to ")
 
 CALLS = ("detected", "below_blanks", "below_floor", "low_depth", "chimera")
 CALL_MEANING = {
@@ -174,10 +177,16 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
         if c.get("origin") == "chimera":
             key = ("", "", "chimera")      # one row per well, all pooled
         else:
-            key = (c["rank"], c["taxon"], c["label"])
+            # Pooled on the label without its identity ("Hexamitidae (97%
+            # to Enteromonas)" and "(96% to Enteromonas)" are one call);
+            # the row keeps the label of its largest cluster.
+            key = (c["rank"], c["taxon"], LABEL_PCT.sub("", c["label"]))
         a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
                                  "lineage": c["lineage"], "best_hits": [],
-                                 "margins": []})
+                                 "margins": [], "label": c["label"],
+                                 "top": -1})
+        if key[2] != "chimera" and int(c["reads"]) > a["top"]:
+            a["label"], a["top"] = c["label"], int(c["reads"])
         a["reads"] += int(c["reads"])
         a["clusters"] += 1
         a["identity"] = max(a["identity"], float(c["identity"] or 0))
@@ -185,7 +194,8 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
         if c.get("db_margin"):
             a["margins"].append(c["db_margin"])
     out = []
-    for (rank, taxon, label), a in agg.items():
+    for (rank, taxon, _key), a in agg.items():
+        label = "chimera" if _key == "chimera" else a["label"]
         fits = sorted({primer_fit.get(h, "") for h in a["best_hits"]} - {""})
         out.append({"rank": rank, "taxon": taxon, "label": label,
                     "reads": a["reads"], "clusters": a["clusters"],

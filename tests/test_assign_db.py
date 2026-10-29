@@ -300,8 +300,9 @@ def test_lca_and_floors() -> None:
           and taxon == "O", f"{c['rank']} {taxon!r} {label!r}")
     c = adb.classify_hits([hit("A1", 950, 485, 500)], tax, floors, 0.005)
     taxon, label = adb.label_for(c, tax, R.index("family"))
-    check("97% identity: named at family", c["rank"] == "family"
-          and taxon == label == "F1", f"{c['rank']} {label}")
+    check("97% identity: named at family, with the nearest genus",
+          c["rank"] == "family" and taxon == "F1"
+          and label == "F1 (97% to G1)", f"{c['rank']} {label}")
     c = adb.classify_hits([], tax, floors, 0.005)
     check("no hit at all", adb.label_for(c, tax, 6)[1] ==
           "unclassified, no database hit")
@@ -314,7 +315,7 @@ def test_lca_and_floors() -> None:
                                   "identity": 1.0}, ptax, 6)
     check("a placeholder family is labelled by its named parent and the "
           "nearest genus", taxon == "Chromadorea_X" and label ==
-          "Chromadorea, unnamed family (nearest Haemonchus)", label)
+          "Chromadorea, unnamed family (100% to Haemonchus)", label)
     taxon, label = adb.label_for({"best_hit": "H", "depth": 5, "lca_depth": 5,
                                   "identity": 1.0}, ptax, 6)
     check("stopped above family by a tie: unresolved, not unclassified",
@@ -601,7 +602,7 @@ def test_release_v080_columns() -> None:
                                    "lca_depth": 6, "identity": 1.0},
                                   ptax, 6, rn)
         check("a nematode placeholder family is an unnamed order",
-              label == "Chromadorea, unnamed order (nearest Haemonchus)",
+              label == "Chromadorea, unnamed order (100% to Haemonchus)",
               label)
         _t, label = adb.label_for({"best_hit": "H", "depth": 5,
                                    "lca_depth": 5, "identity": 1.0},

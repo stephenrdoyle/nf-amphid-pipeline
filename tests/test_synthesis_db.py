@@ -532,6 +532,25 @@ def test_v080_margin_and_ranks() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_family_labels_pool() -> None:
+    print("\nfamily calls with the nearest genus")
+    tmp = tempfile.mkdtemp()
+    try:
+        a = cluster("S1", 1, "tg", 300, rank="family", ident="0.9700",
+                    label="Trichostrongylidae (97% to Teladorsagia)")
+        b = cluster("S1", 2, "tg", 100, rank="family", ident="0.9600",
+                    label="Trichostrongylidae (96% to Teladorsagia)")
+        calls, _w, _q = run(write_case(tmp, {"S1": [a, b]}, {"S1": "unknown"}))
+        fam = [c for c in calls if c["taxon"] == "Trichostrongylidae"]
+        check("one family call however its sequences' identities differ, "
+              "labelled from its largest",
+              len(fam) == 1 and fam[0]["reads"] == "400"
+              and fam[0]["label"] == "Trichostrongylidae (97% to Teladorsagia)",
+              str([(c["label"], c["reads"]) for c in fam]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
@@ -539,6 +558,7 @@ def main() -> int:
     test_chimera_rows()
     test_read_funnel()
     test_v080_margin_and_ranks()
+    test_family_labels_pool()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
