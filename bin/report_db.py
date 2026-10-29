@@ -67,6 +67,9 @@ TARGET = ("helminths", "protists", "microsporidia")
 # most of a sample, and what they are (moulds, yeasts, mushrooms) says
 # something about diet and how long a sample sat before collection.
 DETAIL = TARGET + ("fungi",)
+# The identity in a label, dropped where a label stands for many wells
+# (legends, presence rows); synthesise_db.run_label does the same.
+PCT_IN_LABEL = re.compile(r"\d+% to ")
 # Within a target group a run easily names more than the panel palette's
 # eight taxa, and the ninth onwards went grey - one helminth in three on
 # the fixture. Okabe-Ito, then Paul Tol's muted set, which stays
@@ -585,7 +588,8 @@ def build(args) -> str:
         # (nearest Haemonchus)"), not PR2's placeholder name.
         label_of = {}
         for c in gcalls:
-            label_of.setdefault((c["rank"], c["taxon"]), c["label"])
+            label_of.setdefault((c["rank"], c["taxon"]),
+                                PCT_IN_LABEL.sub("nearest ", c["label"]))
         def name(k):
             lab = label_of.get(k, k[1])
             return lab if lab != k[1] else f"{k[1]} ({k[0]})"

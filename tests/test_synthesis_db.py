@@ -547,6 +547,11 @@ def test_family_labels_pool() -> None:
               len(fam) == 1 and fam[0]["reads"] == "400"
               and fam[0]["label"] == "Trichostrongylidae (97% to Teladorsagia)",
               str([(c["label"], c["reads"]) for c in fam]))
+        check("and across samples the label drops the identity",
+              syn.run_label("Entamoebidae (97% to Entamoeba)")
+              == "Entamoebidae (nearest Entamoeba)"
+              and syn.run_label("unclassified, 93% to Entamoeba")
+              == "unclassified, nearest Entamoeba")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -86,6 +86,13 @@ NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
 # The identity in a label ("97% to", "R1 74% to"), left out when pooling.
 LABEL_PCT = re.compile(r"\d+% to ")
 
+
+def run_label(label: str) -> str:
+    """A label for tables across samples: the identity differs from well
+    to well, so "Entamoebidae (97% to Entamoeba)" in one and "(99% to"
+    in another are one taxon, "Entamoebidae (nearest Entamoeba)"."""
+    return LABEL_PCT.sub("nearest ", label)
+
 CALLS = ("detected", "below_blanks", "below_floor", "low_depth", "chimera")
 CALL_MEANING = {
     "detected": "above the run's blank-derived limit and the relative "
@@ -655,7 +662,7 @@ def main(argv=None) -> int:
     for c in calls:
         if c["sample_id"] not in tested:
             continue
-        k = (c["group"], c["rank"], c["taxon"], c["label"])
+        k = (c["group"], c["rank"], c["taxon"], run_label(c["label"]))
         p = prev.setdefault(k, {"detected": 0, "max_share": 0.0})
         if c["call"] == "detected":
             p["detected"] += 1
