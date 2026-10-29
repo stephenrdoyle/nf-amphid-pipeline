@@ -229,6 +229,108 @@ def test_divergent_window() -> None:
               f"{row['identity']} vs {want:.4f}")
 
 
+def test_windows() -> None:
+    print("\nthe windows follow the read length")
+    man = {"illumina_windows": [132, 128], "illumina_geometries": [
+        {"read_length": 150, "windows": [132, 128],
+         "file": "resolution_illumina_150x150.tsv"},
+        {"read_length": 300, "windows": [250, 200],
+         "file": "resolution_illumina_300x300.tsv"}]}
+    check("2x150: 132/128 and the 150x150 table",
+          al.illumina_windows(man, 150)
+          == (132, 128, "resolution_illumina_150x150.tsv"))
+    check("2x300: 250/200 and the 300x300 table",
+          al.illumina_windows(man, 300)
+          == (250, 200, "resolution_illumina_300x300.tsv"))
+    check("2x301 takes the 300 geometry",
+          al.illumina_windows(man, 301)[:2] == (250, 200))
+    check("2x250 cannot hold 250/200 after a primer: 132/128",
+          al.illumina_windows(man, 250)[:2] == (132, 128))
+    check("no read length: the manifest's illumina_windows",
+          al.illumina_windows(man)[:2] == (132, 128))
+    check("explicit windows override, with no table that is not theirs",
+          al.illumina_windows(man, 300, 140, 130) == (140, 130, None))
+    check("one explicit window: the other from the geometry",
+          al.illumina_windows(man, 300, 240)[:2] == (240, 200))
+    check("explicit windows of a geometry take its table",
+          al.illumina_windows(man, 150, 250, 200)[2]
+          == "resolution_illumina_300x300.tsv")
+    check("a release with no geometries: illumina_windows, no table",
+          al.illumina_windows({"illumina_windows": [120, 110]}, 300)
+          == (120, 110, None))
+
+
+def test_long_reads_separate() -> None:
+    print("\n2x300 windows read a base the 2x150 windows miss")
+    mm2 = minimap2()
+    if not mm2:
+        print("  SKIP: minimap2 not found")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        rng = random.Random(347)
+        # Onchocerca and Loa in v0.9.0: one base apart, at insert 347 of a
+        # ~500bp V4 - past R1's 132 and before R2's last 128, but inside
+        # R2's last 200. Here insert 340 of 520.
+        base = fx.build_tree(random.Random(3))
+        lin = next(d["lineage"] for d in base.values() if not d["held_out"])
+        a = rand(rng, 520)
+        b = a[:340] + {"A": "C", "C": "G", "G": "T", "T": "A"}[a[340]] + a[341:]
+        species = {"Fil_a": {"seq": a, "lineage": lin[:-1] + ["Fil_a"],
+                             "held_out": False},
+                   "Fil_b": {"seq": b, "lineage": lin[:-1] + ["Fil_b"],
+                             "held_out": False}}
+        rel = os.path.join(tmp, "release")
+        man = fx.write_release(rel, species)
+        shutil.copy(os.path.join(rel, "resolution_illumina_150x150.tsv"),
+                    os.path.join(rel, "resolution_illumina_300x300.tsv"))
+        man["illumina_geometries"] = [
+            {"read_length": 150, "windows": man["illumina_windows"],
+             "file": "resolution_illumina_150x150.tsv"},
+            {"read_length": 300, "windows": [250, 200],
+             "file": "resolution_illumina_300x300.tsv"}]
+        with open(os.path.join(rel, "manifest.json"), "w") as fh:
+            json.dump(man, fh)
+        fx.write_primers(os.path.join(tmp, "primers.tsv"))
+        amp = fx.amplicon(a)
+        with gzip.open(os.path.join(tmp, "r1.fq.gz"), "wt") as f1, \
+                gzip.open(os.path.join(tmp, "r2.fq.gz"), "wt") as f2:
+            for i in range(20):
+                f1.write(f"@{i} 1\n{amp[:300]}\n+\n{'I' * 300}\n")
+                f2.write(f"@{i} 2\n{al.revcomp(amp)[:300]}\n+\n{'I' * 300}\n")
+
+        def run(*extra):
+            out = os.path.join(tmp, "out" + "_".join(extra))
+            with contextlib.redirect_stdout(io.StringIO()):
+                adp.main(["--r1", os.path.join(tmp, "r1.fq.gz"),
+                          "--r2", os.path.join(tmp, "r2.fq.gz"),
+                          "--database", rel, "--primers",
+                          os.path.join(tmp, "primers.tsv"), "--assay",
+                          fx.ASSAY, "--sample-id", "X", "--outdir", out,
+                          "--minimap2", mm2, *extra])
+            rows = list(csv.DictReader(open(os.path.join(out, "X.clusters.tsv")),
+                                       delimiter="\t"))
+            js = json.load(open(os.path.join(out, "X.assign_db.json")))
+            return rows[0], js["settings"]
+        short, s150 = run("--read-length", "150")
+        long_, s300 = run("--read-length", "300")
+        forced, sf = run("--read-length", "300", "--window-r1", "132",
+                         "--window-r2", "128")
+        check("2x150 windows cannot tell the two apart",
+              short["rank"] != "species" and (s150["window_r1"],
+                                              s150["window_r2"]) == (132, 128),
+              f"{short['rank']} {short['taxon']} {s150}")
+        check("--read-length 300: 250/200 windows name the species",
+              long_["rank"] == "species" and long_["taxon"] == "Fil_a"
+              and (s300["window_r1"], s300["window_r2"]) == (250, 200)
+              and s300["resolution_table"] == "resolution_illumina_300x300.tsv",
+              f"{long_['rank']} {long_['taxon']} {s300}")
+        check("--window-r1/-r2 still override, with the matching table",
+              (sf["window_r1"], sf["window_r2"]) == (132, 128)
+              and forced["rank"] != "species"
+              and sf["resolution_table"] == "resolution_illumina_150x150.tsv",
+              f"{forced['rank']} {sf}")
+
+
 def test_end_to_end() -> None:
     print("\nthe fixture's Illumina run")
     mm2 = minimap2()
@@ -353,9 +455,11 @@ def rank_of(x):
 
 def main() -> int:
     test_orient()
+    test_windows()
     test_denoiser()
     test_whole_insert()
     test_divergent_window()
+    test_long_reads_separate()
     test_end_to_end()
     test_gap_chimera()
     print(f"\n{'=' * 62}")

@@ -421,7 +421,7 @@ an indel can be detected at all.
 | `--min_length` | `100` | minimum read length after trimming |
 | `--min_overlap` | `20` | minimum overlap to merge a pair |
 | `--max_ee` | `2.0` | maximum expected errors |
-| `--illumina_read_length` | `250` | used by the panel geometry checks |
+| `--illumina_read_length` | `250` | used by the panel geometry checks; in database mode it also picks the Illumina windows (300 for 2x300/2x301 runs) |
 
 ### 3.4 Concatemer splitting (nanopore)
 
@@ -464,8 +464,8 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_primer_max_edits` | `3` | edits allowed when finding each primer in database mode (panel mode uses 2). Off-target bacterial 16S differs from the forward primer at its 3' end, often by three; at two it is dropped as `no_primer` rather than counted as bacteria |
 | `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
 | `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
-| `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's `illumina_windows` (132 for 2x150) |
-| `--db_window_r2` | `null` | the same for R2 (128 for 2x150); set both for longer reads, e.g. 250 and 200 for 2x300 |
+| `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's windows for `--illumina_read_length` (`illumina_geometries`: 132 at 2x150 or 2x250, 250 at 2x300) |
+| `--db_window_r2` | `null` | the same for R2 (128 at 2x150, 200 at 2x300) |
 
 ### 3.7 Control plasmids
 

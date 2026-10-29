@@ -23,7 +23,7 @@ process ASSIGN_DB_PAIRS {
     // Database mode on Illumina: the pairs are not merged (at 2x150 no V4
     // insert overlaps), but windowed, denoised and classified as pairs.
     // Outputs have assign_db.py's shape, so synthesis reads either
-    // platform. Windows default to the release's illumina_windows.
+    // platform. Windows default to the release's for --read-length.
     def (r1, r2) = [reads[0], reads[1]]
     def w1 = params.db_window_r1 != null ? "--window-r1 ${params.db_window_r1}" : ''
     def w2 = params.db_window_r2 != null ? "--window-r2 ${params.db_window_r2}" : ''

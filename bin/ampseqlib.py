@@ -1501,6 +1501,36 @@ def release_version(manifest: dict) -> str:
     return str(manifest.get("version") or manifest.get("name") or "unknown")
 
 
+def illumina_windows(manifest: dict, read_length: int | None = None,
+                     window_r1: int | None = None,
+                     window_r2: int | None = None) -> tuple:
+    """(window_r1, window_r2, resolution table or None) for Illumina pairs
+    of `read_length`.
+
+    A release lists the windows it resolved at each read length
+    (illumina_geometries: 132/128 at 2x150, 250/200 at 2x300). The
+    windows are those of the longest geometry the reads can hold, so a
+    2x301 run reads past the 2x150 windows - Onchocerca and Loa differ by
+    one base at insert 347, between 132 and 128 but inside 250/200. A
+    read length under every geometry, or none given, takes the manifest's
+    illumina_windows, as do releases that list no geometries. Explicit
+    windows override either mate. The table is the geometry whose windows
+    are the ones used; None when no geometry has them, since another
+    geometry's table would describe reads that were not taken."""
+    geoms = [g for g in manifest.get("illumina_geometries") or []
+             if isinstance(g, dict) and len(g.get("windows") or []) == 2]
+    base = list(manifest.get("illumina_windows") or [132, 128])
+    fits = [g for g in geoms
+            if read_length and int(g.get("read_length", 0)) <= read_length]
+    if fits:
+        base = max(fits, key=lambda g: int(g["read_length"]))["windows"]
+    w1 = int(window_r1 or base[0])
+    w2 = int(window_r2 or base[1])
+    table = next((g.get("file") for g in geoms
+                  if [int(x) for x in g["windows"]] == [w1, w2]), None)
+    return w1, w2, table
+
+
 def read_fasta(path: str):
     """(id, sequence) pairs; the id is the header up to the first space."""
     name, parts = None, []

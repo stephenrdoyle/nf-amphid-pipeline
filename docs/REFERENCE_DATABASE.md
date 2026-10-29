@@ -447,9 +447,14 @@ nanopore route's shape, so synthesis and the report read either platform.
 - **Not merged.** At 2x150 no V4 insert overlaps, and dropping pairs
   that fail to merge would bias against long-V4 lineages. Each mate is
   primer-trimmed (either mate may carry the forward primer) and cut to a
-  fixed window of insert - the release's `illumina_windows`, 132 and 128
-  for 2x150, or `--db_window_r1`/`--db_window_r2` - so error copies line
-  up base for base. A pair whose insert ends inside R1 (read-through,
+  fixed window of insert so error copies line up base for base. The
+  windows follow `--illumina_read_length`: the release's
+  `illumina_geometries` entry for the longest reads the run holds -
+  132/128 at 2x150 (and 2x250), 250/200 at 2x300 or 2x301 - or
+  `--db_window_r1`/`--db_window_r2` when set. The longer windows matter:
+  *Onchocerca*, *Loa* and *D. repens* differ by one base at insert 347,
+  between the 2x150 windows but inside 250/200 (vespa18s v0.9.0). The
+  resolution table is the one for the windows used. A pair whose insert ends inside R1 (read-through,
   found with prep_illumina's junction search) is kept whole as one
   sequence, so short-V4 lineages are not lost either.
 - **Denoised, not consensus-built.** Illumina's error is in the counting,
