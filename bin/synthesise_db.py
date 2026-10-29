@@ -207,7 +207,8 @@ def blank_limits(wells: dict, rows: dict, min_fraction_depth: int) -> dict:
     return out, len(blanks)
 
 
-def read_funnel(wells_out: list[dict], demux: dict, split: dict) -> dict:
+def read_funnel(wells_out: list[dict], demux: dict, split: dict,
+                calls: list[dict] | None = None) -> dict:
     """Every read from the sequencer to a classified target, and where
     the rest went.
 
@@ -226,7 +227,11 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict) -> dict:
       both primers found            no primer pair, too short, low quality
       in a consensus sequence       too few reads to form one
       classified                    PCR chimeras removed
+        of which unclassified       no rank met its identity floor
       target organisms              host, bacteria, plants... by group
+        helminths, protists, microsporidia, each by the rank reached
+    Rows marked "sub" are a breakdown of the stage above, not a further
+    loss: their detail is what they hold rather than what was lost.
 
     It also checks the seam between demultiplexing and assignment: the
     reads the demultiplexer wrote must be the reads assignment read.
@@ -293,12 +298,40 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict) -> dict:
         "reads": total["clustered"] - total["chimera_reads"],
         "lost_here": ({"PCR chimeras": total["chimera_reads"]}
                       if total["chimera_reads"] else {})})
+    # From the calls: how much of the classified set is "unclassified,
+    # NN% to X" (a sequence no rank's floor would name), by group, and
+    # how deep each target group was named.
+    unclass, depth = Counter(), defaultdict(Counter)
+    for c in calls or []:
+        if c["group"] == "chimera":
+            continue
+        n = int(c["reads"])
+        if c["label"].startswith("unclassified"):
+            unclass[c["group"]] += n
+            depth[c["group"]]["unclassified"] += n
+        else:
+            depth[c["group"]][c["rank"] if c["rank"] in
+                              ("species", "genus", "family")
+                              else "above family"] += n
+    if calls is not None:
+        stages.append({
+            "stage": "of which unclassified (no rank met its floor)",
+            "reads": sum(unclass.values()), "sub": True,
+            "lost_here": {g.replace("_", " / "): unclass[g]
+                          for g in GROUPS if unclass[g]}})
     stages.append({
         "stage": "target organisms (" + ", ".join(TARGET_GROUPS) + ")",
         "reads": sum(total[f"{g}_reads"] for g in TARGET_GROUPS),
         "lost_here": {g.replace("_", " / "): total[f"{g}_reads"]
                       for g in GROUPS if g not in TARGET_GROUPS
                       and g != "chimera" and total[f"{g}_reads"]}})
+    if calls is not None:
+        for g in TARGET_GROUPS:
+            stages.append({
+                "stage": g, "reads": total[f"{g}_reads"], "sub": True,
+                "lost_here": {f"{k}": depth[g][k] for k in
+                              ("species", "genus", "family", "above family",
+                               "unclassified") if depth[g][k]}})
     start = stages[0]["reads"] or 0
     for st in stages:
         st["percent_of_start"] = (round(100 * st["reads"] / start, 2)
@@ -308,6 +341,30 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict) -> dict:
         out["handoff_balances"] = demux["assigned_reads"] == total["reads_in"]
         out["handoff"] = {"written_by_demultiplexing": demux["assigned_reads"],
                           "read_by_assignment": total["reads_in"]}
+    # Why reads reached only one barcode. On nanopore this is usually
+    # the largest loss of the run, and the tier count alone does not say
+    # whether it is the molecule (a read that stops before its second
+    # adapter), the basecalls (an adapter or index too damaged to read)
+    # or the plate design (one end cannot name a well when indexes are
+    # combined). The demultiplexer records a reason for every end of
+    # every read; these are whole-run counts, not a sample.
+    if demux.get("i5_end_reasons") or demux.get("i7_end_reasons"):
+        grid = demux.get("combination_grid") or {}
+        out["barcode_ends"] = {
+            "reads": demux.get("total_reads", 0),
+            "both_ends": demux.get("assigned_reads"),
+            "one_end": (demux.get("by_tier") or {}).get("B", 0),
+            "i5": demux.get("i5_end_reasons") or {},
+            "i7": demux.get("i7_end_reasons") or {},
+            "i5_used": grid.get("i5_used"), "i7_used": grid.get("i7_used"),
+            "wells_declared": grid.get("wells_declared"),
+            "rescued_by_combination":
+                (demux.get("combination_check") or {}).get("resolved", 0),
+            "accept_single_end":
+                (demux.get("settings") or {}).get("accept_single_end"),
+            "basecall_model":
+                (split.get("basecalling") or {}).get("basecall_model", ""),
+        }
     # A well that lost most of its reads before classification looks
     # shallow in the per-well table; say which, and where they went.
     out["wells_losing_over_half"] = [
@@ -602,7 +659,7 @@ def main(argv=None) -> int:
             "mask_rows": (pf_summary.get("reference_database") or {}).get(
                 "lookalikes"),
         },
-        "read_funnel": read_funnel(wells_out, demux, split),
+        "read_funnel": read_funnel(wells_out, demux, split, calls),
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),

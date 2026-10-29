@@ -414,10 +414,15 @@ synthesis is built on standards and plasmids this protocol does not have.
   classified target - reads off the sequencer, amplicon units after
   splitting, demultiplexed (losses by demux tier), both primers found,
   in a consensus sequence (too few reads, or no hit in the release),
-  classified (chimeras removed), target organisms (off-target by group).
-  On Illumina it starts at the read pairs in. It checks that the reads
-  demultiplexing wrote are the reads assignment read, and names wells
-  that classified under half the reads they received.
+  classified (chimeras removed; of which unclassified, by group), target
+  organisms (off-target by group; then helminths, protists and
+  microsporidia, each by the rank reached). On Illumina it starts at the
+  read pairs in. It checks that the reads demultiplexing wrote are the
+  reads assignment read, and names wells that classified under half the
+  reads they received. On nanopore it then says why reads reached only
+  one barcode, from the demultiplexer's reason for every end of every
+  read: each end's fate, whether one end is worse, the basecall model,
+  and whether the plate's index design could use a single end.
 - **Cohort:** a sample with demultiplexed reads but no assignment stops
   synthesis; a well with no reads is reported empty.
 - The report puts the release, the blanks, depth, internal adapters and

@@ -344,7 +344,8 @@ def test_read_funnel() -> None:
                    "label": "chimera of S1_c1 and S1_c2", "lineage": ""})
         wells = {"S1": [cluster("S1", 1, "hc", 600), cluster("S1", 2, "bt", 300),
                         ch],
-                 "S2": [cluster("S2", 1, "ec", 40)]}
+                 "S2": [cluster("S2", 1, "ec", 40, rank="family",
+                                label="unclassified, 90% to Escherichia")]}
         args = write_case(tmp, wells, {"S1": "unknown", "S2": "unknown"})
         # S2 is mostly primer dimer: 60 of its 100 reads have no primer pair.
         js = os.path.join(tmp, "assign_db", "S2.assign_db.json")
@@ -360,12 +361,23 @@ def test_read_funnel() -> None:
         check("Illumina: the funnel starts at the pairs in",
               st[0]["stage"] == "read pairs in" and st[0]["reads"] == 1035,
               str(st[0]))
+        main_st = [x for x in st if not x.get("sub")]
         check("primer losses, chimeras and off-target are each a stage",
-              [s["reads"] for s in st] == [1035, 970, 970, 940, 600]
-              and st[3]["lost_here"] == {"PCR chimeras": 30}
-              and st[4]["lost_here"] == {"host": 300,
-                                         "bacteria / archaea": 40},
+              [x["reads"] for x in main_st] == [1035, 970, 970, 940, 600]
+              and main_st[3]["lost_here"] == {"PCR chimeras": 30}
+              and main_st[4]["lost_here"] == {"host": 300,
+                                              "bacteria / archaea": 40},
               str(st))
+        sub = {x["stage"]: x for x in st if x.get("sub")}
+        check("each target group is a row, by the rank it was named to",
+              sub["helminths"]["reads"] == 600
+              and sub["helminths"]["lost_here"] == {"species": 600}
+              and sub["microsporidia"]["reads"] == 0, str(sub))
+        check("and unclassified reads are a row of their own",
+              sub["of which unclassified (no rank met its floor)"][
+                  "reads"] == 40 and sub["of which unclassified (no rank "
+                  "met its floor)"]["lost_here"] == {"bacteria / archaea": 40},
+              str(sub))
         check("a well that classified under half its reads is named",
               [b["sample_id"] for b in
                qc["read_funnel"]["wells_losing_over_half"]] == ["S2"],
@@ -391,9 +403,58 @@ def test_read_funnel() -> None:
               and st[2]["lost_here"] == {"one end only (tier B)": 100,
                                          "tier D": 20}, str(st[:3]))
         check("percentages are of the reads off the sequencer",
-              st[-1]["percent_of_start"] == round(100 * 600 / 1050, 2))
+              [x for x in st if x["stage"].startswith("target")][0][
+                  "percent_of_start"] == round(100 * 600 / 1050, 2))
         check("the demux-to-assignment handoff balances", fn[
             "handoff_balances"] is True, str(fn.get("handoff")))
+        check("no end reasons, no barcode-ends section",
+              "barcode_ends" not in fn)
+        # Why reads reached one barcode: the demultiplexer's per-end
+        # reasons, and whether the plate design could use one end.
+        ends = {"total_reads": 1155, "assigned_reads": 1035,
+                "by_tier": {"A": 1035, "B": 120},
+                "per_sample": {"S1": 935, "S2": 100},
+                "i5_end_reasons": {"ok": 1100, "anchor_not_found": 55},
+                "i7_end_reasons": {"ok": 1000, "ok_single_copy": 30,
+                                   "anchor_not_found": 100,
+                                   "barcode_off_read": 25},
+                "combination_check": {"resolved": 3},
+                "combination_grid": {"i5_used": 2, "i7_used": 2,
+                                     "wells_declared": 4}}
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump(ends, fh)
+        with open(os.path.join(tmp, "split.json"), "w") as fh:
+            json.dump({"reads_in": 1050, "pieces_out": 1155,
+                       "basecalling": {"basecall_model":
+                                       "dna_r10.4.1_e8.2_400bps_hac@v5.2.0"}},
+                      fh)
+        _c, _w, qc = run(args)
+        be = qc["read_funnel"].get("barcode_ends") or {}
+        check("per-end reasons are carried, whole run",
+              be.get("i7", {}).get("anchor_not_found") == 100
+              and be.get("one_end") == 120 and be.get("wells_declared") == 4,
+              str(be))
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("the report says why reads reached one barcode",
+              "Why reads reached only one barcode" in html
+              and "row or column" in html and "SUP model" in html
+              and "i7 end fails" in html)
+        ends["combination_grid"] = {"i5_used": 4, "i7_used": 4,
+                                    "wells_declared": 4}
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump(ends, fh)
+        run(args)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("with unique dual indexes it says one end would do",
+              "one well only, so a single readable end" in html
+              and "row or column" not in html)
         with open(os.path.join(tmp, "demux.json"), "w") as fh:
             json.dump({"per_sample": {"S1": 935, "S2": 100},
                        "total_reads": 1155, "assigned_reads": 1045,
