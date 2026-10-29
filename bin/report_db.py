@@ -55,6 +55,7 @@ GROUP_STYLE = (
     ("bacteria_archaea", "#8c6d31", "bacteria & archaea"),
     ("organelle", "#c7c7a0", "organelles"),
     ("unassigned", OTHER_COLOUR, "unassigned"),
+    ("chimera", "#e8e8e8", "PCR chimeras"),
 )
 GROUP_COLOUR = {g: c for g, c, _l in GROUP_STYLE}
 GROUP_LABEL = {g: lab for g, _c, lab in GROUP_STYLE}
@@ -163,6 +164,16 @@ def build(args) -> str:
             f"mask ({fmt(ia.get('mask_rows'))} sites) protects taxa in the "
             "database from both; a taxon missing from it is not protected, "
             "so a high rate here is worth a second look.")
+    chq = qc.get("chimeras") or {}
+    if chq.get("reads"):
+        items.append(
+            flag("warn" if chq.get("wells_over_5pct") else "ok", "chimeras")
+            + f" {fmt(chq['reads'])} reads ({100 * chq['of_clustered']:.1f}% "
+            "of classified) were PCR chimeras - joins of two more abundant "
+            "sequences in the same well. They are counted but never named, "
+            "and kept out of every composition."
+            + (" Over 5% in: " + esc(", ".join(chq["wells_over_5pct"])) + "."
+               if chq.get("wells_over_5pct") else ""))
     near = qc.get("near_3prime_calls") or []
     if near:
         items.append(flag("warn", "primer fit") + " Detected with a best hit "
@@ -338,7 +349,7 @@ def build(args) -> str:
     # -- the calls ---------------------------------------------------------
     P.append("<h2 id='calls'>Every call</h2>")
     lev = {"detected": "ok", "below_blanks": "warn", "below_floor": "warn",
-           "low_depth": "bad"}
+           "low_depth": "bad", "chimera": "warn"}
     order = {g: i for i, (g, _c, _l) in enumerate(GROUP_STYLE)}
     cr = []
     for c in sorted(calls, key=lambda c: (c["sample_id"],

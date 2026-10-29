@@ -314,10 +314,32 @@ def test_groups() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_chimera_rows() -> None:
+    print("\nchimeras in synthesis")
+    tmp = tempfile.mkdtemp()
+    try:
+        ch = cluster("S1", 3, "tg", 30)
+        ch.update({"origin": "chimera", "rank": "", "taxon": "",
+                   "label": "chimera of S1_c1 and S1_c2", "lineage": ""})
+        wells = {"S1": [cluster("S1", 1, "hc", 600), cluster("S1", 2, "sc", 300),
+                        ch]}
+        calls, w, qc = run(write_case(tmp, wells, {"S1": "unknown"}))
+        c = [x for x in calls if x["group"] == "chimera"]
+        check("a chimera is its own group and call, never a detection",
+              len(c) == 1 and c[0]["call"] == "chimera" and c[0]["reads"] == "30",
+              str(c))
+        check("and stays out of every target group's composition",
+              w["S1"]["helminths_reads"] == "600"
+              and w["S1"]["chimera_reads"] == "30", str(w["S1"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
     test_groups()
+    test_chimera_rows()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

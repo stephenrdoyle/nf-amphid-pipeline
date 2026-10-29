@@ -345,6 +345,8 @@ def main(argv=None) -> int:
     ap.add_argument("--primer-max-edits", type=int, default=3,
                     help="edits allowed when finding each primer (see "
                     "assign_db.py)")
+    ap.add_argument("--no-chimera-check", action="store_true",
+                    help="do not test sequences for PCR chimeras")
     ap.add_argument("--lca-margin", type=float, default=0.005)
     ap.add_argument("--floors", default=",".join(
         f"{k}={v}" for k, v in ILLUMINA_FLOORS.items()),
@@ -565,6 +567,23 @@ def main(argv=None) -> int:
         resolution = {r["id"]: r.get("deepest_rank", "") for r in read_table(rpath)}
     total = fate["clustered"]
     order = sorted(range(len(centroids)), key=lambda k: (-centroids[k][2], k))
+    cid = {k: f"{sid}_p{n}" for n, k in enumerate(order, 1)}
+    # PCR chimeras (assign_db.chimera_scan), within each shape so the
+    # windows line up base for base. A join in the unread gap - R1 from
+    # one parent, R2 from another - is the commonest kind on Illumina,
+    # and the concatenated windows show it as a breakpoint at the '|'.
+    chim: dict = {}
+    if not args.no_chimera_check:
+        shapes: dict = defaultdict(list)
+        for k in order:
+            x, y, _n = centroids[k]
+            shapes[(len(x), len(y))].append(k)
+        for ks in shapes.values():
+            found = adb.chimera_scan(
+                [centroids[k][0] + "|" + centroids[k][1] for k in ks],
+                [centroids[k][2] for k in ks], fixed=True)
+            for q, (a, b, bp, *_r) in found.items():
+                chim[ks[q]] = (ks[a], ks[b], bp)
     rows = []
     label_depth = RANKS.index("family")
     for n, k in enumerate(order, 1):
@@ -573,6 +592,22 @@ def main(argv=None) -> int:
         taxon, label = adb.label_for(call, tax, label_depth)
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
+        chimera_of = ""
+        if k in chim:
+            a, b, bp = chim[k]
+            # In the gap when every base telling the parents apart takes
+            # the left parent's in R1's window and the right one's in R2's.
+            q = x + "|" + y
+            pa = centroids[a][0] + "|" + centroids[a][1]
+            pb = centroids[b][0] + "|" + centroids[b][1]
+            inf = [i for i in range(len(q)) if pa[i] != pb[i]]
+            gap = y and inf and all(
+                (q[i] == pa[i]) == (i < len(x)) for i in inf
+                if q[i] in (pa[i], pb[i]))
+            where = "gap" if gap else str(bp)
+            chimera_of = f"{cid[a]}+{cid[b]}@{where}"
+            taxon, label, d = "", f"chimera of {cid[a]} and {cid[b]}", -1
+            call = {**call, "rank": ""}
         rows.append({
             "sample_id": sid, "cluster": f"{sid}_p{n}", "reads": cnt,
             "rel_abundance": f"{cnt / total:.6f}" if total else "",
@@ -585,9 +620,10 @@ def main(argv=None) -> int:
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
             "db_resolution": resolution.get(call["best_hit"], ""),
-            "origin": ("whole_insert" if not y else
-                       "pair_split" if call.get("split_mates") else "pair"),
+            "origin": ("chimera" if chimera_of else "whole_insert" if not y
+                       else "pair_split" if call.get("split_mates") else "pair"),
             "merged": 0,
+            "chimera_of": chimera_of,
             "length": len(x) + len(y),
             "database_version": version,
             # The insert as far as it was read, gap marked by Ns.
@@ -596,7 +632,8 @@ def main(argv=None) -> int:
     cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
             "label", "identity", "coverage", "lineage", "best_hit",
             "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "origin", "merged", "length", "database_version", "consensus"]
+            "origin", "merged", "chimera_of", "length", "database_version",
+            "consensus"]
     with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
               encoding="utf-8") as fh:
         w = writer(fh, cols)
@@ -654,6 +691,8 @@ def main(argv=None) -> int:
         "quality_filter_blind": len(qual_values) <= 2,
         "clusters": len(rows),
         "haplotype_splits": 0,
+        "chimeras": {"sequences": len(chim),
+                     "reads": sum(centroids[k][2] for k in chim)},
         "settings": {"window_r1": w1, "window_r2": w2, "max_ee": args.max_ee,
                      "min_size": args.min_size,
                      "max_diffs": args.max_diffs if args.max_diffs is not None

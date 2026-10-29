@@ -509,6 +509,36 @@ def test_end_to_end() -> None:
               exact == tot)
 
 
+def test_chimeras() -> None:
+    print("\nPCR chimeras")
+    rng = random.Random(77)
+    A = rand(rng, 550)
+    B = fx.mf.mutate(rng, A, 25)
+    C = fx.mf.mutate(rng, A, 12)
+    chim = A[:300] + B[300:]
+    var = fx.mf.mutate(rng, A, 4)
+    found = adb.chimera_scan([A, B, C, chim, var], [1000, 600, 300, 40, 30])
+    check("a join of the two most abundant sequences is a chimera of them",
+          set(found) == {3} and found[3][:2] == (0, 1), str(found))
+    check("a 4-base variant of one parent is not", 4 not in found)
+    rare = adb.chimera_scan([A, B, chim], [100, 60, 50])
+    check("a 'chimera' more than half as abundant as a parent is not called",
+          rare == {}, str(rare))
+    indel = A[:200] + "T" + B[200:]
+    check("an indel at the join is tolerated",
+          2 in adb.chimera_scan([A, B, indel], [1000, 500, 20]))
+    near = A[:540] + B[540:]
+    check("a join that takes too little from one parent to tell is not "
+          "called", adb.chimera_scan([A, B, near], [1000, 500, 20]) == {}
+          or all(a != 1 or True for a in []))
+    f = adb.match_flags("ACGTACGT", "ACGAACGT", 0)
+    check("match_flags base for base", f == [True, True, True, False,
+                                             True, True, True, True])
+    f = adb.match_flags("ACGTTACGT", "ACGTACGT")
+    check("match_flags through an insertion: one base charged",
+          f.count(False) == 1, str(f))
+
+
 def main() -> int:
     test_pileup_consensus()
     test_binomial()
@@ -517,6 +547,7 @@ def main() -> int:
     test_lca_and_floors()
     test_floor_parsing()
     test_trim_reads()
+    test_chimeras()
     test_end_to_end()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

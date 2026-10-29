@@ -83,7 +83,7 @@ from ampseqlib import (  # noqa: E402
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
 
-CALLS = ("detected", "below_blanks", "below_floor", "low_depth")
+CALLS = ("detected", "below_blanks", "below_floor", "low_depth", "chimera")
 CALL_MEANING = {
     "detected": "above the run's blank-derived limit and the relative "
                 "abundance floor",
@@ -91,14 +91,16 @@ CALL_MEANING = {
     "below_floor": "above the blanks, but under the relative abundance floor",
     "low_depth": "the well has fewer clustered reads than --min-depth, so "
                  "nothing in it is called",
+    "chimera": "a PCR chimera of two more abundant sequences in the well; "
+               "its reads are counted, never named",
 }
 
 GROUPS = ("helminths", "protists", "microsporidia", "host", "fungi",
           "plants", "invertebrates", "bacteria_archaea", "organelle",
-          "unassigned")
+          "unassigned", "chimera")
 TARGET_GROUPS = ("helminths", "protists", "microsporidia")
 OFFTARGET = tuple(g for g in GROUPS if g not in TARGET_GROUPS
-                  and g != "unassigned")
+                  and g not in ("unassigned", "chimera"))
 HELMINTH_CLASSES = {"Nematoda", "Platyhelminthes", "Acanthocephala"}
 
 
@@ -165,7 +167,10 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
     """One row per (rank, taxon, label) in a well, clusters pooled."""
     agg: dict = {}
     for c in w.clusters:
-        key = (c["rank"], c["taxon"], c["label"])
+        if c.get("origin") == "chimera":
+            key = ("", "", "chimera")      # one row per well, all pooled
+        else:
+            key = (c["rank"], c["taxon"], c["label"])
         a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
                                  "lineage": c["lineage"], "best_hits": []})
         a["reads"] += int(c["reads"])
@@ -178,7 +183,7 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
         out.append({"rank": rank, "taxon": taxon, "label": label,
                     "reads": a["reads"], "clusters": a["clusters"],
                     "identity": a["identity"], "lineage": a["lineage"],
-                    "group": organism_group(
+                    "group": "chimera" if label == "chimera" else organism_group(
                         [x for x in a["lineage"].split(";")] if a["lineage"]
                         else [], host_clade),
                     "primer_fit": ",".join(fits)})
@@ -302,7 +307,9 @@ def main(argv=None) -> int:
                          "proportional: share of a blank" if prop + 1 == limit
                          and prop else "fixed floor - blanks were clean "
                          "for this taxon")
-            if w.depth < args.min_depth:
+            if r["group"] == "chimera":
+                call = "chimera"
+            elif w.depth < args.min_depth:
                 call = "low_depth"
             elif r["reads"] < limit:
                 call = "below_blanks"
@@ -455,6 +462,16 @@ def main(argv=None) -> int:
                  if c["sample_type"] in NEGATIVE_TYPES and c["reads"] > 0}),
         },
         "empty_wells": empty,
+        # PCR chimeras found per well (assign_db.chimera_scan): counted,
+        # never named, kept out of every composition.
+        "chimeras": {"reads": sum(int(w2["chimera_reads"]) for w2 in wells_out),
+                     "of_clustered": round(sum(int(w2["chimera_reads"])
+                                               for w2 in wells_out)
+                                           / max(1, sum(int(w2["clustered"] or 0)
+                                                        for w2 in wells_out)), 4),
+                     "wells_over_5pct": sorted(
+                         w2["sample_id"] for w2 in wells_out
+                         if float(w2["chimera_fraction"]) > 0.05)},
         "low_depth_wells": sorted(w.sid for w in wells.values()
                                   if w.depth < args.min_depth),
         # The design note asks for the rate of internal anchor hits per

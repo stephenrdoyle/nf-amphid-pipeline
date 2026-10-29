@@ -545,3 +545,35 @@ Release notes for vespa-18s-refdb found on the way: `V4_ef59fbd391ef`
 (PR2 `QJVE01000361.1.1814_U`, labelled *Arthrobacter stackebrandtii*)
 is human 18S - a bacterial assembly carrying host contamination - and
 ties with *Homo sapiens*, so human reads stop at no rank.
+
+### 11.6 PCR chimeras
+
+Ligation chimeras (whole library molecules joined) were already handled:
+the splitter cuts at internal adapters and the demultiplexer quarantines
+what is left. PCR chimeras - one amplicon built from two templates by
+template switching in PCR1 - were not flagged. They mostly failed safe
+(stopping high, as `pair_split` or "unclassified, NN% to X") but were
+never called what they are, and added to the unclassified shares.
+
+Both routes now run a de novo check on each sample's final sequences
+(`assign_db.chimera_scan`), in the manner of UCHIME. A sequence is a
+chimera when two sequences at least twice as abundant, joined at a
+breakpoint, explain it with at most 2 differences, at least 3 positions
+better than the best single parent, with each side of the breakpoint
+holding a base only its own parent has. Nanopore consensus sequences are
+compared by banded alignment, Illumina pairs base for base within their
+fixed windows. The commonest Illumina case, R1 from one template and R2
+from another, shows as a breakpoint in the unread gap (`chimera_of` ends
+`@gap`).
+
+A chimera's reads are counted, never named: its label is "chimera of
+<cluster> and <cluster>", its call `chimera`, its group `chimera`, and
+it is left out of every composition. The run QC and the report give the
+share per run and name wells over 5%. `--no-chimera-check` turns it off.
+
+On three VESPA human samples (250x200, v0.7.0), 0.3-1.7% of classified
+pairs were chimeras: between *Blastocystis* subtypes, *Entamoeba*
+sequences, yeasts, and *Necator* x *Ascaris*. Some joined two haplotypes
+of one species (*Necator* x *Necator*); those reads leave the species'
+composition too, a small cost for not counting recombinant sequences as
+taxa.
