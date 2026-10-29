@@ -531,6 +531,21 @@ def test_chimeras() -> None:
     check("a join that takes too little from one parent to tell is not "
           "called", adb.chimera_scan([A, B, near], [1000, 500, 20]) == {}
           or all(a != 1 or True for a in []))
+    # which joins are excluded: two genera, yes; within a genus, no
+    lt = {k: dict(zip(al.RANKS, v.split(";"))) for k, v in {
+        "N": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ancylostomatidae;Necator;Necator_americanus",
+        "N2": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ancylostomatidae;Necator;Necator_sp.",
+        "A": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ascarididae;Ascaris;Ascaris_suum",
+        "F": "E;O;Op;Metazoa;Nematoda;Chromadorea;Ancylostomatidae;;"}.items()}
+    c = lambda h, d: {"best_hit": h, "depth": d}
+    check("parents in two genera: excluded",
+          adb.parents_differ(c("N", 8), c("A", 8), lt))
+    check("two species (or a species and an unnamed one) of one genus: kept",
+          not adb.parents_differ(c("N", 8), c("N2", 8), lt))
+    check("a parent named only to family, same family: kept (doubt keeps "
+          "reads)", not adb.parents_differ(c("N", 8), c("F", 6), lt))
+    check("a parent named only to family, different family: excluded",
+          adb.parents_differ(c("A", 8), c("F", 6), lt))
     f = adb.match_flags("ACGTACGT", "ACGAACGT", 0)
     check("match_flags base for base", f == [True, True, True, False,
                                              True, True, True, True])

@@ -583,6 +583,30 @@ def chimera_scan(seqs: list[str], abund: list[int], fixed: bool = False,
     return found
 
 
+def parents_differ(call_a: dict, call_b: dict, tax: dict) -> bool:
+    """Do a chimera's two parents belong to different genera (or higher)?
+
+    Compared rank by rank down to genus, over the ranks BOTH parents were
+    named to. A join of two genera is a PCR artefact that would otherwise
+    read as a taxon, and is excluded. A join within one genus is kept: the
+    test cannot tell it from real variation (18S is multi-copy, and a
+    sample can carry genuine recombinant-looking haplotypes), V4 barely
+    separates species, and the database's species labels are its least
+    reliable part - Blastocystis ST2 x "Blastocystis sp." would otherwise
+    be excluded purely because one parent's species is missing. A parent
+    named only above genus counts as possibly the same genus, so doubt
+    about the parents never removes reads.
+    """
+    la = tax.get(call_a.get("best_hit", ""), {})
+    lb = tax.get(call_b.get("best_hit", ""), {})
+    da, db = call_a.get("depth", -1), call_b.get("depth", -1)
+    for d in range(0, min(da, db, RANKS.index("genus")) + 1):
+        r = RANKS[d]
+        if la.get(r) and lb.get(r) and la[r] != lb[r]:
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------
 # classification
 # --------------------------------------------------------------------------
@@ -910,6 +934,11 @@ def main(argv=None) -> int:
         [clusters[k]["consensus"] for k in order], [counts[k] for k in order])
     chim = {order[q]: (order[a], order[b], bp) for q, (a, b, bp, *_r)
             in chim.items()}
+    # Only joins of two genera are excluded (parents_differ); a join
+    # within a genus is kept, named as usual, and marked.
+    kept_joins = {k: v for k, v in chim.items()
+                  if not parents_differ(calls[v[0]], calls[v[1]], tax)}
+    chim = {k: v for k, v in chim.items() if k not in kept_joins}
     rows = []
     for n, k in enumerate(order, 1):
         c, call = clusters[k], calls[k]
@@ -917,6 +946,9 @@ def main(argv=None) -> int:
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
         chimera_of = ""
+        if k in kept_joins:
+            a, b, bp = kept_joins[k]
+            chimera_of = f"{cid[a]}+{cid[b]}@{bp} within genus, kept"
         if k in chim:
             a, b, bp = chim[k]
             chimera_of = f"{cid[a]}+{cid[b]}@{bp}"
@@ -935,7 +967,7 @@ def main(argv=None) -> int:
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
             "db_resolution": resolution.get(call["best_hit"], ""),
-            "origin": "chimera" if chimera_of else c["origin"],
+            "origin": "chimera" if k in chim else c["origin"],
             "merged": c["merged"],
             "chimera_of": chimera_of,
             "length": len(c["consensus"]),
@@ -1006,7 +1038,10 @@ def main(argv=None) -> int:
         "groups": len(heads),
         "haplotype_splits": cb.splits,
         "chimeras": {"sequences": len(chim),
-                     "reads": sum(counts[k] for k in chim)},
+                     "reads": sum(counts[k] for k in chim),
+                     "within_genus_kept": {
+                         "sequences": len(kept_joins),
+                         "reads": sum(counts[k] for k in kept_joins)}},
         "minimap2_calls": mm.calls,
         "settings": {**st.as_dict(), "floors": floors,
                      "lca_margin": args.lca_margin,

@@ -584,6 +584,10 @@ def main(argv=None) -> int:
                 [centroids[k][2] for k in ks], fixed=True)
             for q, (a, b, bp, *_r) in found.items():
                 chim[ks[q]] = (ks[a], ks[b], bp)
+    # Only joins of two genera are excluded (assign_db.parents_differ).
+    kept_joins = {k: v for k, v in chim.items()
+                  if not adb.parents_differ(calls[v[0]], calls[v[1]], tax)}
+    chim = {k: v for k, v in chim.items() if k not in kept_joins}
     rows = []
     label_depth = RANKS.index("family")
     for n, k in enumerate(order, 1):
@@ -593,6 +597,9 @@ def main(argv=None) -> int:
         lin = tax.get(call["best_hit"], {})
         d = call["depth"]
         chimera_of = ""
+        if k in kept_joins:
+            a, b, bp = kept_joins[k]
+            chimera_of = f"{cid[a]}+{cid[b]}@{bp} within genus, kept"
         if k in chim:
             a, b, bp = chim[k]
             # In the gap when every base telling the parents apart takes
@@ -620,7 +627,7 @@ def main(argv=None) -> int:
             "near_hits": call["near_hits"],
             "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
             "db_resolution": resolution.get(call["best_hit"], ""),
-            "origin": ("chimera" if chimera_of else "whole_insert" if not y
+            "origin": ("chimera" if k in chim else "whole_insert" if not y
                        else "pair_split" if call.get("split_mates") else "pair"),
             "merged": 0,
             "chimera_of": chimera_of,
@@ -692,7 +699,10 @@ def main(argv=None) -> int:
         "clusters": len(rows),
         "haplotype_splits": 0,
         "chimeras": {"sequences": len(chim),
-                     "reads": sum(centroids[k][2] for k in chim)},
+                     "reads": sum(centroids[k][2] for k in chim),
+                     "within_genus_kept": {
+                         "sequences": len(kept_joins),
+                         "reads": sum(centroids[k][2] for k in kept_joins)}},
         "settings": {"window_r1": w1, "window_r2": w2, "max_ee": args.max_ee,
                      "min_size": args.min_size,
                      "max_diffs": args.max_diffs if args.max_diffs is not None

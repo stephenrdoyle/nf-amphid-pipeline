@@ -338,6 +338,9 @@ def test_gap_chimera() -> None:
               and js["chimeras"]["reads"] == 25,
               str([(r["reads"], r["origin"], r["chimera_of"], r["label"])
                    for r in rows]))
+        check("only the excluded chimera carries origin 'chimera'",
+              all((r["origin"] == "chimera") == r["label"].startswith("chimera")
+                  for r in rows))
         check("its parents are still named (to genus or species: at 2x150 "
               "a sister can be identical over the windows)", sum(
             1 for r in rows if r["rank"] in ("species", "genus")) == 2,

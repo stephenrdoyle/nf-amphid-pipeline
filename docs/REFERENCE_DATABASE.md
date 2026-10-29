@@ -566,14 +566,32 @@ fixed windows. The commonest Illumina case, R1 from one template and R2
 from another, shows as a breakpoint in the unread gap (`chimera_of` ends
 `@gap`).
 
-A chimera's reads are counted, never named: its label is "chimera of
-<cluster> and <cluster>", its call `chimera`, its group `chimera`, and
-it is left out of every composition. The run QC and the report give the
+**Only joins of two genera are excluded** (decided 2026-10-29). Parents
+are compared rank by rank down to genus, over the ranks both were named
+to. A join within one genus is kept, named and counted as usual, and
+marked in `chimera_of` ("... within genus, kept"): the test cannot tell
+it from real variation - 18S is multi-copy, and a sample can carry
+genuine recombinant-looking haplotypes - V4 barely separates species, and
+the database's species labels are its least reliable part (Blastocystis
+ST2 x "Blastocystis sp." would otherwise be excluded purely because one
+parent's species is missing). A parent named only above genus counts as
+possibly the same genus, so doubt about the parents never removes reads.
+
+An excluded chimera's reads are counted, never named: its label is
+"chimera of <cluster> and <cluster>", its call `chimera`, its group
+`chimera`, and it is left out of every composition. The run QC and the report give the
 share per run and name wells over 5%. `--no-chimera-check` turns it off.
 
 On three VESPA human samples (250x200, v0.7.0), 0.3-1.7% of classified
 pairs were chimeras: between *Blastocystis* subtypes, *Entamoeba*
-sequences, yeasts, and *Necator* x *Ascaris*. Some joined two haplotypes
-of one species (*Necator* x *Necator*); those reads leave the species'
-composition too, a small cost for not counting recombinant sequences as
-taxa.
+sequences, yeasts, and *Necator* x *Ascaris* - before the genus rule.
+With it, most are kept as within-genus joins and few are excluded:
+
+| sample | excluded (two genera) | kept (within a genus) |
+|---|---|---|
+| Human04 | 8 reads (*Blastocystis* x yeasts) | 595 (*Blastocystis* subtypes, yeasts) |
+| Human06 | 10 (*Blastocystis* x *Entamoeba*, *Necator* x *Entamoeba*) | 56 (*Entamoeba*) |
+| Human08 | 198 (*Necator* x *Ascaris* 126, *Blastocystis* x *Entamoeba*) | 444 (*Necator* x *Necator* 249, *Entamoeba*) |
+
+A parent named only above genus counts as possibly the same genus, so
+e.g. "Nematoda" x *Necator* (38 reads) is kept.
