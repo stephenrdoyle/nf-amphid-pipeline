@@ -77,7 +77,8 @@ CHART_INK, CHART_GRID, CHART_AXIS = "#52514e", "#e1e0d9", "#c3c2b7"
 
 
 def columns_svg(labels: list, series: list, height: int = 300,
-                note: str = "") -> str:
+                note: str = "", totals: list | None = None,
+                totals_label: str = "reads") -> str:
     """Vertical stacked columns, one per sample, each scaled to 100%.
 
     `series` is [(name, colour, [value per label])]; each column is the
@@ -88,11 +89,19 @@ def columns_svg(labels: list, series: list, height: int = 300,
     segments, labels angled when there are many columns; every segment
     carries a hover title with its name, share and value. Columns with no
     data are drawn as an empty outline, so a blank well is visible as one.
+
+    With `totals`, a small bar panel sits above the columns, aligned with
+    them: the read count each column's percentages rest on. On a log
+    scale, because counts run from a handful to tens of thousands and the
+    shallow wells - where a 100% column means least - are the ones that
+    must not vanish against the deepest.
     """
     n = len(labels)
     if not n:
         return ""
-    left, top, bottom = 44, 8, 64
+    th = 74 if totals is not None else 0       # height of the totals panel
+    height += th
+    left, top, bottom = 44, 8 + th, 64
     slot = max(14.0, min(56.0, 900.0 / n))
     width = left + slot * n + 8
     bar = min(24.0, slot * 0.72)
@@ -100,6 +109,36 @@ def columns_svg(labels: list, series: list, height: int = 300,
     out = [f"<svg viewBox='0 0 {width:.0f} {height}' width='100%' "
            f"style='max-width:{max(width, 360):.0f}px;display:block' "
            f"role='img' aria-label='{esc(note)}'>"]
+    if totals is not None:
+        import math
+        tmax = max([t for t in totals if t] or [1])
+        decades = max(1, math.ceil(math.log10(max(tmax, 10))))
+        t0, tb = 6, 6 + th - 18                 # panel top and baseline
+        tph = tb - t0
+        def ty(v):
+            return tb - tph * min(1.0, math.log10(max(v, 1)) / decades)
+        for d in range(0, decades + 1):
+            y = tb - tph * d / decades
+            out.append(f"<line x1='{left}' x2='{width - 4:.0f}' y1='{y:.1f}' "
+                       f"y2='{y:.1f}' stroke='{CHART_GRID if d else CHART_AXIS}' "
+                       "stroke-width='1'/>")
+            lab = {0: "1", 1: "10", 2: "100", 3: "1k", 4: "10k", 5: "100k",
+                   6: "1M"}.get(d, f"1e{d}")
+            if decades <= 4 or d % 2 == 0 or d == decades:
+                out.append(f"<text x='{left - 6}' y='{y + 3.5:.1f}' "
+                           f"text-anchor='end' font-size='10' "
+                           f"fill='{CHART_INK}'>{lab}</text>")
+        out.append(f"<text x='{left}' y='{t0 - 0.5:.1f}' font-size='10' "
+                   f"fill='{CHART_INK}'>{esc(totals_label)} (log scale)</text>")
+        for i, lab in enumerate(labels):
+            v = totals[i] or 0
+            x = left + slot * i + (slot - bar) / 2
+            if v > 0:
+                y = ty(v)
+                out.append(f"<rect x='{x:.1f}' y='{y:.1f}' width='{bar:.1f}' "
+                           f"height='{max(tb - y, 0.5):.1f}' fill='#5f5e5a'>"
+                           f"<title>{esc(lab)}: {fmt(v)} {esc(totals_label)}"
+                           f"</title></rect>")
     for k in range(11):
         y = top + ph - ph * k / 10
         out.append(f"<line x1='{left}' x2='{width - 4:.0f}' y1='{y:.1f}' "
@@ -269,7 +308,9 @@ def build(args) -> str:
         [w["sample_id"] for w in wells],
         [(GROUP_LABEL[g], GROUP_COLOUR[g],
           [int(w.get(f"{g}_reads") or 0) for w in wells]) for g in present],
-        note="Share of each well's classified reads by organism group"))
+        note="Share of each well's classified reads by organism group",
+        totals=[int(w.get("clustered") or 0) for w in wells],
+        totals_label="classified reads"))
     rows = []
     for w in wells:
         funnel = [(lab, int(w.get(k) or 0), c) for k, c, lab in FUNNEL]
@@ -337,7 +378,9 @@ def build(args) -> str:
                 if c["group"] == g and c["call"] == "detected"
                 and (c["rank"], c["taxon"]) not in colours) for w in samples]))
         P.append(columns_svg([w["sample_id"] for w in samples], series,
-                             note=f"Composition within {GROUP_LABEL[g]}, per sample"))
+                             note=f"Composition within {GROUP_LABEL[g]}, per sample",
+                             totals=[int(w.get(f"{g}_reads") or 0) for w in samples],
+                             totals_label=f"{GROUP_LABEL[g]} reads"))
         rr = []
         for w in samples:
             n = int(w.get(f"{g}_reads") or 0)
@@ -421,7 +464,9 @@ def build(args) -> str:
         [w["sample_id"] for w in samples],
         [(k, c, [int(w.get(f"rank_{k}") or 0) for w in samples])
          for k, c in RANK_COLOURS.items()],
-        note="Share of each sample's classified reads by the rank reached"))
+        note="Share of each sample's classified reads by the rank reached",
+        totals=[int(w.get("clustered") or 0) for w in samples],
+        totals_label="classified reads"))
     fl = (qc.get("settings") or {}).get("floors") or {}
     P.append(
         "<p class='note'>A consensus is named at a rank only when the lowest "
