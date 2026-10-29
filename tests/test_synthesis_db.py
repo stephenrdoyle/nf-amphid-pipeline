@@ -335,11 +335,91 @@ def test_chimera_rows() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_read_funnel() -> None:
+    print("\nthe read funnel")
+    tmp = tempfile.mkdtemp()
+    try:
+        ch = cluster("S1", 3, "tg", 30)
+        ch.update({"origin": "chimera", "rank": "", "taxon": "",
+                   "label": "chimera of S1_c1 and S1_c2", "lineage": ""})
+        wells = {"S1": [cluster("S1", 1, "hc", 600), cluster("S1", 2, "bt", 300),
+                        ch],
+                 "S2": [cluster("S2", 1, "ec", 40)]}
+        args = write_case(tmp, wells, {"S1": "unknown", "S2": "unknown"})
+        # S2 is mostly primer dimer: 60 of its 100 reads have no primer pair.
+        js = os.path.join(tmp, "assign_db", "S2.assign_db.json")
+        with open(js) as fh:
+            d = json.load(fh)
+        d["reads"].update(reads_in=100, no_primer=60)
+        with open(js, "w") as fh:
+            json.dump(d, fh)
+        # Without a demultiplexer (Illumina) the funnel starts at the
+        # pairs assignment read, and ends at the target groups.
+        _c, _w, qc = run(args)
+        st = qc["read_funnel"]["stages"]
+        check("Illumina: the funnel starts at the pairs in",
+              st[0]["stage"] == "read pairs in" and st[0]["reads"] == 1035,
+              str(st[0]))
+        check("primer losses, chimeras and off-target are each a stage",
+              [s["reads"] for s in st] == [1035, 970, 970, 940, 600]
+              and st[3]["lost_here"] == {"PCR chimeras": 30}
+              and st[4]["lost_here"] == {"host": 300,
+                                         "bacteria / archaea": 40},
+              str(st))
+        check("a well that classified under half its reads is named",
+              [b["sample_id"] for b in
+               qc["read_funnel"]["wells_losing_over_half"]] == ["S2"],
+              str(qc["read_funnel"]["wells_losing_over_half"]))
+        check("with no demultiplexer there is no handoff to check",
+              "handoff_balances" not in qc["read_funnel"])
+        # Nanopore: from the sequencer, through the split and the demux.
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump({"per_sample": {"S1": 935, "S2": 100},
+                       "total_reads": 1155, "assigned_reads": 1035,
+                       "by_tier": {"A": 1035, "B": 100, "D": 20},
+                       "tier_meaning": {"B": "one end only - truncated"}}, fh)
+        with open(os.path.join(tmp, "split.json"), "w") as fh:
+            json.dump({"reads_in": 1050, "pieces_out": 1155,
+                       "pieces_dropped_below_min_length": 7}, fh)
+        args += ["--demux-summary", os.path.join(tmp, "demux.json"),
+                 "--split-summary", os.path.join(tmp, "split.json")]
+        _c, _w, qc = run(args)
+        fn = qc["read_funnel"]
+        st = fn["stages"]
+        check("nanopore: from the sequencer, through split and demux",
+              [s["reads"] for s in st[:3]] == [1050, 1155, 1035]
+              and st[2]["lost_here"] == {"one end only (tier B)": 100,
+                                         "tier D": 20}, str(st[:3]))
+        check("percentages are of the reads off the sequencer",
+              st[-1]["percent_of_start"] == round(100 * 600 / 1050, 2))
+        check("the demux-to-assignment handoff balances", fn[
+            "handoff_balances"] is True, str(fn.get("handoff")))
+        with open(os.path.join(tmp, "demux.json"), "w") as fh:
+            json.dump({"per_sample": {"S1": 935, "S2": 100},
+                       "total_reads": 1155, "assigned_reads": 1045,
+                       "by_tier": {"A": 1045}}, fh)
+        _c, _w, qc = run(args)
+        check("and reads lost between the steps are caught",
+              qc["read_funnel"]["handoff_balances"] is False)
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("the report shows the funnel before the warnings",
+              0 < html.find("Where the reads went") < html.find(
+                  "Before reading the results")
+              and "MISMATCH" in html and "reads off the sequencer" in html)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
     test_groups()
     test_chimera_rows()
+    test_read_funnel()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

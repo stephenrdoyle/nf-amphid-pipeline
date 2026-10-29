@@ -409,6 +409,15 @@ synthesis is built on standards and plasmids this protocol does not have.
 - **Internal adapters:** `db_run_qc.json` carries the splitter's cut count
   and the demultiplexer's internal-adapter quarantine (§3), with the
   mask's size, and the report puts them before the results.
+- **Read funnel** (`db_run_qc.json` `read_funnel`, the report's first
+  section, as in the panel report): every read from the sequencer to a
+  classified target - reads off the sequencer, amplicon units after
+  splitting, demultiplexed (losses by demux tier), both primers found,
+  in a consensus sequence (too few reads, or no hit in the release),
+  classified (chimeras removed), target organisms (off-target by group).
+  On Illumina it starts at the read pairs in. It checks that the reads
+  demultiplexing wrote are the reads assignment read, and names wells
+  that classified under half the reads they received.
 - **Cohort:** a sample with demultiplexed reads but no assignment stops
   synthesis; a well with no reads is reported empty.
 - The report puts the release, the blanks, depth, internal adapters and

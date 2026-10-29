@@ -234,12 +234,68 @@ def build(args) -> str:
                          1 for c in det if c["group"] in TARGET
                          and c["rank"] != "species"))))
         + "</div>")
-    P.append("<p class='note'>Sections: <a href='#warn'>before reading the "
+    P.append("<p class='note'>Sections: <a href='#funnel'>where the "
+             "reads went</a> · <a href='#warn'>before reading the "
              "results</a> · <a href='#groups'>all reads by organism group</a> · "
              + " · ".join(f"<a href='#{g}'>{GROUP_LABEL[g]}</a>"
                           for g in TARGET)
              + " · <a href='#offtarget'>off-target</a> · <a href='#rank'>"
              "naming depth</a> · <a href='#calls'>every call</a></p>")
+
+    # -- the read funnel, as in the panel report -------------------------
+    # The per-well figures start at reads that reached a sample, already
+    # net of splitting and demultiplexing; this is the one place a run
+    # that lost its reads to barcodes, to primer dimer, or to bacteria
+    # looks different from one that was simply shallow.
+    funnel = qc.get("read_funnel") or {}
+    stages = funnel.get("stages") or []
+    if stages:
+        P.append("<h2 id='funnel'>Where the reads went</h2>")
+        P.append(
+            "<p>Every read from the sequencer to a classified target "
+            "organism, and what was lost at each step. The per-sample "
+            "figures further down start at <i>demultiplexed to a sample</i>"
+            ", so this is the only place a run that lost its reads to "
+            "unreadable barcodes, to primer dimer or to off-target "
+            "amplification looks different from one that was simply "
+            "shallow.</p>")
+        start = stages[0]["reads"] or 1
+        P.append("<table><thead><tr><th>Stage</th><th class='num'>Reads"
+                 "</th><th class='num'>% of start</th><th></th>"
+                 "<th>Lost here</th></tr></thead><tbody>")
+        for st in stages:
+            p = st.get("percent_of_start")
+            frac = min(1.0, st["reads"] / start)
+            bar = (f'<div class="bar"><span style="width:{100 * frac:.2f}%;'
+                   f'background:#3d6b8e"></span></div>')
+            lost = "<br>".join(f"{esc(k)} {fmt(v)}"
+                               for k, v in st["lost_here"].items()) or "—"
+            P.append(
+                f"<tr><td>{esc(st['stage'])}</td>"
+                f"<td class='num'>{fmt(st['reads'])}</td>"
+                f"<td class='num'>{'' if p is None else f'{p:.1f}%'}</td>"
+                f"<td style='width:28%'>{bar}</td>"
+                f"<td class='note'>{lost}</td></tr>")
+        P.append("</tbody></table>")
+        if funnel.get("handoff_balances") is False:
+            h = funnel.get("handoff") or {}
+            P.append(
+                f"<p>{flag('bad', 'MISMATCH')} Demultiplexing wrote "
+                f"{fmt(h.get('written_by_demultiplexing'))} reads to samples "
+                f"but assignment read {fmt(h.get('read_by_assignment'))}. "
+                "No filter accounts for the difference: data was lost "
+                "between the steps.</p>")
+        bad = funnel.get("wells_losing_over_half") or []
+        if bad:
+            P.append(
+                f"<p>{flag('warn', 'wells')} {len(bad)} well(s) classified "
+                "fewer than half the reads they received. They look shallow "
+                "below, but the reaction rather than the loading is the "
+                "likelier problem: "
+                + esc(", ".join(
+                    f"{b['sample_id']} ({100 * b['classified_fraction']:.0f}%)"
+                    for b in sorted(bad, key=lambda b: natural(b["sample_id"]))))
+                + ".</p>")
 
     # -- what could undermine the results -------------------------------
     P.append("<h2 id='warn'>Before reading the results</h2>")

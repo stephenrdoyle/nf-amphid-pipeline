@@ -207,6 +207,121 @@ def blank_limits(wells: dict, rows: dict, min_fraction_depth: int) -> dict:
     return out, len(blanks)
 
 
+def read_funnel(wells_out: list[dict], demux: dict, split: dict) -> dict:
+    """Every read from the sequencer to a classified target, and where
+    the rest went.
+
+    The per-well table starts at reads that reached a sample, which is
+    already net of splitting and demultiplexing. A well that lost most
+    of its reads to unreadable barcodes looks merely shallow there, and
+    so does a well whose reads were mostly primer dimer or bacteria. The
+    funnel is the one place those differ, and they call for different
+    fixes: re-index or re-load, fix the reaction, or accept the sample.
+
+    Stages, each with what was lost getting to it:
+      reads off the sequencer       nanopore: the split's input
+      amplicon units after splitting  a read can hold several molecules
+      demultiplexed to a sample     by demux tier (B one end, C chimeric...)
+      read pairs in                 Illumina: there is no demux here
+      both primers found            no primer pair, too short, low quality
+      in a consensus sequence       too few reads to form one
+      classified                    PCR chimeras removed
+      target organisms              host, bacteria, plants... by group
+
+    It also checks the seam between demultiplexing and assignment: the
+    reads the demultiplexer wrote must be the reads assignment read.
+    Nothing else compares the two, so a sample file dropped between the
+    steps would otherwise go unnoticed.
+    """
+    total = Counter()
+    for w in wells_out:
+        # chimera_reads is one of the group columns, so not listed again.
+        for k in ("reads_in", "no_primer", "too_short", "low_quality",
+                  "unclustered", "unmapped", "clustered",
+                  *(f"{g}_reads" for g in GROUPS)):
+            total[k] += int(w.get(k) or 0)
+    stages = []
+    if split.get("reads_in"):
+        stages.append({"stage": "reads off the sequencer",
+                       "reads": split["reads_in"], "lost_here": {}})
+        dropped = split.get("pieces_dropped_below_min_length", 0)
+        stages.append({
+            "stage": "amplicon units after splitting at internal adapters",
+            "reads": split.get("pieces_out", demux.get("total_reads", 0)),
+            "lost_here": ({"pieces too short to hold an amplicon": dropped}
+                          if dropped else {})})
+    elif demux.get("total_reads"):
+        stages.append({"stage": "reads in", "reads": demux["total_reads"],
+                       "lost_here": {}})
+    if demux.get("total_reads"):
+        tiers = demux.get("by_tier") or {}
+        meaning = demux.get("tier_meaning") or {}
+        stages.append({
+            "stage": "demultiplexed to a sample",
+            "reads": demux.get("assigned_reads", tiers.get("A", 0)),
+            # Name the tiers rather than lump them: B is a read with one
+            # unreadable end, C a chimera of two wells, D no match - and
+            # they point at different problems.
+            "lost_here": {(f"{meaning[k].split(' - ')[0]} (tier {k})"
+                           if k in meaning else f"tier {k}"): v
+                          for k, v in sorted(tiers.items())
+                          if k != "A" and v}})
+    else:
+        stages.append({"stage": "read pairs in", "reads": total["reads_in"],
+                       "lost_here": {}})
+    primed = (total["reads_in"] - total["no_primer"] - total["too_short"]
+              - total["low_quality"])
+    stages.append({
+        "stage": "both primers found", "reads": primed,
+        "lost_here": {k: v for k, v in (
+            ("no primer pair (dimer, off-target or truncated)",
+             total["no_primer"]),
+            ("too short", total["too_short"]),
+            ("low quality", total["low_quality"])) if v}})
+    # Nanopore counts its unmapped reads inside unclustered; Illumina has
+    # no unmapped count. Shown apart where known: a read with no hit in
+    # the release is a different loss from a read in too small a group.
+    unmapped = min(total["unmapped"], total["unclustered"])
+    stages.append({
+        "stage": "in a consensus sequence", "reads": total["clustered"],
+        "lost_here": {k: v for k, v in (
+            ("too few reads to form a consensus",
+             total["unclustered"] - unmapped),
+            ("no hit in the release", unmapped)) if v}})
+    stages.append({
+        "stage": "classified (PCR chimeras removed)",
+        "reads": total["clustered"] - total["chimera_reads"],
+        "lost_here": ({"PCR chimeras": total["chimera_reads"]}
+                      if total["chimera_reads"] else {})})
+    stages.append({
+        "stage": "target organisms (" + ", ".join(TARGET_GROUPS) + ")",
+        "reads": sum(total[f"{g}_reads"] for g in TARGET_GROUPS),
+        "lost_here": {g.replace("_", " / "): total[f"{g}_reads"]
+                      for g in GROUPS if g not in TARGET_GROUPS
+                      and g != "chimera" and total[f"{g}_reads"]}})
+    start = stages[0]["reads"] or 0
+    for st in stages:
+        st["percent_of_start"] = (round(100 * st["reads"] / start, 2)
+                                  if start else None)
+    out = {"stages": stages}
+    if demux.get("assigned_reads") is not None:
+        out["handoff_balances"] = demux["assigned_reads"] == total["reads_in"]
+        out["handoff"] = {"written_by_demultiplexing": demux["assigned_reads"],
+                          "read_by_assignment": total["reads_in"]}
+    # A well that lost most of its reads before classification looks
+    # shallow in the per-well table; say which, and where they went.
+    out["wells_losing_over_half"] = [
+        {"sample_id": w["sample_id"], "reads_in": int(w["reads_in"] or 0),
+         "classified_fraction": round(int(w["clustered"] or 0)
+                                      / int(w["reads_in"]), 4),
+         "fates": {k: int(w.get(k) or 0) for k in
+                   ("no_primer", "too_short", "low_quality", "unclustered")}}
+        for w in wells_out
+        if int(w["reads_in"] or 0) and int(w["clustered"] or 0)
+        < 0.5 * int(w["reads_in"])]
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--assign-dir", required=True,
@@ -340,7 +455,7 @@ def main(argv=None) -> int:
     # Per well: the read funnel and the off-target fractions.
     well_cols = ["run_id", "sample_id", "sample_type", "platform",
                  "demuxed", "reads_in", "no_primer", "too_short",
-                 "low_quality", "unclustered", "clustered",
+                 "low_quality", "unclustered", "unmapped", "clustered",
                  "clusters", "haplotype_splits", "detected_taxa",
                  "unclassified_fraction"] + \
         [f"{g}_reads" for g in GROUPS] + \
@@ -370,7 +485,7 @@ def main(argv=None) -> int:
             "demuxed": per_sample.get(sid, ""),
             **{k: rd.get(k, 0) for k in ("reads_in", "no_primer", "too_short",
                                          "low_quality", "unclustered",
-                                         "clustered")},
+                                         "unmapped", "clustered")},
             "clusters": w.summary.get("clusters", 0),
             "haplotype_splits": w.summary.get("haplotype_splits", 0),
             "detected_taxa": sum(1 for c in calls if c["sample_id"] == sid
@@ -487,6 +602,7 @@ def main(argv=None) -> int:
             "mask_rows": (pf_summary.get("reference_database") or {}).get(
                 "lookalikes"),
         },
+        "read_funnel": read_funnel(wells_out, demux, split),
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),
