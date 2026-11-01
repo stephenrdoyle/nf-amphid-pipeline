@@ -4,12 +4,22 @@
 "amphi-" is "both", for the two platforms this pipeline reads.*
 
 <p align="center">
-  <img src="docs/images/metro_map.svg" alt="Metro map: pre-flight feeds an Illumina line (merge pairs, trim primers, max-EE filter, dereplicate) and a nanopore line (list batch files, split concatemers per file, sum split summaries, demultiplex); both converge on competitive assignment, synthesis and the HTML report, with optional mock calibration and cross-run comparison." width="100%">
+  <img src="docs/images/metro_map.svg" alt="Metro map: pre-flight feeds an Illumina line (merge pairs, trim primers, max-EE filter, dereplicate) and a nanopore line (list batch files, split concatemers per file, sum split summaries, demultiplex). In panel mode both converge on competitive assignment, synthesis and the HTML report, with optional mock calibration and cross-run comparison. In database mode, demultiplexed nanopore reads and unprepared Illumina read pairs go to taxonomic assignment against a minimap2 index of a vespa-18s-refdb release (per-sample consensus, haplotype splitting, identity-floor LCA), then database synthesis and the HTML report." width="100%">
 </p>
 
-Targeted amplicon panel analysis for Illumina and nanopore, built around
-competitive mapping against a defined reference panel with spiked
-quantification standards and tagged control plasmids.
+Targeted amplicon analysis for Illumina and nanopore, in two modes:
+
+- **Panel mode** (`--reference`): competitive mapping against a defined
+  reference panel, with spiked quantification standards and tagged control
+  plasmids.
+- **Database mode** (`--reference_database`): taxonomic assignment of
+  broad-range amplicons, such as VESPA 18S, against a
+  [vespa-18s-refdb](docs/REFERENCE_DATABASE.md) release. Each sample's
+  reads are built into consensus sequences, split into haplotypes where
+  the reads show linked variants, and named by a lowest common ancestor
+  that stops at the rank the identity supports. The result is relative 18S
+  abundance per well, judged against the blanks. Mocks, spike-ins and
+  cross-run comparison are panel-mode only.
 
 **Status: all stages implemented and tested; the Nextflow layer has not
 yet been run on real data.**
@@ -148,6 +158,10 @@ python3 tests/make_ont_fixture.py
 # main.nf; a failure should say which.
 nextflow run . -profile test,local          # Illumina branch
 nextflow run . -profile test_ont,local      # nanopore branch
+
+# database mode on a miniature release (needs minimap2)
+python3 tests/make_db_fixture.py
+nextflow run . -profile test_db,local
 ```
 
 All logic lives in `bin/preflight.py` as standard-library Python with no
@@ -358,6 +372,14 @@ seq_id  locus  type  taxon  parent_id  default_conc  conc_units  corr_factor  se
 `parent_id` resolving to a target at the same locus. A quant requires
 `default_conc` and `conc_units`. `taxon` defaults to `seq_id` when blank, so
 haplotype aggregation can be adopted later without a schema change.
+
+### `--reference_database` — a database release instead of a panel
+
+A vespa-18s-refdb release directory, given in place of `--reference`.
+Pre-flight checks the release's file hashes, that its primers match
+`--primers`, and that `minimap2` runs. See
+[docs/REFERENCE_DATABASE.md](docs/REFERENCE_DATABASE.md) for the design and
+[docs/USAGE.md](docs/USAGE.md) §2.9 for the options.
 
 ### `--samplesheet` — what was sequenced
 
@@ -574,7 +596,10 @@ A validator that silently passes bad input is worse than no validator.
 |---|---|
 | `local` | development, optimisation, and near-term nanopore runs |
 | `farm` | routine Illumina work — LSF, Singularity |
-| `test` | smoke test against the generated fixtures |
+| `test` | smoke test against the generated fixtures (Illumina) |
+| `test_ont` | the same for nanopore |
+| `test_db` | database mode on a miniature release (`python3 tests/make_db_fixture.py` first) |
+| `field` | offline laptop runs: local executor, all cores |
 
 ## Next increments
 

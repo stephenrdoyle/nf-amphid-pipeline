@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 580" width="1500" height="580" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 840" width="1500" height="840" role="img" aria-labelledby="t d">
   <title id="t">amphid metro map</title>
-  <desc id="d">Pre-flight validation feeds two lines: Illumina (prep per sample) and nanopore (list batch files, split concatemers per file, sum split summaries, demultiplex). Both converge on competitive assignment, then run synthesis and the HTML report. Mock calibration and cross-run comparison are optional.</desc>
+  <desc id="d">Pre-flight validation feeds two platform lines. Illumina is prepared per sample (merge pairs, trim primers, max-EE filter, dereplicate); nanopore lists batch files, splits concatemers per file, sums the split summaries and demultiplexes. In panel mode (--reference) both converge on competitive assignment, synthesis and the HTML report, with optional mock calibration and cross-run comparison. In database mode (--reference_database) demultiplexed nanopore reads, and Illumina read pairs straight from pre-flight without preparation, go to taxonomic assignment against a minimap2 index of a vespa-18s-refdb release (per-sample consensus, haplotype splitting, identity-floor LCA), then database synthesis and the HTML report.</desc>
   <style>
     .bg { fill: #ffffff; }
     .txt { fill: #1f2328; font-family: Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; }
@@ -10,9 +10,11 @@
     .sub { font-size: 14px; }
     .lbl { font-size: 13px; font-weight: 600; }
     .small { font-size: 12px; }
+    .tag { font-size: 11px; letter-spacing: 0.08em; }
     .stn { fill: #ffffff; stroke: #1f2328; stroke-width: 3; }
     .xchg { fill: #ffffff; stroke: #1f2328; stroke-width: 3; }
     .feed { stroke: #8c959f; stroke-width: 3; fill: none; }
+    .fstn { fill: #ffffff; stroke: #8c959f; stroke-width: 3; }
     .file { fill: #ffffff; stroke: #8c959f; stroke-width: 1.5; }
     .ill { stroke: #2b7bd6; }
     .ont { stroke: #e8772e; }
@@ -27,21 +29,22 @@
       .txt { fill: #e6edf3; }
       .muted, .mono { fill: #9198a1; }
       .stn, .xchg { fill: #0d1117; stroke: #e6edf3; }
+      .fstn { fill: #0d1117; stroke: #6e7681; }
       .file { fill: #0d1117; stroke: #6e7681; }
       .feed, .bracket { stroke: #6e7681; }
       .cmp { stroke: #6e7681; }
     }
   </style>
 
-  <rect class="bg" x="0" y="0" width="1500" height="580" rx="12"/>
+  <rect class="bg" x="0" y="0" width="1500" height="840" rx="12"/>
 
   <!-- title -->
   <text class="txt title" x="36" y="50">amphid</text>
-  <text class="txt muted sub" x="36" y="74">Amplicon panel analysis for Illumina and nanopore: competitive assignment against a reference panel with spike-in standards and tagged control plasmids</text>
+  <text class="txt muted sub" x="36" y="74">Amplicon analysis for Illumina and nanopore: competitive assignment against a reference panel, or taxonomic assignment against a vespa-18s-refdb release</text>
 
   <!-- ===== inputs ===== -->
   <g class="txt small">
-    <g transform="translate(36,168)"><rect class="file" width="12" height="15" rx="2"/><text x="20" y="12">reference.tsv</text></g>
+    <g transform="translate(36,168)"><rect class="file" width="12" height="15" rx="2"/><text x="20" y="12">reference.tsv / refdb</text></g>
     <g transform="translate(36,192)"><rect class="file" width="12" height="15" rx="2"/><text x="20" y="12">samplesheet.csv</text></g>
     <g transform="translate(36,216)"><rect class="file" width="12" height="15" rx="2"/><text x="20" y="12">runs.tsv | --input_dir</text></g>
     <g transform="translate(36,240)"><rect class="file" width="12" height="15" rx="2"/><text x="20" y="12">assay JSON</text></g>
@@ -55,15 +58,42 @@
   <path class="bracket" d="M190,175 L198,175 L198,355 L190,355"/>
   <path class="feed" d="M198,270 L246,270"/>
 
-  <!-- ===== Illumina line ===== -->
-  <path class="line ill" d="M260,265 L300,265 C340,265 340,140 380,140 L820,140 C850,140 850,265 880,265 L1280,265"/>
+  <!-- ===== mode headers ===== -->
+  <text class="txt muted tag" x="1130" y="180" text-anchor="middle">PANEL MODE · --reference</text>
+  <text class="txt muted tag" x="1130" y="532" text-anchor="middle">DATABASE MODE · --reference_database</text>
+
+  <!-- ===== Illumina line (panel) ===== -->
+  <path class="line ill" d="M260,258 L300,258 C340,258 340,140 380,140 L820,140 C850,140 850,265 880,265 L1280,265"/>
+
+  <!-- ===== Illumina line (database): read pairs bypass preparation ===== -->
+  <path class="line ill" d="M260,282 L290,282 C330,282 320,645 370,645 L1280,645"/>
+  <text class="mono" x="420" y="616">windows from --illumina_read_length</text>
+  <text class="txt muted small" x="420" y="632">read pairs go straight to assignment, no preparation</text>
 
   <!-- ===== nanopore line, with the per-file fan-out ===== -->
-  <path class="line ont" d="M260,275 L300,275 C340,275 340,400 380,400 L490,400"/>
+  <path class="line ont" d="M260,270 L300,270 C340,270 340,400 380,400 L490,400"/>
   <path class="thin ont" d="M490,400 C505,400 505,384 520,384 L580,384 C595,384 595,400 610,400"/>
   <path class="thin ont" d="M490,400 L610,400"/>
   <path class="thin ont" d="M490,400 C505,400 505,416 520,416 L580,416 C595,416 595,400 610,400"/>
   <path class="line ont" d="M610,400 L820,400 C850,400 850,275 880,275 L1280,275"/>
+  <!-- nanopore (database) -->
+  <path class="line ont" d="M830,400 C875,400 875,625 905,625 L1280,625"/>
+
+  <!-- ===== database index feed ===== -->
+  <path class="feed" d="M712,752 L891,752"/>
+  <path class="feed" d="M909,752 L935,752 C966,752 975,735 975,659"/>
+  <circle class="fstn" cx="900" cy="752" r="9"/>
+  <g transform="translate(686,741)">
+    <rect class="file" width="18" height="23" rx="2"/>
+  </g>
+  <g class="txt" text-anchor="end">
+    <text class="small" x="676" y="750">vespa-18s-refdb</text>
+    <text class="muted small" x="676" y="766">release</text>
+  </g>
+  <g class="txt" text-anchor="middle">
+    <text class="lbl" x="900" y="786">index release</text>
+    <text class="mono" x="900" y="802">DB_INDEX · once per run</text>
+  </g>
 
   <!-- ===== optional: mock calibration ===== -->
   <path class="dash opt" d="M980,292 L980,460 C980,480 990,490 1010,490 L1180,490"/>
@@ -71,16 +101,20 @@
   <path class="dash cmp" d="M1336,150 L1336,212 C1336,246 1296,244 1290,256"/>
 
   <!-- ===== shared interchanges ===== -->
-  <rect class="xchg" x="248" y="252" width="24" height="36" rx="12"/>
+  <rect class="xchg" x="248" y="245" width="24" height="50" rx="12"/>
   <rect class="xchg" x="968" y="252" width="24" height="36" rx="12"/>
   <rect class="xchg" x="1118" y="252" width="24" height="36" rx="12"/>
   <rect class="xchg" x="1268" y="252" width="24" height="36" rx="12"/>
+  <rect class="xchg" x="968" y="612" width="24" height="46" rx="12"/>
+  <rect class="xchg" x="1118" y="612" width="24" height="46" rx="12"/>
+  <rect class="xchg" x="1268" y="612" width="24" height="46" rx="12"/>
 
   <g class="txt" text-anchor="middle">
-    <text class="lbl" x="260" y="216">pre-flight</text>
-    <text class="mono" x="260" y="236">PREFLIGHT</text>
-    <text class="muted small" x="260" y="314">validate · derive panel</text>
+    <text class="lbl" x="260" y="184">pre-flight</text>
+    <text class="mono" x="260" y="202">PREFLIGHT</text>
+    <text class="muted small" x="260" y="220">validate inputs</text>
 
+    <!-- panel -->
     <text class="lbl" x="980" y="200">competitive</text>
     <text class="lbl" x="980" y="216">assignment</text>
     <text class="mono" x="980" y="236">ASSIGN · per sample</text>
@@ -93,6 +127,28 @@
 
     <text class="lbl" x="1280" y="216">report</text>
     <text class="mono" x="1280" y="236">REPORT</text>
+
+    <!-- database -->
+    <text class="lbl" x="980" y="558">taxonomic</text>
+    <text class="lbl" x="980" y="574">assignment</text>
+    <text class="mono" x="980" y="590">ASSIGN_DB</text>
+    <text class="mono" x="980" y="604">ASSIGN_DB_PAIRS</text>
+
+    <text class="lbl" x="1130" y="574">synthesis</text>
+    <text class="mono" x="1130" y="596">SYNTHESISE_DB</text>
+
+    <text class="lbl" x="1280" y="574">report</text>
+    <text class="mono" x="1280" y="596">REPORT_DB</text>
+  </g>
+  <g class="txt muted small">
+    <text x="1000" y="690">consensus per sample</text>
+    <text x="1000" y="706">haplotype splitting</text>
+    <text x="1000" y="722">LCA · identity floors</text>
+
+    <text x="1150" y="690">relative 18S abundance</text>
+    <text x="1150" y="706">calls vs blanks · 0.1% floor</text>
+    <text x="1150" y="722">off-target fractions</text>
+    <text x="1150" y="738">primer fit · run QC</text>
   </g>
 
   <!-- ===== Illumina stations ===== -->
@@ -141,8 +197,8 @@
   <!-- ===== optional stations ===== -->
   <circle class="stn" cx="1110" cy="490" r="9"/>
   <g class="txt" text-anchor="middle">
-    <text class="lbl" x="1110" y="526">calibrate mocks</text>
-    <text class="mono" x="1110" y="542">CALIBRATE_MOCKS · --mocks</text>
+    <text class="lbl" x="1110" y="452">calibrate mocks</text>
+    <text class="mono" x="1110" y="468">CALIBRATE_MOCKS · --mocks</text>
   </g>
   <text class="txt muted small" x="1194" y="486">corr_factors.tsv</text>
   <text class="txt muted small" x="1194" y="502">reference.calibrated.tsv</text>
@@ -150,15 +206,20 @@
   <text class="txt muted small" x="1336" y="126" text-anchor="middle">previous run calls.tsv</text>
   <text class="mono" x="1336" y="142" text-anchor="middle">--comparison</text>
 
-  <!-- ===== report output ===== -->
+  <!-- ===== report outputs ===== -->
   <g transform="translate(1316,258)">
+    <rect class="file" width="18" height="23" rx="2"/>
+    <text class="txt lbl" x="28" y="11">&lt;run_id&gt;_report.html</text>
+    <text class="txt muted small" x="28" y="27">self-contained HTML</text>
+  </g>
+  <g transform="translate(1316,623)">
     <rect class="file" width="18" height="23" rx="2"/>
     <text class="txt lbl" x="28" y="11">&lt;run_id&gt;_report.html</text>
     <text class="txt muted small" x="28" y="27">self-contained HTML</text>
   </g>
 
   <!-- ===== legend ===== -->
-  <g transform="translate(36,520)" class="txt small">
+  <g transform="translate(36,812)" class="txt small">
     <path class="line ill" d="M0,0 L36,0"/><text x="46" y="4">Illumina</text>
     <path class="line ont" d="M120,0 L156,0"/><text x="166" y="4">Nanopore</text>
     <path class="dash opt" d="M250,0 L286,0"/><text x="296" y="4">Optional (--mocks)</text>
