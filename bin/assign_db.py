@@ -131,27 +131,45 @@ class Minimap2:
         return out.stdout.strip()
 
     def map(self, target: str, query: str, extra=(), preset=("-x", "map-ont"),
-            cs: bool = False) -> list[dict]:
+            cs: bool = False):
+        """Yield minimap2's hits one at a time, as it writes them.
+
+        Streamed rather than collected: a deep well has millions of reads,
+        and holding minimap2's whole output as text, then as a list of
+        dicts, cost several GB before a single hit was used (STOP23 on
+        vespa_run1 was killed at 16 GB). Callers keep only what they need.
+        stderr goes to a file so a chatty minimap2 cannot fill a pipe and
+        stall while stdout is being read."""
         args = [self.exe, *preset, "-c", "-t", str(self.threads),
                 *(["--cs"] if cs else []), *extra, target, query]
-        proc = subprocess.run(args, capture_output=True, text=True)
         self.calls += 1
-        if proc.returncode != 0:
-            raise SystemExit(f"minimap2 failed ({' '.join(args)}):\n"
-                             f"{proc.stderr[-2000:]}")
-        rows = []
-        for line in proc.stdout.splitlines():
-            f = line.split("\t")
-            tags = {t[:2]: t[5:] for t in f[12:]}
-            rows.append({
-                "q": f[0], "qlen": int(f[1]), "qs": int(f[2]),
-                "qe": int(f[3]), "strand": f[4], "t": f[5],
-                "tlen": int(f[6]), "ts": int(f[7]), "te": int(f[8]),
-                "match": int(f[9]), "alen": int(f[10]),
-                "AS": int(tags.get("AS", 0)), "cs": tags.get("cs", ""),
-                "tp": tags.get("tp", "P"),
-            })
-        return rows
+        with tempfile.TemporaryFile("w+") as err:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=err,
+                                    text=True, bufsize=1 << 20)
+            stopped = False
+            try:
+                for line in proc.stdout:
+                    f = line.rstrip("\n").split("\t")
+                    tags = {t[:2]: t[5:] for t in f[12:]}
+                    yield {
+                        "q": f[0], "qlen": int(f[1]), "qs": int(f[2]),
+                        "qe": int(f[3]), "strand": f[4], "t": f[5],
+                        "tlen": int(f[6]), "ts": int(f[7]), "te": int(f[8]),
+                        "match": int(f[9]), "alen": int(f[10]),
+                        "AS": int(tags.get("AS", 0)), "cs": tags.get("cs", ""),
+                        "tp": tags.get("tp", "P"),
+                    }
+            finally:
+                # A caller that stops early must not leave minimap2 running.
+                if proc.poll() is None:
+                    stopped = True
+                    proc.stdout.close()
+                    proc.kill()
+                proc.wait()
+            if proc.returncode != 0 and not stopped:
+                err.seek(0)
+                raise SystemExit(f"minimap2 failed ({' '.join(args)}):\n"
+                                 f"{err.read()[-2000:]}")
 
 
 def write_fasta(path: str, recs) -> None:
@@ -871,8 +889,15 @@ def trim_reads(path: str, primers) -> tuple[dict[str, str], Counter]:
     The release's records are primer-trimmed inserts, so reads must be
     too: identity is measured over the insert, and a primer left on one
     side and not the other would be charged as a difference."""
-    out: dict[str, str] = {}
     fate: Counter = Counter()
+    return dict(iter_trimmed(path, primers, fate)), fate
+
+
+def iter_trimmed(path: str, primers, fate: Counter):
+    """trim_reads() one read at a time, so main() can write them to disk
+    without holding a deep well's reads in memory; fate is filled in as
+    they pass. Only the ids are kept, to make duplicates unique."""
+    out: set[str] = set()
     from ampseqlib import revcomp
     for rid, seq, _q in open_reads(path):
         fate["reads_in"] += 1
@@ -893,8 +918,8 @@ def trim_reads(path: str, primers) -> tuple[dict[str, str], Counter]:
         # Duplicate ids happen when a split read keeps its parent's name;
         # minimap2 would merge them, so each gets its own.
         key = rid if rid not in out else f"{rid}_{fate['reads_in']}"
-        out[key] = hit
-    return out, fate
+        out.add(key)
+        yield key, hit
 
 
 def main(argv=None) -> int:
@@ -965,59 +990,76 @@ def main(argv=None) -> int:
 
     primers = load_primers(args.primers)
     primers.max_edits = args.primer_max_edits
-    reads, fate = trim_reads(args.reads, primers)
+    fate: Counter = Counter()
     tmp = tempfile.mkdtemp(prefix=f"assign_db_{sid}_", dir=args.outdir)
     clusters: list[dict] = []
-    db_primary: dict[str, dict] = {}
+    # Per read, only the alignment score of its primary database hit: the
+    # one field used later (recruitment, below). A deep well holds millions
+    # of these, so a full hit record each was the bulk of its memory.
+    db_score: dict[str, int] = {}
     try:
+        # Trimmed reads go straight to disk; minimap2 reads them from there,
+        # and only those chosen to build a consensus come back into memory.
         rfa = os.path.join(tmp, "reads.fa")
-        write_fasta(rfa, reads.items())
+        n_reads = 0
+        with open(rfa, "w", encoding="utf-8") as fh:
+            for q, seq in iter_trimmed(args.reads, primers, fate):
+                fh.write(f">{q}\n{seq}\n")
+                n_reads += 1
         groups: dict[str, list[str]] = defaultdict(list)
-        if reads:
+        if n_reads:
             for a in mm.map(index, rfa, preset=INDEX_ARGS,
                             extra=("--secondary=no",)):
-                if a["tp"] == "P" and a["q"] not in db_primary:
-                    db_primary[a["q"]] = a
+                if a["tp"] == "P" and a["q"] not in db_score:
+                    db_score[a["q"]] = a["AS"]
                     groups[a["t"]].append(a["q"])
-        fate["unmapped"] = len(reads) - len(db_primary)
+        fate["unmapped"] = n_reads - len(db_score)
 
         # Consensus per group large enough to have one. The reference
         # sequence is the starting draft; the database is read once, for
         # just the records that head a group.
         heads = {t for t, qs in groups.items() if len(qs) >= st.min_reads}
         refseq = {i: s for i, s in read_fasta(db_fasta) if i in heads}
-        cb = ConsensusBuilder(mm, reads, tmp, st)
         rng = random.Random(f"{args.seed}:{sid}")
-        built = []
+        chosen = []
         for t in sorted(heads, key=lambda t: (-len(groups[t]), t)):
             qs = sorted(groups[t])
             if len(qs) > st.max_reads:
                 qs = sorted(rng.sample(qs, st.max_reads))
+            chosen.append((t, qs))
+        # Only the reads that build a consensus come back into memory;
+        # counting maps them all again from reads.fa.
+        need = {q for _t, qs in chosen for q in qs}
+        reads = {q: seq for q, seq in read_fasta(rfa) if q in need}
+        del groups, need
+        cb = ConsensusBuilder(mm, reads, tmp, st)
+        built = []
+        for t, qs in chosen:
             for c in cb.resolve(qs, refseq[t]):
                 c["group"] = t
                 built.append(c)
         clusters = merge_close(built, st.merge_edits)
 
         # Count every read against the final set.
+        # Each read is decided on its first primary hit as it streams
+        # past; only the ids already decided are kept.
         counts: Counter = Counter()
-        member: dict[str, int] = {}
+        seen: set[str] = set()
         if clusters:
             cfa = os.path.join(tmp, "consensus.fa")
             write_fasta(cfa, ((f"c{k}", c["consensus"])
                               for k, c in enumerate(clusters)))
-            best: dict[str, dict] = {}
             for a in mm.map(cfa, rfa, extra=("--secondary=no",)):
-                if a["tp"] == "P" and a["q"] not in best:
-                    best[a["q"]] = a
-            for q, a in best.items():
-                own = db_primary.get(q)
-                if own is not None and own["AS"] - a["AS"] > args.recruit_margin:
+                if a["tp"] != "P" or a["q"] in seen:
                     continue
-                k = int(a["t"][1:])
-                counts[k] += 1
-                member[q] = k
-        fate["clustered"] = len(member)
-        fate["unclustered"] = len(reads) - len(member)
+                seen.add(a["q"])
+                own = db_score.get(a["q"])
+                if own is not None and own - a["AS"] > args.recruit_margin:
+                    continue
+                counts[int(a["t"][1:])] += 1
+        n_clustered = sum(counts.values())
+        fate["clustered"] = n_clustered
+        fate["unclustered"] = n_reads - n_clustered
 
         # Classify the consensus sequences that kept any reads.
         keep = [k for k in range(len(clusters)) if counts[k] > 0]

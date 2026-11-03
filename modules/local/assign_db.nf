@@ -1,6 +1,6 @@
 process ASSIGN_DB {
     tag "${meta.id}"
-    label 'process_low'
+    label 'process_db'
 
     // See db_index.nf: no container until one image carries python3 and
     // minimap2 together.
