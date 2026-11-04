@@ -1559,9 +1559,72 @@ def test_anchor_absence_is_explained() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_anchor_and_junction_tolerances() -> None:
+    """--anchor-max-edits reaches the end anchors; --junction-max-edits
+    governs the interior scan; neither moves the other.
+
+    One flag used to cover both and only reached the junction scan, so
+    the end search was pinned at 2 edits and raising the flag only
+    quarantined more good reads as chimeras (docs/INDEX_REDESIGN.md, step
+    1). The two costs run opposite ways, so they are set apart."""
+    print("\nend-anchor and junction tolerances")
+    cfg = dx.load_assay(ASSAY)
+    i7map, i5map = mf.load_index_map(INDEX_MAP)
+    i5_seq, i7_seq = i5map[0][0], i7map[0][0]
+    amp = "ACGT" * 60
+    reps = 2
+    whole = sim.build_molecule(amp, i7_seq, i5_seq, reps, cfg)
+    i5_set = dx.BarcodeSet({i5_seq: "S1"}, len(i5_seq), 1)
+    i7_set = dx.BarcodeSet({i7_seq: "N1"}, len(i7_seq), 1)
+    pairs = {(i5_seq, i7_seq): "SAMP"}
+    a5, a7 = cfg["i5_inner_anchor"], cfg["i7_inner_anchor"]
+    junctions = (a5, a7, dx.revcomp(a5), dx.revcomp(a7))
+
+    def damaged(anchor: str, n: int) -> str:
+        """The anchor with n substitutions, spread along it."""
+        b = list(anchor)
+        for k in range(n):
+            p = 1 + k * (len(b) - 2) // max(1, n - 1) if n > 1 else len(b) // 2
+            b[p] = {"A": "C", "C": "G", "G": "T", "T": "A"}[b[p]]
+        return "".join(b)
+
+    def call(seq, anchor_edits=2, junction_edits=2):
+        return dx.assign_read("r", seq, cfg, i5_set, i7_set, pairs, reps,
+                              200, False, junction_anchors=junctions,
+                              anchor_max_edits=anchor_edits,
+                              junction_max_edits=junction_edits)
+
+    # The i7 anchor at the read's end, three edits from the original.
+    k = whole.rfind(a7)
+    three_off = whole[:k] + damaged(a7, 3) + whole[k + len(a7):]
+    check("an end anchor three edits off is not found at the default",
+          call(three_off).i7_reason == "anchor_not_found",
+          call(three_off).i7_reason)
+    c = call(three_off, anchor_edits=3)
+    check("and is found with --anchor-max-edits 3",
+          c.i7_reason.startswith("ok") and c.tier == "A",
+          f"{c.i7_reason} tier {c.tier}")
+    check("raising the end tolerance does not touch an intact read's call",
+          call(whole, anchor_edits=4).tier == "A"
+          and call(whole, anchor_edits=4).sample_id == "SAMP")
+
+    # A junction three edits off, in the middle of the insert.
+    mid = len(whole) // 2
+    joined = whole[:mid] + damaged(a5, 3) + whole[mid:]
+    check("a damaged interior junction passes at the default",
+          call(joined).tier == "A", call(joined).tier)
+    check("the junction tolerance alone quarantines it",
+          call(joined, junction_edits=3).tier == "E",
+          call(joined, junction_edits=3).tier)
+    check("and the end tolerance alone does not",
+          call(joined, anchor_edits=3).tier == "A",
+          call(joined, anchor_edits=3).tier)
+
+
 def main() -> int:
     test_parallel_matches_serial()
     test_end_reasons_discriminate()
+    test_anchor_and_junction_tolerances()
     test_barcode_margin_rule()
     test_sample_ids_survive_the_filename()
     test_anchor_absence_is_explained()

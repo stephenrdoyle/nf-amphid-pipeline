@@ -514,6 +514,7 @@ def assign_read(
     junction_anchors: tuple[str, ...] = (),
     anchor_max_edits: int = 2,
     lookalikes: LookalikeMask | None = None,
+    junction_max_edits: int = 2,
 ) -> ReadCall:
     """Try both orientations; keep the one that resolves more ends.
 
@@ -524,7 +525,7 @@ def assign_read(
     for orient, s in (("+", seq), ("-", revcomp(seq))):
         five = call_end(
             s, cfg["i5_inner_anchor"], i5_set, repeats, search_window,
-            barcode_before_anchor=True,
+            barcode_before_anchor=True, anchor_max_edits=anchor_max_edits,
         )
         # The i7 anchor sits near the 3' end, so search the tail - and its
         # barcode follows the anchor rather than preceding it.
@@ -532,6 +533,7 @@ def assign_read(
         three = call_end(
             s[tail_from:], cfg["i7_inner_anchor"], i7_set, repeats,
             search_window, barcode_before_anchor=False,
+            anchor_max_edits=anchor_max_edits,
         )
 
         resolved = (1 if five.barcode else 0) + (1 if three.barcode else 0)
@@ -553,7 +555,7 @@ def assign_read(
         # already failed has nothing to protect.
         if junction_anchors and call.tier == "A":
             if has_internal_adapter(s, call.insert_start, call.insert_end,
-                                    junction_anchors, anchor_max_edits,
+                                    junction_anchors, junction_max_edits,
                                     lookalikes):
                 call.tier = "E"
                 call.sample_id = None
@@ -933,6 +935,7 @@ def demux_one_file(job: dict) -> dict:
                 job["accept_single_end"],
                 junction_anchors=junction_anchors,
                 anchor_max_edits=job["anchor_max_edits"],
+                junction_max_edits=job["junction_max_edits"],
                 lookalikes=lookalikes,
             )
             total += 1
@@ -1081,9 +1084,16 @@ def main(argv=None) -> int:
              "other - they demultiplex into a real sample that never "
              "contained them. Disabling this trades correctness for yield",
     )
+    # Two tolerances, not one: their costs run opposite ways. A missed
+    # end anchor loses one read; a false junction hit quarantines a good
+    # read as a chimera (tier E). One flag used to cover both, and only
+    # ever reached the junction scan - the end search was pinned at 2.
     ap.add_argument("--anchor-max-edits", type=int, default=2,
-                    help="edit budget for the anchor search, including the "
-                         "interior scan for junctions")
+                    help="edit budget for finding the anchor at each read "
+                         "end, beside its barcode")
+    ap.add_argument("--junction-max-edits", type=int, default=2,
+                    help="edit budget for the interior scan for adapter "
+                         "junctions (tier E)")
     ap.add_argument(
         "--flush-records", type=int, default=2000,
         help="reads buffered per sample before appending to its file. "
@@ -1185,6 +1195,7 @@ def main(argv=None) -> int:
         accept_single_end=args.accept_single_end,
         chimera_check=args.chimera_check,
         anchor_max_edits=args.anchor_max_edits,
+        junction_max_edits=args.junction_max_edits,
         run_id=args.run_id, samplesheet=args.samplesheet,
         # In the fingerprint, and it has to be. A stats-only part records
         # itself as finished having written no FASTQ. Without this, a
@@ -1226,6 +1237,7 @@ def main(argv=None) -> int:
             "accept_single_end": args.accept_single_end,
             "chimera_check": args.chimera_check,
             "anchor_max_edits": args.anchor_max_edits,
+            "junction_max_edits": args.junction_max_edits,
             "flush_records": max(1, args.flush_records),
             "barcode_margin": args.barcode_margin,
             "barcode_margin_max_dist": args.barcode_margin_max_dist,
@@ -1384,6 +1396,7 @@ def main(argv=None) -> int:
             "accept_single_end": args.accept_single_end,
             "chimera_check": args.chimera_check,
             "anchor_max_edits": args.anchor_max_edits,
+            "junction_max_edits": args.junction_max_edits,
         },
         # How many parts this invocation actually computed. The driver
         # uses it to decide whether per-sample assignment downstream is
