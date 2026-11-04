@@ -449,6 +449,23 @@ def read_funnel(wells_out: list[dict], demux: dict, split: dict,
     return out
 
 
+def mapped_with(wells: dict, pf_summary: dict) -> str:
+    """The minimap2 that assigned the wells, from each well's own summary.
+
+    Pre-flight's record is only a fallback: under -resume pre-flight can be
+    a cached task from an earlier launch, so it names whatever minimap2 was
+    on the path then (a farm run reported 2.16 for wells assigned by 2.31).
+    More than one version across the wells is said, with how many each."""
+    seen = Counter(w.summary.get("minimap2", "") for w in wells.values()
+                   if w.summary and w.summary.get("minimap2"))
+    if not seen:
+        return (pf_summary.get("reference_database") or {}).get("minimap2", "")
+    if len(seen) == 1:
+        return next(iter(seen))
+    return ", ".join(f"{v} ({n} well{'' if n == 1 else 's'})"
+                     for v, n in seen.most_common())
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--assign-dir", required=True,
@@ -699,8 +716,7 @@ def main(argv=None) -> int:
         "database": {"version": version, "name": man.get("name", ""),
                      "primers": man.get("primers", {}),
                      "built": man.get("built", "")},
-        "minimap2": (pf_summary.get("reference_database") or {}).get(
-            "minimap2", ""),
+        "minimap2": mapped_with(wells, pf_summary),
         "assay": pf_summary.get("assay", {}),
         "settings": {"min_depth": args.min_depth,
                      "absolute_floor": args.absolute_floor,

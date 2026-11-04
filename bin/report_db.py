@@ -597,16 +597,19 @@ def build(args) -> str:
                         + ([(OTHER_COLOUR, "everything else")]
                            if len(top) > len(colours) else [])))
         # The chart: one column per sample, its detected taxa as shares of
-        # the group. Taxa past the palette pool as "everything else".
+        # the group. Taxa past the palette pool as "everything else". Read
+        # counts, not group_share: each column is scaled to its own total,
+        # so the shares are the same, and the hover titles show the reads
+        # (they showed "(0)" when given shares).
         named = list(colours)
         series = []
         for k in named:
             series.append((name(k), colours[k], [
-                sum(float(c["group_share"] or 0) for c in by_sample.get(w["sample_id"], [])
+                sum(int(c["reads"] or 0) for c in by_sample.get(w["sample_id"], [])
                     if c["group"] == g and c["call"] == "detected"
                     and (c["rank"], c["taxon"]) == k) for w in samples]))
         series.append(("everything else", OTHER_COLOUR, [
-            sum(float(c["group_share"] or 0) for c in by_sample.get(w["sample_id"], [])
+            sum(int(c["reads"] or 0) for c in by_sample.get(w["sample_id"], [])
                 if c["group"] == g and c["call"] == "detected"
                 and (c["rank"], c["taxon"]) not in colours) for w in samples]))
         P.append(columns_svg([w["sample_id"] for w in samples], series,

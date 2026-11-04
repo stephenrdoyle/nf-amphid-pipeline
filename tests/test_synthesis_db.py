@@ -312,6 +312,10 @@ def test_groups() -> None:
                             "microsporidia", "offtarget"))
               and "Presence by sample" in doc
               and "No protists were classified" in doc)
+        # The within-group charts once took shares as their values, so
+        # every hover title read "(0)" reads (vespa_run1).
+        check("within-group chart titles carry read counts, not (0)",
+              "75.0% (75)</title>" in doc and "% (0)</title>" not in doc)
         fungal = [r for r in csv.DictReader(open(os.path.join(
             tmp, "synthesis", "db_wells.tsv")), delimiter="\t")]
         check("fungi get a section of their own, with richness per well",
@@ -323,6 +327,45 @@ def test_groups() -> None:
               str([r["fungi_richness"] for r in fungal]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_minimap2_version() -> None:
+    """The run names the minimap2 that assigned its wells. Pre-flight's
+    record is only a fallback: under -resume pre-flight can be cached from
+    an earlier launch, and a farm run reported 2.16 for wells 2.31 did."""
+    print("\nwhich minimap2 the run reports")
+    wells = {"S1": [cluster("S1", 1, "hc", 100)],
+             "S2": [cluster("S2", 1, "hc", 100)],
+             "S3": [cluster("S3", 1, "hc", 100)]}
+    types = {s: "unknown" for s in wells}
+
+    def with_versions(versions):
+        tmp = tempfile.mkdtemp()
+        try:
+            args = write_case(tmp, wells, types)
+            with open(os.path.join(tmp, "preflight",
+                                   "preflight_summary.json"), "w") as fh:
+                json.dump({"reference_database": {"minimap2": "2.16-r922"},
+                           "assay": {}}, fh)
+            for sid, v in versions.items():
+                path = os.path.join(tmp, "assign_db", f"{sid}.assign_db.json")
+                js = json.load(open(path))
+                js["minimap2"] = v
+                json.dump(js, open(path, "w"))
+            return run(args)[2]["minimap2"]
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    got = with_versions({s: "2.31-r1302" for s in wells})
+    check("the wells' minimap2, not a cached pre-flight's", got == "2.31-r1302",
+          got)
+    got = with_versions({"S1": "2.31-r1302", "S2": "2.31-r1302",
+                         "S3": "2.16-r922"})
+    check("mixed versions are both named, with how many wells each",
+          got == "2.31-r1302 (2 wells), 2.16-r922 (1 well)", got)
+    got = with_versions({})
+    check("pre-flight's version when no well recorded one", got == "2.16-r922",
+          got)
 
 
 def test_chimera_rows() -> None:
@@ -560,6 +603,7 @@ def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
     test_groups()
+    test_minimap2_version()
     test_chimera_rows()
     test_read_funnel()
     test_v080_margin_and_ranks()
