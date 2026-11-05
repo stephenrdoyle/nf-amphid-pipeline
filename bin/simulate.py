@@ -26,6 +26,7 @@ import csv
 import gzip
 import hashlib
 import json
+import math
 import os
 import random
 import sys
@@ -56,6 +57,8 @@ ERROR_MODELS = {
 FATES = [
     "clean",
     "hopped",
+    "misread_i5",
+    "misread_i7",
     "chimera",
     "carryover",
     "dimer",
@@ -506,6 +509,31 @@ def simulate_run(
                     "_unassigned",
                 )
 
+            # Misassignment on a combinatorial plate: ONE index is misread,
+            # so the read keeps the other and lands in the same row (i7
+            # misread) or the same column (i5 misread) - unlike hopping
+            # above, which rewrites the pair. Drawn only when asked for, so
+            # a run simulated without it is the run it always was.
+            if fate != "hopped" and (args.misread_i5_rate
+                                     or args.misread_i7_rate):
+                for end, rate, pool in (("i5", args.misread_i5_rate, pool_i5),
+                                        ("i7", args.misread_i7_rate, pool_i7)):
+                    if (rate and len(pool) > 1 and fate == "clean"
+                            and rng.random() < rate):
+                        fate = f"misread_{end}"
+                        cur = i5 if end == "i5" else i7
+                        new = rng.choice([x for x in pool if x != cur])
+                        if end == "i5":
+                            i5 = new
+                        else:
+                            i7 = new
+                if fate.startswith("misread_"):
+                    owner = next(
+                        (s.sample_id for s in samples
+                         if s.index_i5 == i5 and s.index_i7 == i7),
+                        "_unassigned",
+                    )
+
             mol = build_molecule(amplicon, i7, i5, repeats, assay)
 
             # Ligation chimera: two molecules joined, so the ends carry
@@ -612,6 +640,158 @@ def simulate_run(
         ),
     }
     return records, stats, reads_by_sample, composition
+
+
+# --------------------------------------------------------------------------
+# a whole plate at the level of counts: index misassignment
+# --------------------------------------------------------------------------
+
+
+def poisson(rng: random.Random, lam: float) -> int:
+    """A Poisson draw: Knuth's product under 30, the normal above."""
+    if lam <= 0:
+        return 0
+    if lam > 30:
+        return max(0, int(round(rng.gauss(lam, math.sqrt(lam)))))
+    limit, k, p = math.exp(-lam), 0, rng.random()
+    while p > limit:
+        k += 1
+        p *= rng.random()
+    return k
+
+
+ROW_LETTERS = "ABCDEFGHIJKLMNOP"
+
+
+def simulate_plate_counts(
+    rng: random.Random, n_rows: int, n_cols: int, *, rate_row: float,
+    rate_col: float, unused: int = 0, depth: float = 200000,
+    blanks: int = 4, heavy_column: bool = True, min_cluster: int = 5,
+    n_taxa: int = 60, grouped_by_column: bool = False,
+    contaminate: dict | None = None,
+) -> dict:
+    """Classified reads per well and taxon on a combinatorial plate, after
+    index misassignment at known per-pair rates.
+
+    Reads, not molecules: the synthesis works on classified read counts,
+    and at 384 wells of 200,000 reads a read-level simulation would take
+    hours to say what this says in a second. What the plate holds is
+    built to be hard for a rate estimate, as stool is:
+
+      a host and a "kitome" taxon in every well, bacteria and fungi in
+        60-100% of wells, common parasites in 10-40%, a few heavy rare
+        ones in 3-8%; so most taxa next door to a well are really in it
+      `blanks` blanks (an extraction blank and NTCs), shallow, holding
+        only the kitome and what misassignment puts there
+      with heavy_column, one column of near-pure single-taxon wells - a
+        worm preparation - at three times the depth: the source that
+        made a blank look contaminated on the first VESPA plate
+      the last `unused` cells of the last column left empty, receiving
+        misassigned reads only (the demultiplexer's unused combinations)
+      with grouped_by_column, each column's samples share a taxon of
+        their own - wells laid out by host or site - which is biology
+        lined up with an axis, and must not be read as misassignment
+      `contaminate` {well: {taxon: reads}} added to wells' true content -
+        real contamination of a blank, say, on top of what leaks in
+
+    Misassignment: each (well, taxon) receives Poisson(rate_row x its
+    row-mates' reads + rate_col x its column-mates' reads). A count under
+    `min_cluster` is then lost, as a consensus needs that many reads.
+
+    Returns {geom, counts, true, types, matrix, rates}: positions,
+    observed and true counts by well, sample types, and the index matrix
+    with each cell's reads (every read, not only classified).
+    """
+    rows = ROW_LETTERS[:n_rows]
+    cells = [(r, c) for c in range(1, n_cols + 1) for r in rows]
+    unused_cells = set(cells[len(cells) - unused:]) if unused else set()
+    used = [rc for rc in cells if rc not in unused_cells]
+    names = {rc: f"{rc[0]}{rc[1]}" for rc in used}
+    # blanks scattered, not in the heavy column
+    heavy_col = (n_cols // 2 + 1) if heavy_column else None
+    pool = [rc for rc in used if rc[1] != heavy_col]
+    blank_cells = set(rng.sample(pool, min(blanks, len(pool))))
+    types = {}
+    for rc in used:
+        if rc in blank_cells:
+            types[names[rc]] = "neg_extraction" if not types or all(
+                t != "neg_extraction" for t in types.values()) else "neg_ntc"
+        else:
+            types[names[rc]] = "unknown"
+    taxa = []
+    # (name, prevalence, log-share mean, log-share sd)
+    taxa.append(("host", 1.0, math.log(0.15), 0.8))
+    taxa.append(("kitome", 1.0, math.log(0.001), 0.3))
+    for i in range(int(n_taxa * 0.5)):
+        taxa.append((f"bact{i}", rng.uniform(0.6, 1.0),
+                     math.log(rng.uniform(0.002, 0.05)), 1.0))
+    for i in range(int(n_taxa * 0.3)):
+        taxa.append((f"para{i}", rng.uniform(0.1, 0.4),
+                     math.log(rng.uniform(0.005, 0.05)), 1.2))
+    for i in range(max(1, int(n_taxa * 0.1))):
+        taxa.append((f"rare{i}", rng.uniform(0.03, 0.08),
+                     math.log(rng.uniform(0.1, 0.4)), 0.8))
+    true: dict = {}
+    for rc in used:
+        sid = names[rc]
+        if types[sid] != "unknown":
+            d = depth * 0.1 * rng.lognormvariate(0, 0.5)
+            true[sid] = {"kitome": poisson(rng, d * 0.5)}
+            continue
+        if heavy_col and rc[1] == heavy_col:
+            d = depth * 3 * rng.lognormvariate(0, 0.3)
+            true[sid] = {"worm": poisson(rng, d * 0.97),
+                         "host": poisson(rng, d * 0.02),
+                         "kitome": poisson(rng, d * 0.001)}
+            continue
+        d = depth * rng.lognormvariate(0, 0.5)
+        shares = {}
+        for name, prev, mu, sd in taxa:
+            if rng.random() < prev:
+                shares[name] = math.exp(rng.gauss(mu, sd))
+        if grouped_by_column:
+            shares[f"group{rc[1]}"] = rng.uniform(0.02, 0.1)
+        tot = sum(shares.values())
+        true[sid] = {k: poisson(rng, d * v / tot) for k, v in shares.items()}
+    for sid, add in (contaminate or {}).items():
+        for k, v in add.items():
+            true[sid][k] = true[sid].get(k, 0) + v
+    row_tot: dict = defaultdict(int)
+    col_tot: dict = defaultdict(int)
+    for rc in used:
+        for k, v in true[names[rc]].items():
+            row_tot[(rc[0], k)] += v
+            col_tot[(rc[1], k)] += v
+    keys = sorted({k for t in true.values() for k in t})
+    counts: dict = {}
+    for rc in used:
+        sid = names[rc]
+        own = true[sid]
+        got = {}
+        for k in keys:
+            y = own.get(k, 0)
+            lam = (rate_row * (row_tot[(rc[0], k)] - y)
+                   + rate_col * (col_tot[(rc[1], k)] - y))
+            n = y + poisson(rng, lam)
+            if n >= min_cluster:
+                got[k] = n
+        counts[sid] = got
+    i5 = {r: f"i5_{r}" for r in rows}
+    i7 = {c: f"i7_{c}" for c in range(1, n_cols + 1)}
+    matrix = []
+    for rc in cells:
+        if rc in unused_cells:
+            lam = sum(rate_row * row_tot[(rc[0], k)]
+                      + rate_col * col_tot[(rc[1], k)] for k in keys)
+            matrix.append({"index_i5": i5[rc[0]], "index_i7": i7[rc[1]],
+                           "reads": str(poisson(rng, lam)), "assigned": "no"})
+        else:
+            matrix.append({"index_i5": i5[rc[0]], "index_i7": i7[rc[1]],
+                           "reads": str(sum(counts[names[rc]].values())),
+                           "assigned": "yes"})
+    return {"geom": {names[rc]: rc for rc in used}, "counts": counts,
+            "true": true, "types": types, "matrix": matrix,
+            "rates": {"row": rate_row, "col": rate_col}}
 
 
 # --------------------------------------------------------------------------
@@ -744,7 +924,15 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--prevalence", type=float, default=0.35,
                     help="probability a field sample carries any given target")
-    ap.add_argument("--hop-rate", type=float, default=0.005)
+    ap.add_argument("--hop-rate", type=float, default=0.005,
+                    help="both indices rewritten at random (or onto an "
+                    "unused combination)")
+    ap.add_argument("--misread-i5-rate", type=float, default=0.0,
+                    help="share of reads whose i5 is read as another of "
+                    "the plate's i5s: the read lands in the same column")
+    ap.add_argument("--misread-i7-rate", type=float, default=0.0,
+                    help="share of reads whose i7 is read as another of "
+                    "the plate's i7s: the read lands in the same row")
     ap.add_argument("--chimera-rate", type=float, default=0.01)
     ap.add_argument("--carryover-rate", type=float, default=0.002)
     ap.add_argument("--dimer-rate", type=float, default=0.02)
@@ -837,6 +1025,8 @@ def main(argv=None) -> int:
                 "seed": args.seed,
                 "rates": {
                     "hop": args.hop_rate,
+                    "misread_i5": args.misread_i5_rate,
+                    "misread_i7": args.misread_i7_rate,
                     "chimera": args.chimera_rate,
                     "carryover": args.carryover_rate,
                     "dimer": args.dimer_rate,

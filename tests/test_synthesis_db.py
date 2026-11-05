@@ -599,6 +599,219 @@ def test_family_labels_pool() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# -- index misassignment ---------------------------------------------------
+# Simulated plates (simulate.simulate_plate_counts) written out as
+# assign_db outputs with plate positions, and run twice: with the
+# positions, and with them removed - which is the synthesis as it was
+# before the model, since nothing can then be placed.
+
+sim = _load("simulate", "bin/simulate.py")
+
+SIM_LIN = {
+    "worm": LIN["hc"].rsplit(";", 1)[0],
+    "rare": LIN["tg"].rsplit(";", 1)[0],
+    "host": LIN["bt"].rsplit(";", 1)[0],
+    "bact": LIN["ec"].rsplit(";", 1)[0],
+    "kitome": LIN["ec"].rsplit(";", 1)[0],
+    "para": "Eukaryota;Amoebozoa;Evosea;Archamoebae;Archamoebea;"
+            "Mastigamoebida;Entamoebidae;Entamoeba",
+}
+
+
+def plate_case(tmp, p, positions=True):
+    """write_case for a simulated plate; each simulated taxon its own
+    species under a lineage of its kind (worm and rare: helminths)."""
+    wells = {}
+    for sid, cs in p["counts"].items():
+        rows = []
+        for i, (k, n) in enumerate(sorted(cs.items())):
+            kind = next(x for x in SIM_LIN if k.startswith(x))
+            row = cluster(sid, i, "hc", n)
+            row.update(taxon=k, label=k, lineage=f"{SIM_LIN[kind]};{k}",
+                       best_hit=f"V4_{k}")
+            rows.append(row)
+        wells[sid] = rows
+    args = write_case(tmp, wells, p["types"])
+    if positions:
+        with open(os.path.join(tmp, "preflight", "file_resolution.tsv"),
+                  "w") as fh:
+            fh.write("run_id\tsample_id\tsanitised_id\tplate_row\t"
+                     "plate_col\tsample_type\n")
+            for sid, t in p["types"].items():
+                r, c = p["geom"][sid]
+                fh.write(f"R1\t{sid}\t{sid}\t{r}\t{c}\t{t}\n")
+    return args + ["--permutations", "200"]
+
+
+def run_both(p):
+    """(calls, wells, qc) with positions, and calls without."""
+    tmp = tempfile.mkdtemp()
+    tmp2 = tempfile.mkdtemp()
+    try:
+        with_pos = run(plate_case(tmp, p))
+        without = run(plate_case(tmp2, p, positions=False))[0]
+        return with_pos, without, tmp
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+
+def blank_next_to_worm(p) -> str:
+    return next(s for s, t in sorted(p["types"].items())
+                if t != "unknown" and p["counts"][s].get("worm"))
+
+
+def test_misassignment_blank() -> None:
+    """A blank sharing its row with a heavy worm well holds the worm's
+    misassigned reads. Before the model they set a proportional limit
+    that suppressed a real, modest worm infection in a deep well; now
+    they are explained, the limit stays at the floor, the blank's worm is
+    'misassigned', and the infection is detected."""
+    print("\na blank next to heavy wells is not contamination")
+    p0 = sim.simulate_plate_counts(sim.random.Random(11), 8, 12,
+                                   rate_row=4e-4, rate_col=7e-4)
+    # a real, modest worm infection in a deep field well away from the
+    # heavy column: 1% of the well
+    field = max((s for s, t in p0["types"].items() if t == "unknown"
+                 and p0["geom"][s][1] != 7),
+                key=lambda s: sum(p0["true"][s].values()))
+    add = sum(p0["true"][field].values()) // 100
+    p = sim.simulate_plate_counts(sim.random.Random(11), 8, 12,
+                                  rate_row=4e-4, rate_col=7e-4,
+                                  contaminate={field: {"worm": add}})
+    (calls, _w, qc), old, tmp = run_both(p)
+    try:
+        mis = qc["index_misassignment"]
+        check("both rates measured on the plate",
+              mis["row"]["basis"] == "fitted"
+              and mis["col"]["basis"] == "fitted",
+              str({a: (mis[a]["basis"], mis[a]["reason"])
+                   for a in ("row", "col")}))
+        check("and recorded per run, with their interval",
+              all(mis[a]["ci95"] and mis[a]["ci95"][0] <= mis[a]["rate"]
+                  <= mis[a]["ci95"][1] for a in ("row", "col")))
+        b = blank_next_to_worm(p)
+        cb = call_of(calls, b, "worm")
+        check("the blank's worm reads are explained by misassignment",
+              float(cb["misassign_expected"]) >= 0.5 * int(cb["reads"])
+              and cb["call"] in ("misassigned", "below_blanks"), str(cb))
+        cf, of = call_of(calls, field, "worm"), call_of(old, field, "worm")
+        check("before the model, the blank suppressed a real infection",
+              of["call"] == "below_blanks", str(of))
+        check("with it, the infection is detected",
+              cf["call"] == "detected", str(cf))
+        check("and the limit no longer rests on the blank's misassigned "
+              "reads", int(cf["limit_reads"]) < int(of["limit_reads"]) / 5
+              and "net of index misassignment" in cf["limit_basis"],
+              f"{cf['limit_reads']} vs {of['limit_reads']}: "
+              f"{cf['limit_basis']}")
+        check("the call carries its expected misassigned reads and excess",
+              float(cf["misassign_excess"]) > 0 and abs(
+                  float(cf["misassign_expected"])
+                  + float(cf["misassign_excess"]) - int(cf["reads"])) < 0.2)
+        check("misassigned is a call state, with its meaning",
+              "misassigned" in syn.CALLS
+              and "misassigned" in qc["call_meaning"])
+        check("the blank is listed among those misassignment explains",
+              any(x["sample_id"] == b and x["taxon"] == "worm"
+                  for x in mis["blanks_explained"]))
+        check("plate-position tests ran on depth, groups and taxa",
+              any(g["quantity"] == "depth" for g in qc["plate_geometry"])
+              and any(g["quantity"].endswith(" share")
+                      for g in qc["plate_geometry"]))
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--run-id", "R1", "--out", out])
+        doc = open(out).read()
+        check("the report gives the rates and the plate position",
+              "id='misassign'" in doc and "measured on this run" in doc
+              and "id='plate'" in doc and "Blank reads explained" in doc)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_misassignment_real_contamination() -> None:
+    """Contamination well above what misassignment explains still
+    raises the limit."""
+    print("\nreal contamination still raises the limit")
+    p0 = sim.simulate_plate_counts(sim.random.Random(11), 8, 12,
+                                   rate_row=4e-4, rate_col=7e-4)
+    b = blank_next_to_worm(p0)
+    p = sim.simulate_plate_counts(sim.random.Random(11), 8, 12,
+                                  rate_row=4e-4, rate_col=7e-4,
+                                  contaminate={b: {"worm": 3000}})
+    (calls, _w, qc), _old, tmp = run_both(p)
+    try:
+        cb = call_of(calls, b, "worm")
+        check("the contaminated blank is far above its expectation",
+              float(cb["misassign_excess"]) > 2000, str(cb))
+        lim = [c for c in calls if c["taxon"] == "worm"
+               and c["sample_type"] == "unknown"]
+        check("and the worm's limit is raised by it, in every well",
+              all(int(c["limit_reads"]) > 100 for c in lim)
+              and all("blank" in c["limit_basis"] for c in lim),
+              str(sorted({c["limit_reads"] for c in lim})[:5]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_misassignment_fallback() -> None:
+    """A plate the rates cannot be measured on: says so, checks calls at
+    the default, and leaves every blank-derived limit as it was."""
+    print("\nthe fallback, on a plate too small to measure")
+    p = sim.simulate_plate_counts(sim.random.Random(2), 3, 4,
+                                  rate_row=4e-4, rate_col=7e-4,
+                                  heavy_column=False, blanks=2)
+    (calls, _w, qc), old, tmp = run_both(p)
+    try:
+        mis = qc["index_misassignment"]
+        fell = [a for a in ("row", "col") if mis[a]["basis"] == "default"]
+        check("at least one axis falls back, with a reason",
+              fell and all(mis[a]["reason"] for a in fell),
+              str({a: mis[a]["basis"] for a in ("row", "col")}))
+        check("calls there are checked at the default",
+              all(mis["for_calls"][a] == mis["settings"]["default_rate"]
+                  for a in fell))
+        check("and nothing assumed is taken off the blanks",
+              all(mis["for_blanks"][a] == 0.0 for a in fell))
+        if len(fell) == 2:
+            check("so every limit is as it was",
+                  [c["limit_reads"] for c in calls]
+                  == [c["limit_reads"] for c in old])
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--run-id", "R1", "--out", out])
+        check("the report says the default was used",
+              "default used" in open(out).read())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_misassignment_none() -> None:
+    """No misassignment: the rates are bounds, and every call, limit and
+    basis is what it was without the model."""
+    print("\nno misassignment, no change")
+    p = sim.simulate_plate_counts(sim.random.Random(5), 8, 12,
+                                  rate_row=0.0, rate_col=0.0)
+    (calls, _w, qc), old, tmp = run_both(p)
+    try:
+        mis = qc["index_misassignment"]
+        check("both rates are bounds",
+              mis["row"]["basis"] == "upper_bound"
+              and mis["col"]["basis"] == "upper_bound",
+              str({a: mis[a]["basis"] for a in ("row", "col")}))
+        key = ("sample_id", "taxon", "reads", "call", "limit_reads",
+               "limit_basis", "rel_abundance", "group_share")
+        check("every call, limit and basis is unchanged",
+              [tuple(c[k] for k in key) for c in calls]
+              == [tuple(c[k] for k in key) for c in old])
+        check("and without positions the new columns are blank",
+              all(c["misassign_expected"] == "" for c in old))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
@@ -608,6 +821,10 @@ def main() -> int:
     test_read_funnel()
     test_v080_margin_and_ranks()
     test_family_labels_pool()
+    test_misassignment_blank()
+    test_misassignment_real_contamination()
+    test_misassignment_fallback()
+    test_misassignment_none()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

@@ -52,7 +52,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ampseqlib import read_table, restore_declared_ids  # noqa: E402
+# kruskal_h and permutation_p lived here before the database synthesis
+# shared them; still importable from here for the tests.
+from ampseqlib import (  # noqa: E402,F401
+    kruskal_h, permutation_p, plate_effects, read_table, restore_declared_ids,
+)
 
 CALLS = ("detected", "not_detected", "assay_failed")
 
@@ -682,70 +686,6 @@ def limit_for(sid: str, s: Sample, lods: dict) -> tuple[int, str]:
 # --------------------------------------------------------------------------
 
 
-def kruskal_h(groups: list[list[float]]) -> float:
-    """Rank-based test statistic for 'do these groups differ'.
-
-    Ranks rather than values because read counts are heavily skewed and a
-    handful of heavy infections would otherwise drive any comparison of
-    means. No distributional assumption is made, and none is needed - the
-    p-value comes from permutation below.
-    """
-    vals = [v for g in groups for v in g]
-    n = len(vals)
-    if n < 3 or len(groups) < 2:
-        return 0.0
-    order = sorted(range(n), key=lambda i: vals[i])
-    ranks = [0.0] * n
-    i = 0
-    while i < n:
-        j = i
-        while j + 1 < n and vals[order[j + 1]] == vals[order[i]]:
-            j += 1
-        avg = (i + j) / 2.0 + 1.0
-        for k in range(i, j + 1):
-            ranks[order[k]] = avg
-        i = j + 1
-    idx = 0
-    total = 0.0
-    for g in groups:
-        rs = sum(ranks[idx: idx + len(g)])
-        if g:
-            total += rs * rs / len(g)
-        idx += len(g)
-    return 12.0 / (n * (n + 1)) * total - 3 * (n + 1)
-
-
-def permutation_p(
-    values: list[float], labels: list, rng: random.Random, n_perm: int
-) -> tuple[float, float]:
-    """How unusual is the grouping, if well position means nothing?
-
-    Wells are meant to be independent, so the null is simply that the
-    labels could have been attached to any well. Shuffling them is a more
-    honest null than any parametric one, and it costs nothing here.
-    """
-    by = defaultdict(list)
-    for v, lab in zip(values, labels):
-        by[lab].append(v)
-    groups = [g for g in by.values() if g]
-    if len(groups) < 2:
-        return 0.0, 1.0
-    observed = kruskal_h(groups)
-
-    shuffled = list(labels)
-    worse = 0
-    for _ in range(n_perm):
-        rng.shuffle(shuffled)
-        by2 = defaultdict(list)
-        for v, lab in zip(values, shuffled):
-            by2[lab].append(v)
-        if kruskal_h([g for g in by2.values() if g]) >= observed:
-            worse += 1
-    # +1 on both sides: a permutation test can never justify p = 0, and
-    # reporting one would overstate what the resampling can support.
-    return observed, (worse + 1) / (n_perm + 1)
-
-
 def plate_qc(
     samples: dict[str, Sample], taxa: list[str], rng: random.Random,
     n_perm: int,
@@ -756,47 +696,23 @@ def plate_qc(
     Position should therefore explain nothing, and if it does, the cause is
     the plate: a multichannel channel, a thermal gradient, evaporation at
     the edges, a bad column of tips. This does not say which - only that
-    the signal is not coming from biology.
+    the signal is not coming from biology. The tests themselves are
+    ampseqlib.plate_effects, shared with the database synthesis.
     """
     placed = [
         s for s in samples.values()
         if s.plate_row and s.plate_col and s.sample_type not in NOT_FIELD
     ]
-    if len(placed) < 12:
-        return []
-    rows = sorted({s.plate_row for s in placed})
-    cols = sorted({s.plate_col for s in placed})
-    findings = []
-    for what in ["depth"] + taxa:
-        if what == "depth":
-            vals = [float(s.depth) for s in placed]
-        else:
-            # Share of the library, not raw reads: otherwise a row effect in
-            # depth would show up again as a row effect in every taxon.
-            vals = [
-                (s.counts.get(what, 0) / s.depth) if s.depth else 0.0
-                for s in placed
-            ]
-        if len(set(vals)) < 3:
-            continue
-        row_h, row_p = permutation_p(
-            vals, [s.plate_row for s in placed], rng, n_perm)
-        col_h, col_p = permutation_p(
-            vals, [s.plate_col for s in placed], rng, n_perm)
-        edge_labels = [
-            "edge" if (s.plate_row in (rows[0], rows[-1])
-                       or s.plate_col in (cols[0], cols[-1])) else "interior"
+    series = [("depth", [float(s.depth) for s in placed])]
+    for what in taxa:
+        # Share of the library, not raw reads: otherwise a row effect in
+        # depth would show up again as a row effect in every taxon.
+        series.append((what, [
+            (s.counts.get(what, 0) / s.depth) if s.depth else 0.0
             for s in placed
-        ]
-        edge_h, edge_p = permutation_p(vals, edge_labels, rng, n_perm)
-        findings.append({
-            "quantity": what,
-            "n_wells": len(placed),
-            "row_p": round(row_p, 4),
-            "col_p": round(col_p, 4),
-            "edge_p": round(edge_p, 4),
-        })
-    return findings
+        ]))
+    return plate_effects([s.plate_row for s in placed],
+                         [s.plate_col for s in placed], series, rng, n_perm)
 
 
 # --------------------------------------------------------------------------

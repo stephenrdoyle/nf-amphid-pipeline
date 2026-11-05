@@ -11,6 +11,7 @@ process SYNTHESISE_DB {
     path(summaries, stageAs: 'assign_db/*')
     path demux_summary
     path split_summary
+    path index_matrix
     path preflight_dir
     path database
 
@@ -28,17 +29,22 @@ process SYNTHESISE_DB {
     // no plasmids - see bin/synthesise_db.py.
     def demux_arg = !demux_summary.name.startsWith('NO_') ? "--demux-summary ${demux_summary}" : ''
     def split_arg = !split_summary.name.startsWith('NO_') ? "--split-summary ${split_summary}" : ''
+    // The demultiplexer's index matrix: unused index pairs measure
+    // misassignment directly, a cross-check on the fitted rates.
+    def matrix_arg = !index_matrix.name.startsWith('NO_') ? "--index-matrix ${index_matrix}" : ''
     """
     synthesise_db.py \\
         --assign-dir assign_db \\
         --preflight-dir ${preflight_dir} \\
         --database ${database} \\
-        ${demux_arg} ${split_arg} \\
+        ${demux_arg} ${split_arg} ${matrix_arg} \\
         --run-id ${run_id} \\
         --min-depth ${params.min_depth} \\
         --absolute-floor ${params.absolute_floor} \\
         --min-rel-abundance ${params.db_min_rel_abundance} \\
         --host-clade '${params.db_host_clade}' \\
+        --misassign-default-rate ${params.db_misassign_default_rate} \\
+        --misassign-margin ${params.db_misassign_margin} \\
         --outdir synthesis
 
     cat <<-END_VERSIONS > versions.yml
