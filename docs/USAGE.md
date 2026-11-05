@@ -463,6 +463,8 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_min_rel_abundance` | `0.001` | a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
 | `--db_primer_max_edits` | `3` | edits allowed when finding each primer in database mode (panel mode uses 2). Off-target bacterial 16S differs from the forward primer at its 3' end, often by three; at two it is dropped as `no_primer` rather than counted as bacteria |
 | `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
+| `--db_misassign_default_rate` | `0.001` | per-pair index misassignment rate calls are checked against when the run cannot measure its own (see *Index misassignment* below). Never taken off the blanks |
+| `--db_misassign_margin` | `2` | how far above the run's fitted rate one pair of indexes may leak before a call is more than misassignment: a misread lands on the nearest index, so some pairs leak more than most |
 | `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
 | `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's windows for `--illumina_read_length` (`illumina_geometries`: 132 at 2x150 or 2x250, 250 at 2x300) |
 | `--db_window_r2` | `null` | the same for R2 (128 at 2x150, 200 at 2x300) |
@@ -620,14 +622,16 @@ reproducibility choice, not a dependency.
     <sample>.assign_db.json     read accounting, settings, release version
   synthesis/                    in database mode:
     db_calls.tsv                one row per sample x taxon at the rank
-                                reached: share, call, limit, identity,
+                                reached: share, call, limit, reads expected
+                                from index misassignment, identity,
                                 organism group, share within the group
     db_wells.tsv                per well: read funnel, reads and fractions
                                 per organism group, target-group richness,
                                 reads by rank
     db_prevalence.tsv           per taxon: samples detected of samples tested
     db_run_qc.json              release, blanks, internal adapter rates,
-                                the run's read funnel
+                                the run's read funnel, its index
+                                misassignment rates, plate-position tests
   synthesis/
     calls.tsv                   the results table
     calibration.tsv             per-well internal control
@@ -673,11 +677,17 @@ enough to say what it is.
 ### Reading `synthesis/db_calls.tsv` (database mode)
 
 One row per sample and taxon at the rank reached. `call` is `detected`
-(beats the blanks and is at least `--db_min_rel_abundance` of the well),
-`below_blanks`, `below_floor`, or `low_depth` (the well has fewer than
+(beats the blanks, is more than index misassignment could have put
+there, and is at least `--db_min_rel_abundance` of the well),
+`below_blanks`, `misassigned` (beats the blanks but is no more than
+misassignment from the wells sharing its i5 or i7 is expected to give -
+see below), `below_floor`, or `low_depth` (the well has fewer than
 `--min_depth` classified reads). `limit_reads` is the fewest reads that
 beat the blanks and `limit_basis` says how it was set; with no blanks on
-the plate it is the fixed floor, and says so. `group` is the organism
+the plate it is the fixed floor, and says so. `misassign_expected` is the
+reads misassignment is expected to have put in the well at the run's
+rates, and `misassign_excess` the call's reads over that; both are blank
+when the plate has no positions to model. `group` is the organism
 group, as VESPA reports them - helminths, protists and microsporidia (the
 targets), host, fungi, plants, invertebrates, bacteria_archaea, organelle,
 or unassigned - and `group_share` the call's share within its group, so
@@ -688,6 +698,53 @@ The groups are defined in docs/REFERENCE_DATABASE.md §11.4. And
 `db_wells.tsv` gives each well's funnel, reads and fractions per group,
 target-group richness and reads by rank reached; `db_prevalence.tsv`
 how many samples each taxon was detected in.
+
+### Index misassignment and plate position (database mode)
+
+On a combinatorial plate the i5 is the row and the i7 the column
+(`--index_map`), so a read with one index misread lands in a well that
+shares the other: the same row or the same column. A deep well leaks a
+small, steady share of its reads along both - and a blank in its row or
+column then looks contaminated, and the proportional blank limit it sets
+suppresses real calls in every deep well. Synthesis measures the run's
+own rates and allows for them (docs/REFERENCE_DATABASE.md §11.9):
+
+- **The rates** are per pair of wells - the share of one well's reads
+  that lands in one particular other well - along rows (`row`: the i7
+  misread) and columns (`col`: the i5 misread). They are fitted from the
+  run's calls, pooled over every taxon, and need no unused index
+  combination, so they work on a full plate. Each comes with a 95%
+  interval, and the run QC (`index_misassignment` in `db_run_qc.json`)
+  keeps them run by run so drift shows.
+- **Blanks**: a blank's reads that misassignment explains are taken off
+  before it sets a limit - with a **measured** rate only.
+- **Calls**: a call no larger than misassignment could have made it
+  (`--db_misassign_margin` times the fitted rate, or the top of its
+  interval, plus Poisson noise) is `misassigned`, not `detected`.
+- **When a rate cannot be measured** - too few wells next to an abundant
+  source, no clear pattern, a pattern that does not follow the indexes,
+  or one too high to be misreading - the run QC and the report say why,
+  calls are checked at `--db_misassign_default_rate`, and nothing is
+  taken off the blanks. When the wells that should show a leak show
+  nothing, the rate is reported as a bound, and nothing is checked
+  against it.
+- **Unused combinations**, where the plate has them, measure the rates
+  directly from the demultiplexer's `index_matrix.tsv`; the report sets
+  them beside the fit as a cross-check, and says so if they disagree
+  five-fold.
+
+Samples laid out by group along a row or column - one host per column,
+say - share taxa along that axis for real. The fit rejects a "rate"
+above 0.5% per pair as no misassignment, but a milder grouping can look
+like one; the report's plate-position table (below) and the unused
+combinations are the checks.
+
+**Plate position**: as in panel mode, permutation tests for row, column
+and edge effects on depth, on each organism group's share of the well,
+and on the twelve commonest detected taxa (field samples only;
+`plate_geometry` in `db_run_qc.json`). A small p-value is evidence about
+the plate, not the samples - and a taxon with a row or column effect may
+be misassignment from a heavy well on that row or column.
 
 ### Reading `calls.tsv`
 

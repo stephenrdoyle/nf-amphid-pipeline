@@ -386,7 +386,10 @@ synthesis is built on standards and plasmids this protocol does not have.
   (proportional), and at least `--absolute_floor`; then at least
   `--db_min_rel_abundance` (0.1%) of the well. A well under `--min_depth`
   classified reads calls nothing (`low_depth`). Without blanks the limit
-  is the fixed floor and every row says that is an assumption.
+  is the fixed floor and every row says that is an assumption. On a
+  combinatorial plate the blanks' reads are first net of index
+  misassignment, and a call no larger than misassignment could make is
+  `misassigned` (§11.9).
 - **Organism groups**, reported the way VESPA reports them (Owens et al.
   2024, Figs 3-5): each well's classified reads by group first, then each
   *target* group on its own with shares recalculated within the group, a
@@ -641,3 +644,162 @@ Two additive release files, read when present and ignored by older releases.
   - The label is now "windows disagree: R1 NN% to X, R2 NN% to Y (a chimera, an artefact, or a stretch the database has nothing close to)". Each window's identity there is from a full alignment to its own best record.
   - On VESPA's primate samples most of these are gregarines: R2 at 97% to *Leidyana*, with R1 at 74–81% to the same record. An unrelated 18S record gives R1 64% at the median, 74% at the 99th percentile and up to 80%. So a divergent region of one organism can't be told from a join, and the label doesn't claim either.
   - The report counts these reads before the results.
+
+### 11.9 Index misassignment on combinatorial plates, and plate position
+
+**The problem.** Nanopore plates use combinatorial tandem dual indices:
+each i5 is a row and each i7 a column. A read with its i7 misread keeps
+its i5 and lands in another well of the same row; one with its i5
+misread lands in the same column. Both indexes misread is rare, so wells
+sharing neither index get roughly nothing. On vespa_run1 (VESPA_STOP_Tt,
+42 wells, 8 i5 x 6 i7) the extraction blank shared its i7 with seven
+near-pure *T. trichiura* worm preparations. It held 2,348 *T. trichiura*
+reads, 6.5% of its 35,974 classified reads. As a proportional blank
+limit, that 6.5% suppressed *T. trichiura* in the deep STOP wells:
+STOP1 had 9,793 reads against a limit of 9,882, and STOP2 3,155 against
+24,233. Overall, 18 of 24 STOP wells were `below_blanks`.
+
+**The model.** The misassigned reads of taxon T in well w are about
+
+    rate_row x (T reads in the other wells of w's row)
+  + rate_col x (T reads in the other wells of w's column)
+
+with each rate **per pair of wells**: the share of one well's reads that
+lands in one particular other well. Per pair, because a misread lands on
+the nearest declared index, so the rate belongs to the index chemistry,
+not to how many wells the plate has, and runs of different sizes compare.
+Rows and columns are separate because i5 and i7 are read at different
+ends and fail differently. Plate position comes from the index map via
+pre-flight (`plate_row`, `plate_col`), so a shared row *is* a shared i5.
+`ampseqlib.IndexSharing` and `fit_misassignment`.
+
+**Measured per run, pooled over every taxon, on a full plate.** Rates
+vary with flow cell, basecaller and library, so each run measures its
+own. Every (well, taxon) pair with enough of the taxon next door along
+one axis (by default 10,000 reads, and 3x the other axis) is a
+measurement: the ratio reads / (reads next door). True presence can only
+add to misassignment, so no pair sits much below the rate, and pairs
+where the taxon is absent pile up *at* it. Pairs where it is present,
+often the majority (gut bacteria in every stool, *T. trichiura* in most
+STOP wells), sit above. So the rate is the **lowest well-supported mode**
+of the log ratios: the first ±0.25-decade window from the bottom holding
+at least 8 pairs and a quarter of the densest window, climbed to its
+peak. It is not the median, and not a low quantile; both were tried on
+vespa_run1 and both were pulled around by presence. Each axis is fitted
+with the other axis's expected reads taken off, alternating to
+convergence. No unused combination is needed.
+
+Three details came from real data:
+
+- **Clustering censors small leaks.** A consensus needs 5 reads, so a
+  pair expected to receive 3 shows either nothing or a count that
+  happened to come out high. Shallow pairs then pull the rate up, a higher
+  rate admits shallower pairs, and the two feed each other. On vespa_run1
+  this fixed point put the row rate at 9e-4 against 3e-4 from the unused
+  combinations. The fit therefore starts from the deepest pairs (the
+  80 deepest per axis) and keeps only pairs where the current rate
+  predicts at least 10 leaked reads.
+- **An axis is only subtracted from the other once it has enough pairs
+  to be measured.** An unmeasured rate subtracted from a shallow plate
+  drove the other axis to a fifth of its truth.
+- **Uncertainty**: a 95% interval from 200 bootstrap resamples of the
+  destination wells.
+
+**Never fitting noise.** An axis is `fitted` only when all of these hold:
+at least 20 informative pairs; a mode exists; the interval spans at most
+10-fold; the rate is at most 0.5% per pair; and it beats a **placebo**.
+The placebo deals the wells out over the plate's positions at random 100
+times, and asks each time how many of the pairs at or below the rate's
+window sit *in* it. Leakage that follows index sharing makes that tighter
+with the true neighbours than with shuffled ones, so the real plate must
+beat all but one shuffle (p ≤ 0.02). Otherwise the axis is:
+
+- `upper_bound` when half or more of the pairs where the rate predicts
+  20+ reads show nothing. Misassignment is below what the run can see,
+  so the bound is reported and nothing is checked against it or taken
+  off the blanks. A rate of about zero changes no call.
+- `default` for every other failure, with the reason given. Calls are
+  checked at `--db_misassign_default_rate` (1e-3 per pair, twice the
+  first plates' typical rate), and nothing is taken off the blanks: an
+  assumed rate is never subtracted from a blank.
+
+What the checks cannot separate:
+
+- **Shared biology along an axis.** Samples laid out by group (a column
+  per host or site) share taxa down that axis for real, and the placebo
+  sees structure that follows the column. Only the 0.5% plausibility cap
+  then stands between it and a fitted rate. On VONT01 (50 wells) the
+  column "rate" came out at 13% per pair, which is grouping; that plate's
+  plate-position table has column p ≈ 0.0005 for depth and almost every
+  group and taxon. A milder grouping can look like misassignment, and the
+  unused combinations are the independent check.
+- **Contamination from the whole plate at a steady level**, on a plate
+  balanced so that every row holds the same heavy sources. A well's
+  neighbours and the whole plate then predict the same reads. In
+  simulation such contamination was fitted on 2 of 16 axes.
+
+**Unused combinations** are reported beside the fit as a cross-check,
+not used in the fit, so that a full plate and a part-filled one are
+measured the same way. They come from the demultiplexer's
+`index_matrix.tsv`: reads on each unused pair over the reads of its row
+(same i5) or column (same i7), with the other axis's expected share taken
+off. They count every demultiplexed read rather than classified ones. A
+five-fold disagreement with the fit is flagged. Usually only one axis is
+measurable: unused cells sit in a part-filled column, whose column has
+few reads.
+
+**How the rates are used.**
+
+- **Blanks.** Each blank's reads of a taxon, minus the reads expected at
+  the *fitted* rates (rounded), set the absolute and proportional
+  limits. The limit's basis then says "net of index misassignment".
+  Contamination well above the expectation still raises the limit.
+- **Calls.** Before the relative floor, a call is `misassigned` if its
+  reads are at most R + 3√R. R is the expected reads at the per-axis
+  "reach" rate: for a fitted rate, the larger of `--db_misassign_margin`
+  (2) times the rate and the top of its interval, because some index
+  pairs leak more than most; otherwise the default as it stands. R must
+  be at least one read. Every other state keeps its meaning, and
+  `below_blanks` is decided first.
+- `misassign_expected` and `misassign_excess` in `db_calls.tsv` carry
+  each call's expectation at the point rates.
+- The run QC keeps the rates, intervals, bases, reasons, pair counts and
+  placebo p, the unused-combination rates, the count of misassigned
+  calls, and the blank taxa it explains. The report gives a section, and
+  a line before the results.
+
+**On the real plates** (vespa_run1 rebuilt from its report's call table and plate map; VONT01 from its own synthesis inputs):
+
+| | vespa_run1 (42 wells) | VONT01 (50 wells) |
+|---|---|---|
+| row (i7 misread) | fitted 5.0e-4 (2.5–7.0e-4) | default: interval 3.4e-3 to ∞ |
+| column (i5 misread) | fitted 1.5e-3 (0.98–1.75e-3) | default: 1.3e-1, samples grouped by column |
+| unused combinations, row | 3.0–6.5e-4 (6 cells: 740–1,979 reads, 0.030–0.065% of their rows) | 2.8e-4 (0.9–5.4e-4, 6 cells) |
+| extraction blank, *T. trichiura* | 2,348 reads, 5,122 expected: explained | — |
+| NTC1 / NTC2, *T. trichiura* | 180 / 106 reads, 614 / 389 expected | — |
+| *T. trichiura* in STOP wells | detected in 20 of 24 (was 6); STOP1 and STOP2 detected; 4 misassigned (699–1,314 reads, 440–790 expected) | — |
+| calls changed | 509 misassigned | 20 misassigned, all 6–45 reads; nothing else |
+
+The column rate on vespa_run1 is about twice what the extraction blank
+alone implies (2,348 / 3.18M = 7.4e-4). Most column pairs on that plate
+are STOP wells holding the gut bacteria they receive, so its estimate
+leans on fewer absent pairs. The error is on the side of calling
+misassignment.
+
+**Simulated plates** (`simulate.simulate_plate_counts`; one heavy column
+of worm preparations, a host and a reagent taxon in every well, bacteria
+in 60-100% of wells, parasites in 10-40%, rare heavy taxa in 3-8%, four
+blanks, and a 5-read clustering minimum): the fitted rates are within 6%
+of the truth at 42, 48, 88, 96, 368 and 384 wells, at 4e-4/7e-4 and
+1e-4/2e-3. The one exception is 48 wells at 1e-4 along rows, which falls
+back with its reason. `tests/test_misassignment.py` prints the table. The
+read-level simulator gains `--misread-i5-rate` and `--misread-i7-rate`:
+one index rewritten to another of the plate's, unlike `--hop-rate`, which
+rewrites the pair.
+
+**Plate position** in database mode is the panel's test
+(`ampseqlib.plate_effects`, moved there from `synthesise.py` with
+identical output, ranks taken once per test). It covers row, column and
+edge effects on depth, on each organism group's share and on the twelve
+commonest detected taxa, for field wells only.
+

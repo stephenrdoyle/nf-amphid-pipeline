@@ -17,8 +17,11 @@ import csv
 import glob
 import gzip
 import json
+import math
 import os
+import random
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from itertools import compress
 from operator import sub
@@ -1562,4 +1565,635 @@ def load_taxonomy(path: str) -> dict[str, dict[str, str]]:
     with open_text(path) as fh:
         for r in csv.DictReader(fh, delimiter="\t"):
             out[r["id"]] = {k: (r.get(k) or "").strip() for k in RANKS}
+    return out
+
+
+# --------------------------------------------------------------------------
+# plate position: row, column and edge effects
+# --------------------------------------------------------------------------
+#
+# Shared by the panel synthesis and the database synthesis. Wells hold
+# unrelated samples, so where a well sits should explain nothing about
+# it; when it does, the cause is the plate - a multichannel channel, a
+# thermal gradient, evaporation at the edges, a bad column of tips.
+
+
+def kruskal_h(groups: list[list[float]]) -> float:
+    """Rank-based test statistic for 'do these groups differ'.
+
+    Ranks rather than values because read counts are heavily skewed and a
+    handful of heavy infections would otherwise drive any comparison of
+    means. No distributional assumption is made, and none is needed - the
+    p-value comes from permutation below.
+    """
+    vals = [v for g in groups for v in g]
+    n = len(vals)
+    if n < 3 or len(groups) < 2:
+        return 0.0
+    order = sorted(range(n), key=lambda i: vals[i])
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    idx = 0
+    total = 0.0
+    for g in groups:
+        rs = sum(ranks[idx: idx + len(g)])
+        if g:
+            total += rs * rs / len(g)
+        idx += len(g)
+    return 12.0 / (n * (n + 1)) * total - 3 * (n + 1)
+
+
+def _midranks(vals: list[float]) -> list[float]:
+    """Each value's rank, ties averaged - kruskal_h's ranks, in input order."""
+    n = len(vals)
+    order = sorted(range(n), key=lambda i: vals[i])
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def permutation_p(
+    values: list[float], labels: list, rng: random.Random, n_perm: int
+) -> tuple[float, float]:
+    """How unusual is the grouping, if well position means nothing?
+
+    Wells are meant to be independent, so the null is simply that the
+    labels could have been attached to any well. Shuffling them is a more
+    honest null than any parametric one, and it costs nothing here.
+
+    Shuffling labels never changes a value's rank, so the ranks are taken
+    once and each permutation only re-sums them by label - the statistic
+    kruskal_h would give, to the bit (half-integer sums are exact), at a
+    fraction of the cost, which is what lets a 384-well plate be tested
+    taxon by taxon.
+    """
+    by = defaultdict(list)
+    for v, lab in zip(values, labels):
+        by[lab].append(v)
+    groups = [g for g in by.values() if g]
+    if len(groups) < 2:
+        return 0.0, 1.0
+    observed = kruskal_h(groups)
+
+    n = len(values)
+    ranks = _midranks(values)
+    scale = 12.0 / (n * (n + 1)) if n >= 3 else 0.0
+    shuffled = list(labels)
+    worse = 0
+    for _ in range(n_perm):
+        rng.shuffle(shuffled)
+        sums: dict = {}
+        sizes: dict = {}
+        for r, lab in zip(ranks, shuffled):
+            if lab in sums:
+                sums[lab] += r
+                sizes[lab] += 1
+            else:
+                sums[lab] = r
+                sizes[lab] = 1
+        if n < 3:
+            h = 0.0
+        else:
+            total = 0.0
+            for lab, rs in sums.items():
+                total += rs * rs / sizes[lab]
+            h = scale * total - 3 * (n + 1)
+        if h >= observed:
+            worse += 1
+    # +1 on both sides: a permutation test can never justify p = 0, and
+    # reporting one would overstate what the resampling can support.
+    return observed, (worse + 1) / (n_perm + 1)
+
+
+def plate_effects(
+    rows: list, cols: list, series: list[tuple[str, list[float]]],
+    rng: random.Random, n_perm: int, min_wells: int = 12,
+) -> list[dict]:
+    """Row, column and edge p-values for each (name, per-well values).
+
+    `rows` and `cols` give each well's position, in the order of the
+    values. A quantity with fewer than three distinct values is skipped:
+    there is nothing for position to explain. Fewer than `min_wells`
+    placed wells and nothing is tested at all - a permutation test on a
+    handful of wells cannot tell a plate effect from chance.
+    """
+    if len(rows) < min_wells:
+        return []
+    rs, cs = sorted(set(rows)), sorted(set(cols))
+    edge = ["edge" if (r in (rs[0], rs[-1]) or c in (cs[0], cs[-1]))
+            else "interior" for r, c in zip(rows, cols)]
+    findings = []
+    for name, vals in series:
+        if len(set(vals)) < 3:
+            continue
+        _h, row_p = permutation_p(vals, list(rows), rng, n_perm)
+        _h, col_p = permutation_p(vals, list(cols), rng, n_perm)
+        _h, edge_p = permutation_p(vals, edge, rng, n_perm)
+        findings.append({
+            "quantity": name,
+            "n_wells": len(rows),
+            "row_p": round(row_p, 4),
+            "col_p": round(col_p, 4),
+            "edge_p": round(edge_p, 4),
+        })
+    return findings
+
+
+# --------------------------------------------------------------------------
+# index misassignment on combinatorial plates
+# --------------------------------------------------------------------------
+#
+# On a plate indexed by combination - each i5 a row, each i7 a column -
+# a read whose i7 is misread lands in another well of the SAME ROW (it
+# keeps its i5), and a read whose i5 is misread lands in the SAME
+# COLUMN. A well sharing neither index needs both misread, and gets
+# next to nothing. So the reads of taxon T that well w receives by
+# misassignment are about
+#
+#     rate_row x (T reads in the other wells of w's row)
+#   + rate_col x (T reads in the other wells of w's column)
+#
+# where each rate is per PAIR of wells: the share of one well's reads
+# that land in one particular other well along that axis. Per pair,
+# because a misread lands on whichever declared index is nearest, so the
+# rate belongs to the index chemistry rather than to how many wells the
+# plate has - and it is comparable from run to run.
+#
+# The rates are measured on each run from the run's own data, pooled
+# over every taxon: flow cell, basecaller and library all move them. For
+# a (well, taxon) pair, true presence can only ADD to what misassignment
+# put there, so every pair's ratio reads / (reads next door) is at least
+# the rate, and the pairs where the taxon is truly absent pile up AT it.
+# The rate is that pile: the lowest well-supported mode of the ratios.
+# Nothing here needs an unused index combination, so it works on a full
+# plate; where there are unused combinations their reads give a direct
+# measurement, reported beside it as a cross-check.
+
+# Where the run cannot pin a rate, calls are still checked against this
+# one, per pair. Twice what the first combinatorial nanopore plates
+# showed (~5e-4), on the side of calling misassignment.
+MISASSIGN_DEFAULT_RATE = 1e-3
+# A pair informs the fit only when its sources hold this many reads of
+# the taxon: under ~10 expected reads a leak is lost to Poisson noise
+# and to clustering, which never forms a consensus from fewer than 5.
+MISASSIGN_MIN_SOURCE = 10000
+# Once a rate is found, a pair is kept only where it predicts this many
+# leaked reads: at a quarter of that, the 5-read minimum loses nothing.
+MISASSIGN_MIN_EXPECTED = 10.0
+# ...and when one axis carries at least this multiple of the other's
+# source reads, so the pair measures that axis.
+MISASSIGN_DOMINANCE = 3.0
+# Fewer informative pairs than this, or a mode carried by fewer pairs,
+# and the axis is not fitted.
+MISASSIGN_MIN_PAIRS = 20
+MISASSIGN_MIN_SUPPORT = 8
+# The placebo must be beaten this convincingly: with 100 shuffles, by
+# all but one. Steady contamination from the whole plate - not
+# misassignment - passed one test in sixteen at this level in
+# simulation; every real leak simulated passed.
+MISASSIGN_PLACEBO_P = 0.02
+MISASSIGN_PLACEBOS = 100
+# A fitted rate whose 95% interval spans more than this factor is not a
+# measurement.
+MISASSIGN_MAX_SPREAD = 10.0
+# Nor is a rate above this, per pair: 0.5% of a well's reads into EACH
+# other well of its row would be a tenth of the well gone on a 384-well
+# plate, three times the worst seen (1.5e-3 on the first combinatorial
+# nanopore plates; Illumina hopping at its worst, ~2% of reads spread
+# over a row, is ~1e-3). A cluster that high is shared biology - wells
+# laid out by group, a column of one host, a reagent taxon next to a
+# blank full of it - lined up with an axis, not misreads.
+MISASSIGN_MAX_RATE = 0.005
+# Half-width of the window, in log10 units, used to find the mode.
+_MODE_HALF = 0.25
+_MODE_STEP = 0.05
+# A mode must hold at least this share of the densest window's pairs.
+_MODE_REL = 0.25
+AXES = ("row", "col")
+
+
+class IndexSharing:
+    """Which wells share an index with which, and how many reads of each
+    taxon sit next door along each axis.
+
+    `geom` maps a well to its (row, column) - from the index map, the i5
+    giving the row and the i7 the column - and `counts` maps a well to
+    {taxon key: reads}. Wells without a position are simply absent.
+    """
+
+    def __init__(self, geom: dict, counts: dict):
+        self.geom = geom
+        self.counts = counts
+        self.row_tot: dict = defaultdict(int)
+        self.col_tot: dict = defaultdict(int)
+        self.tot: dict = defaultdict(int)
+        for sid, (r, c) in geom.items():
+            for k, v in (counts.get(sid) or {}).items():
+                self.row_tot[(r, k)] += v
+                self.col_tot[(c, k)] += v
+                self.tot[k] += v
+
+    def sources(self, sid: str, key) -> tuple[int, int, int]:
+        """Reads of `key` in the OTHER wells of sid's row, of its column,
+        and in wells sharing neither index."""
+        r, c = self.geom[sid]
+        y = (self.counts.get(sid) or {}).get(key, 0)
+        xr = self.row_tot[(r, key)] - y
+        xc = self.col_tot[(c, key)] - y
+        return xr, xc, self.tot[key] - xr - xc - y
+
+    def expected(self, sid: str, key, rate_row: float,
+                 rate_col: float) -> float:
+        if sid not in self.geom:
+            return 0.0
+        xr, xc, _xn = self.sources(sid, key)
+        return rate_row * xr + rate_col * xc
+
+    def pairs(self, min_source: int) -> list[tuple]:
+        """(well, reads, row sources, column sources, taxon) for every
+        placed well and every taxon with min_source reads on the run -
+        zeros included, which are as much evidence as reads."""
+        keys = [k for k, t in self.tot.items() if t >= min_source]
+        out = []
+        for sid in self.geom:
+            cs = self.counts.get(sid) or {}
+            for k in keys:
+                xr, xc, _xn = self.sources(sid, k)
+                out.append((sid, cs.get(k, 0), xr, xc, k))
+        return out
+
+
+def _quantile(vals: list[float], q: float) -> float:
+    v = sorted(vals)
+    x = q * (len(v) - 1)
+    i = int(x)
+    return v[i] if i + 1 >= len(v) else v[i] + (v[i + 1] - v[i]) * (x - i)
+
+
+def lowest_mode(logs: list[float], min_support: int = MISASSIGN_MIN_SUPPORT
+                ) -> tuple[float, int] | None:
+    """The lowest well-supported cluster in a set of log10 ratios.
+
+    Density is counted in a sliding window +-_MODE_HALF wide; the first
+    window from the bottom that holds at least min_support pairs and a
+    quarter of the densest window's is climbed to its local peak, and the
+    median of the pairs within twice the half-width of that peak is the
+    answer. Returns (log10 rate, pairs in the window), or None.
+
+    The lowest, not the densest: pairs where the taxon is really present
+    can outnumber those where it is absent (a gut bacterium in every
+    stool), and they sit above the rate, never below it.
+    """
+    import bisect
+    if len(logs) < min_support:
+        return None
+    s = sorted(logs)
+    lo, hi = s[0], s[-1]
+    grid = [lo + i * _MODE_STEP
+            for i in range(int((hi - lo) / _MODE_STEP) + 2)]
+    dens = [bisect.bisect_right(s, g + _MODE_HALF)
+            - bisect.bisect_left(s, g - _MODE_HALF) for g in grid]
+    need = max(min_support, _MODE_REL * max(dens))
+    for i, d in enumerate(dens):
+        if d < need:
+            continue
+        j = i
+        while j + 1 < len(dens) and dens[j + 1] >= dens[j]:
+            j += 1
+        c = grid[j]
+        win = [x for x in s if abs(x - c) <= 2 * _MODE_HALF]
+        return win[len(win) // 2], len(win)
+    return None
+
+
+def _axis_logs(pairs: list[tuple], axis: str, other_rate: float,
+               min_source: int, dominance: float
+               ) -> tuple[list[tuple[str, float | None]], list[int]]:
+    """(well, log10 ratio or None for nothing seen) for the pairs that
+    measure `axis`, with what the other axis is expected to have put
+    there taken off first; and their source read counts."""
+    out, xs = [], []
+    for sid, y, xr, xc, *_k in pairs:
+        x, xo = (xr, xc) if axis == "row" else (xc, xr)
+        if x < min_source or x < dominance * xo:
+            continue
+        v = y - other_rate * xo
+        out.append((sid, math.log10(v / x) if v > 0 else None))
+        xs.append(x)
+    return out, xs
+
+
+def _mostly_empty(logs: list, xs: list, rate: float) -> bool:
+    """Half or more of the pairs where `rate` predicts 20+ leaked reads
+    show none at all: the rate is not what put reads in the others."""
+    sure = [v for (_s, v), x in zip(logs, xs) if rate * x >= 20]
+    return len(sure) >= MISASSIGN_MIN_SUPPORT and \
+        sum(1 for v in sure if v is None) >= 0.5 * len(sure)
+
+
+def _low_tail_share(pairs: list[tuple], axis: str, rate: float,
+                    min_source: float, dominance: float) -> tuple[float, int]:
+    """Among the pairs whose ratio is at most half a decade above `rate`
+    (nothing seen included), the share within half a decade of it; and
+    how many pairs that is."""
+    logs, _xs = _axis_logs(pairs, axis, 0.0, min_source, dominance)
+    lr = math.log10(rate)
+    low = [v for _s, v in logs if v is None or v <= lr + 0.5]
+    if not low:
+        return 0.0, 0
+    return sum(1 for v in low if v is not None and v >= lr - 0.5) / len(low), \
+        len(low)
+
+
+def _placebo_layout(geom: dict, rng: random.Random) -> dict:
+    """The plate's wells dealt out again over its positions at random."""
+    sids = sorted(geom)
+    pos = [geom[s] for s in sids]
+    rng.shuffle(pos)
+    return dict(zip(sids, pos))
+
+
+def fit_misassignment(
+    geom: dict, counts: dict, rng: random.Random, *,
+    min_source: int = MISASSIGN_MIN_SOURCE,
+    dominance: float = MISASSIGN_DOMINANCE,
+    min_pairs: int = MISASSIGN_MIN_PAIRS,
+    min_support: int = MISASSIGN_MIN_SUPPORT,
+    max_spread: float = MISASSIGN_MAX_SPREAD,
+    max_rate: float = MISASSIGN_MAX_RATE,
+    default_rate: float = MISASSIGN_DEFAULT_RATE,
+    n_boot: int = 200, n_placebo: int = MISASSIGN_PLACEBOS,
+    placebo_p: float = MISASSIGN_PLACEBO_P,
+) -> dict:
+    """The run's per-pair misassignment rate along rows and columns.
+
+    For each axis the result says how the rate was arrived at:
+
+      fitted       measured on this run: the lowest mode of the ratios,
+                   with a 95% interval from resampling destination wells
+      upper_bound  wells that should have shown a leak mostly show
+                   nothing: the rate is below what this run can see
+      default      the run cannot measure it (too few wells next to an
+                   abundant source, no clear mode, an interval too wide,
+                   a low cluster that does not follow index sharing, or
+                   one too high to be misreading at all)
+
+    and gives two rates. `for_calls` checks each call against what
+    misassignment could have put there: the fitted rate, nothing under a
+    bound (the run showed none where it would show), else the
+    conservative default. `for_blanks` takes misassignment off
+    the blanks before they set a limit - and is the fitted rate only,
+    never an assumed one: subtracting an assumption from a blank would
+    lower every limit on a guess.
+
+    A pair is used once its sources would leak 20+ reads at the axis's
+    rate (and never under min_source reads): a leak of a few reads is
+    either lost - a consensus needs 5 - or kept only when it happened to
+    come out high, and either way it misstates the rate. The fit starts
+    from the deepest pairs for the same reason.
+
+    The validity check is a placebo. The wells are dealt out again over
+    the plate's positions at random: leakage that really follows index
+    sharing makes a tighter low cluster with the true neighbours than
+    with shuffled ones. A cluster no tighter than chance - contamination
+    from the whole plate at a steady level, say - is not misassignment,
+    and is not fitted. It cannot be told apart where the plate itself
+    is balanced so that every row (or column) holds the same heavy
+    sources: then a well's neighbours and the whole plate predict the
+    same reads, and the data cannot say which put them there.
+    """
+    out: dict = {"applicable": False, "wells_placed": len(geom),
+                 "settings": {"min_source_reads": min_source,
+                              "dominance": dominance,
+                              "min_pairs": min_pairs,
+                              "min_support": min_support,
+                              "max_spread": max_spread,
+                              "max_rate": max_rate,
+                              "default_rate": default_rate,
+                              "bootstrap": n_boot, "placebos": n_placebo,
+                              "placebo_p": placebo_p}}
+    rows = {r for r, _c in geom.values()}
+    cols = {c for _r, c in geom.values()}
+    if len(rows) < 2 or len(cols) < 2:
+        out["note"] = ("no combinatorial layout: misassignment along rows "
+                       "and columns needs at least two of each"
+                       if geom else
+                       "no plate positions (the index map gave none), so "
+                       "no well is known to share an index with another")
+        return out
+    out["applicable"] = True
+    pairs = IndexSharing(geom, counts).pairs(min_source)
+
+    def other(ax):
+        return "col" if ax == "row" else "row"
+
+    def threshold(r):
+        return max(min_source, MISASSIGN_MIN_EXPECTED / r) if r > 0 \
+            else min_source
+
+    # Start from the deepest pairs, where clustering's 5-read minimum
+    # cannot bias anything, and let the rate found there set how shallow
+    # a pair may be. Started shallow instead, the pairs that survive the
+    # minimum only by coming out high pull the rate up, a higher rate
+    # admits shallower pairs, and the two feed each other.
+    start = {}
+    for ax in AXES:
+        xs = sorted((x for _s, _y, xr, xc, *_k in pairs
+                     for x, xo in [((xr, xc) if ax == "row" else (xc, xr))]
+                     if x >= dominance * xo), reverse=True)
+        k = 4 * min_pairs
+        start[ax] = max(min_source, xs[k - 1] if len(xs) >= k else 0)
+    thr = dict(start)
+
+    # Both axes together: each is measured with what the other is
+    # expected to have added taken off - but only an axis with enough
+    # pairs to be measured at all is subtracted from the other.
+    rate = {ax: 0.0 for ax in AXES}
+    modes: dict = {}
+    logs: dict = {}
+    used: dict = {}
+    for _ in range(20):
+        new = {}
+        for ax in AXES:
+            o = other(ax)
+            sub = rate[o] if len(logs.get(o, ([], []))[0]) >= min_pairs else 0.0
+            used[ax] = thr[ax]
+            logs[ax] = _axis_logs(pairs, ax, sub, thr[ax], dominance)
+            m = lowest_mode([v for _s, v in logs[ax][0] if v is not None],
+                            min_support)
+            modes[ax] = m
+            new[ax] = 10 ** m[0] if m else 0.0
+        done = all(abs(new[a] - rate[a]) <= 1e-3 * max(new[a], 1e-12)
+                   for a in AXES)
+        rate = new
+        thr = {ax: threshold(rate[ax]) if rate[ax] else start[ax]
+               for ax in AXES}
+        if done:
+            break
+
+    for ax in AXES:
+        lg, xs = logs[ax]
+        zeros = sum(1 for _s, v in lg if v is None)
+        res = {"pairs": len(lg), "pairs_with_nothing": zeros,
+               "destination_wells": len({s for s, _v in lg}),
+               "min_source_reads": round(used[ax]),
+               "rate": None, "ci95": None, "basis": "default", "reason": ""}
+        m = modes.get(ax)
+        if len(lg) < min_pairs:
+            res["reason"] = (
+                f"too few wells next to an abundant source: {len(lg)} "
+                f"well-taxon pairs with {res['min_source_reads']:,}+ "
+                f"source reads along this axis, {min_pairs} needed")
+        elif (m is None and zeros >= 0.5 * len(lg)) or (
+                m is not None and _mostly_empty(lg, xs, rate[ax])):
+            # Wells that should show a leak mostly show nothing: the rate
+            # is below what the run can resolve, and any low cluster is
+            # something else. Bounded by the median pair: a consensus
+            # needs ~5 reads, so a leak under that is unseen.
+            bound = 5.0 / _quantile(xs, 0.5)
+            res.update(basis="upper_bound", rate=bound,
+                       reason=f"{zeros} of {len(lg)} informative pairs "
+                       "show nothing where a leak would be visible: the "
+                       f"rate is below about {bound:.1e}")
+        elif m is None:
+            res["reason"] = ("no clear low cluster of ratios to measure a "
+                             "rate from")
+        elif rate[ax] > max_rate:
+            res["reason"] = (
+                f"the lowest cluster of ratios is at {rate[ax]:.1e} per "
+                f"pair, above the {max_rate:.0e} misreading could reach: "
+                "the taxa shared along this axis are more likely the "
+                "samples' own layout (wells grouped by host or site) "
+                "than misassignment")
+        else:
+            res["rate"] = rate[ax]
+            res["mode_support"] = m[1]
+            byw: dict = defaultdict(list)
+            for s, v in lg:
+                byw[s].append(v)
+            ws = sorted(byw)
+            boots = []
+            for _ in range(n_boot):
+                pick = [v for w in (rng.choice(ws) for _w in ws)
+                        for v in byw[w] if v is not None]
+                bm = lowest_mode(pick, min_support)
+                boots.append(10 ** bm[0] if bm else math.inf)
+            boots.sort()
+            lo = boots[int(0.025 * n_boot)]
+            hi = boots[min(n_boot - 1, int(math.ceil(0.975 * n_boot)) - 1)]
+            res["ci95"] = [lo, hi]
+            # The placebo: of the pairs at or below the rate's window, how
+            # many sit IN it? Where the rate is real, a well's reads of a
+            # taxon it lacks track what ITS neighbours hold, so those
+            # pairs pile up there; deal the wells out over the plate at
+            # random and the same reads, divided by the wrong neighbours,
+            # scatter. Reads that arrive some other way - a steady level
+            # from the whole plate, say - track the true neighbours no
+            # better than shuffled ones. Presence sits above the window
+            # either way, so it is left out rather than diluting this.
+            # Nothing is taken off for the other axis, which a shuffled
+            # plate has no rate for.
+            tight, n_low = _low_tail_share(pairs, ax, rate[ax], used[ax],
+                                           dominance)
+            beaten = 0
+            for _ in range(n_placebo):
+                pp = IndexSharing(_placebo_layout(geom, rng), counts
+                                  ).pairs(min_source)
+                if _low_tail_share(pp, ax, rate[ax], used[ax],
+                                   dominance)[0] >= tight:
+                    beaten += 1
+            if n_low < min_support:
+                beaten = n_placebo
+            res["placebo_p"] = round((beaten + 1) / (n_placebo + 1), 4)
+            res["low_tail_share"] = round(tight, 4)
+            if not math.isfinite(hi) or hi > max_spread * lo:
+                res.update(rate=None, reason=(
+                    "the run's data do not pin the rate: its 95% interval "
+                    f"spans {lo:.1e} to {hi:.1e}"))
+            elif res["placebo_p"] > placebo_p:
+                res.update(rate=None, reason=(
+                    "the low cluster of ratios is no tighter with each "
+                    "well's true neighbours than with the wells shuffled "
+                    f"over the plate (placebo p {res['placebo_p']}): what "
+                    "it measures does not follow index sharing"))
+            else:
+                res["basis"] = "fitted"
+        out[ax] = res
+
+    # A bound means the wells that should show a leak show nothing, so
+    # there is nothing to check calls against: zero, as for the blanks.
+    out["for_calls"] = {ax: (0.0 if out[ax]["basis"] == "upper_bound"
+                             else out[ax]["rate"] if out[ax]["rate"] is not None
+                             else default_rate) for ax in AXES}
+    out["for_calls_upper"] = {
+        ax: (out[ax]["ci95"][1] if out[ax]["basis"] == "fitted"
+             else out["for_calls"][ax]) for ax in AXES}
+    out["for_blanks"] = {ax: (out[ax]["rate"] if out[ax]["basis"] == "fitted"
+                              else 0.0) for ax in AXES}
+    return out
+
+
+def sentinel_rates(matrix: list[dict], fitted: dict | None = None,
+                   dominance: float = MISASSIGN_DOMINANCE) -> dict | None:
+    """The direct measurement, where the plate has unused combinations.
+
+    A read on an index pair no well claims can only be misassignment, so
+    its count against the reads of its row (same i5) and its column (same
+    i7) measures the per-pair rates outright: the median over the unused
+    cells where that axis carries most of the source reads, with what the
+    other axis is expected to have added taken off - by alternation where
+    both axes can be measured, else at `fitted` (the run's own fit).
+    `matrix` is the demultiplexer's index_matrix.tsv. Counted over every
+    demultiplexed read, classified or not, so it can differ somewhat from
+    the fitted rates, which are over classified reads. None without
+    unused combinations.
+    """
+    rows: dict = defaultdict(int)
+    cols: dict = defaultdict(int)
+    cells = []
+    for r in matrix:
+        n = int(r.get("reads") or 0)
+        if r.get("assigned") == "yes":
+            rows[r["index_i5"]] += n
+            cols[r["index_i7"]] += n
+        else:
+            cells.append((r["index_i5"], r["index_i7"], n))
+    if not cells:
+        return None
+    out: dict = {"unused_combinations": len(cells),
+                 "reads_on_unused": sum(n for _a, _b, n in cells)}
+    rate = {ax: (fitted or {}).get(ax) or 0.0 for ax in AXES}
+    found: dict = {}
+    for _ in range(12):
+        for ax in AXES:
+            other = rate["col" if ax == "row" else "row"]
+            ratios = []
+            for a, b, n in cells:
+                x, xo = ((rows[a], cols[b]) if ax == "row"
+                         else (cols[b], rows[a]))
+                if x and x >= dominance * xo:
+                    ratios.append(max(0.0, n - other * xo) / x)
+            found[ax] = ratios
+            if ratios:
+                rate[ax] = _quantile(ratios, 0.5)
+    for ax in AXES:
+        r = found[ax]
+        out[ax] = ({"rate": _quantile(r, 0.5), "range": [min(r), max(r)],
+                    "cells": len(r)} if r else None)
     return out

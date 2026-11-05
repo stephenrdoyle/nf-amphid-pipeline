@@ -295,6 +295,48 @@ def test_hopping_lands_in_sentinels() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_misread_one_index() -> None:
+    """--misread-i5/i7-rate: one index read as another of the plate's,
+    so the read keeps the other end - the same column or the same row -
+    unlike hopping, which rewrites the pair. Off unless asked for."""
+    print("\none index misread")
+    tmp = tempfile.mkdtemp()
+    try:
+        build(tmp, "nanopore", 24, 4)
+        truth = run_sim(tmp)
+        check("no misreads unless asked for",
+              not any(r["fate"].startswith("misread") for r in truth))
+        truth = run_sim(tmp, ["--hop-rate", "0", "--misread-i5-rate", "0.02",
+                              "--misread-i7-rate", "0.01"])
+        n = len(truth)
+        f = Counter(r["fate"] for r in truth)
+        clean_ish = n * (1 - 0.02 - 0.002 - 0.005)
+        check("i5 misreads at the rate asked for",
+              near(f["misread_i5"] / clean_ish, 0.02, 0.006),
+              f"{f['misread_i5']}/{n}")
+        check("i7 misreads at the rate asked for",
+              near(f["misread_i7"] / clean_ish, 0.0098, 0.004),
+              f"{f['misread_i7']}/{n}")
+        sheet = list(csv.DictReader(open(os.path.join(tmp,
+                                                      "samplesheet.csv"))))
+        by_pair = {(s["index_i5"], s["index_i7"]): s["sample_id"]
+                   for s in sheet}
+        i5s = {s["index_i5"] for s in sheet}
+        i7s = {s["index_i7"] for s in sheet}
+        mis = [r for r in truth if r["fate"].startswith("misread")]
+        check("a misread index is another of the plate's own",
+              all(r["index_i5"] in i5s and r["index_i7"] in i7s
+                  for r in mis))
+        check("and the read goes to the well with that pair, or to none",
+              all(r["sample_id"] == by_pair.get(
+                  (r["index_i5"], r["index_i7"]), "_unassigned")
+                  for r in mis))
+        check("some land on an unused combination",
+              any(r["sample_id"] == "_unassigned" for r in mis))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_outputs() -> None:
     print("\noutput files")
     tmp = tempfile.mkdtemp()
@@ -388,6 +430,7 @@ def main() -> int:
     test_rates()
     test_biology()
     test_hopping_lands_in_sentinels()
+    test_misread_one_index()
     test_outputs()
     test_no_spike()
     test_determinism()

@@ -30,6 +30,35 @@ JUDGED AGAINST THE BLANKS AND A RELATIVE FLOOR
     thousand. Without blanks the limit is the fixed floor, and every call
     says it is an assumption.
 
+INDEX MISASSIGNMENT, MEASURED ON EACH RUN
+    Plates are indexed by combination - the i5 is the row, the i7 the
+    column - so a read with one index misread lands in a well that shares
+    the other: same row, or same column. A heavy well therefore leaks a
+    small, predictable share of its reads along its row and its column,
+    and a blank in that row or column looks contaminated by it. The
+    run's per-pair rates along each axis are measured from the run's own
+    calls (ampseqlib.fit_misassignment: every taxon in every well is a
+    measurement of how much of its neighbours' reads arrived), and then:
+
+      a blank's reads that misassignment explains do not raise the limit
+        - only a rate the run measured is taken off, never an assumed one
+      a call no larger than misassignment could have made it is
+        'misassigned', not 'detected'
+      every call carries the reads misassignment is expected to have put
+        there, and its excess over them
+
+    Where the run cannot measure a rate - too few wells, no abundant
+    source, no structure that follows the indexes - calls are checked
+    against a conservative default instead and the report says so.
+    Unused index combinations, where a plate has them, give a direct
+    measurement that is reported beside the fit as a cross-check.
+
+PLATE POSITION
+    Row, column and edge effects on depth, on each organism group's share
+    and on each common taxon's share, by permutation, as the panel
+    synthesis does (ampseqlib.plate_effects). Wells hold unrelated
+    samples; position should explain nothing.
+
 ORGANISM GROUPS
     Every call is put in one group, the way VESPA reports (Owens et al.
     2024, Figs 3-5): first every well as shares of all its classified
@@ -72,17 +101,26 @@ import glob
 import json
 import math
 import os
+import random
 import re
 import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, load_rank_names, load_release_manifest, rank_meaning, read_table,
-    release_version, restore_declared_ids, writer,
+    MISASSIGN_DEFAULT_RATE, RANKS, IndexSharing, fit_misassignment,
+    load_rank_names, load_release_manifest, plate_effects, rank_meaning,
+    read_table, release_version, restore_declared_ids, sentinel_rates,
+    writer,
 )
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
+# Kept out of the plate-position tests, as in the panel synthesis: a
+# positive control is deliberately loaded and would fake an effect.
+NOT_FIELD = NEGATIVE_TYPES | {"pos_control"}
+# Common taxa tested for position effects, at most, beside depth and the
+# groups: each costs three permutation tests.
+PLATE_TAXA = 12
 # The identity in a label ("97% to", "R1 74% to"), left out when pooling.
 LABEL_PCT = re.compile(r"\d+% to ")
 
@@ -93,11 +131,17 @@ def run_label(label: str) -> str:
     in another are one taxon, "Entamoebidae (nearest Entamoeba)"."""
     return LABEL_PCT.sub("nearest ", label)
 
-CALLS = ("detected", "below_blanks", "below_floor", "low_depth", "chimera")
+CALLS = ("detected", "below_blanks", "misassigned", "below_floor",
+         "low_depth", "chimera")
 CALL_MEANING = {
     "detected": "above the run's blank-derived limit and the relative "
-                "abundance floor",
-    "below_blanks": "no more reads than the blanks show for this taxon",
+                "abundance floor, and more than index misassignment from "
+                "the wells sharing an index could have put there",
+    "below_blanks": "no more reads than the blanks show for this taxon, "
+                    "once the blanks' own misassigned reads are taken off",
+    "misassigned": "above the blanks, but no more reads than index "
+                   "misassignment from the wells sharing its i5 or i7 is "
+                   "expected to have put there (misassign_expected)",
     "below_floor": "above the blanks, but under the relative abundance floor",
     "low_depth": "the well has fewer clustered reads than --min-depth, so "
                  "nothing in it is called",
@@ -253,20 +297,34 @@ def fragile_species(calls: list[dict]) -> list[dict]:
     return sorted(by.values(), key=lambda f: (-len(f["samples"]), f["taxon"]))
 
 
-def blank_limits(wells: dict, rows: dict, min_fraction_depth: int) -> dict:
+def blank_limits(wells: dict, rows: dict, min_fraction_depth: int,
+                 misassigned=None) -> dict:
     """Per (rank, taxon): the most reads, and the largest share, any blank
     showed. Shares only from blanks deep enough for a share to mean
     anything - an NTC of three reads with one stray is not a 33%
-    carryover rate (the panel synthesis learnt that the hard way)."""
+    carryover rate (the panel synthesis learnt that the hard way).
+
+    `misassigned(sid, row)` is what index misassignment is expected to
+    have put in a blank (the run's measured rate only). It comes off the
+    blank's reads first: a blank sharing an i7 with a column of heavy
+    wells holds their reads by misreading, not by contamination, and a
+    limit raised by them would suppress real calls in every deep well.
+    Rounded, so a rate of about zero leaves every limit as it was."""
     blanks = [w for w in wells.values() if w.sample_type in NEGATIVE_TYPES]
-    out: dict = defaultdict(lambda: {"reads": 0, "fraction": 0.0})
+    out: dict = defaultdict(lambda: {"reads": 0, "fraction": 0.0,
+                                     "net_of_misassignment": False})
     for w in blanks:
         for r in rows[w.sid]:
             k = (r["rank"], r["taxon"])
-            out[k]["reads"] = max(out[k]["reads"], r["reads"])
+            n = r["reads"]
+            if misassigned is not None:
+                e = int(round(misassigned(w.sid, r)))
+                if e:
+                    out[k]["net_of_misassignment"] = True
+                n = max(0, n - e)
+            out[k]["reads"] = max(out[k]["reads"], n)
             if w.depth >= min_fraction_depth and w.depth:
-                out[k]["fraction"] = max(out[k]["fraction"],
-                                         r["reads"] / w.depth)
+                out[k]["fraction"] = max(out[k]["fraction"], n / w.depth)
     return out, len(blanks)
 
 
@@ -486,6 +544,23 @@ def main(argv=None) -> int:
     ap.add_argument("--host-clade", default="Craniata",
                     help="a name anywhere in the lineage that marks host "
                     "reads (PR2: Craniata = vertebrates)")
+    ap.add_argument("--index-matrix",
+                    help="the demultiplexer's index_matrix.tsv: reads on "
+                    "unused index combinations, a direct measure of "
+                    "misassignment to set beside the fitted one")
+    ap.add_argument("--misassign-default-rate", type=float,
+                    default=MISASSIGN_DEFAULT_RATE,
+                    help="per-pair misassignment rate calls are checked "
+                    "against where the run cannot measure its own; never "
+                    "taken off the blanks")
+    ap.add_argument("--misassign-margin", type=float, default=2.0,
+                    help="how far above the run's typical rate one pair of "
+                    "indexes may leak before a call is not misassignment: "
+                    "a misread lands on the NEAREST index, so some pairs "
+                    "leak more than others")
+    ap.add_argument("--permutations", type=int, default=2000,
+                    help="for the plate-position tests")
+    ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument("--outdir", default="synthesis")
     args = ap.parse_args(argv)
 
@@ -499,6 +574,18 @@ def main(argv=None) -> int:
     types = {r["sample_id"]: r.get("sample_type", "") for r in declared}
     for sid, w in wells.items():
         w.sample_type = types.get(sid, "")
+    # Plate position, as pre-flight derived it from the index map: the i5
+    # gives the row and the i7 the column, so a shared row IS a shared i5.
+    # Without it the misassignment model and the position tests are
+    # skipped, not guessed from sample order.
+    geom: dict = {}
+    for r in declared:
+        try:
+            col = int(r.get("plate_col") or 0)
+        except ValueError:
+            col = 0
+        if r.get("plate_row") and col:
+            geom[r["sample_id"]] = (r["plate_row"], col)
 
     # Every declared sample must arrive, or the blanks this synthesis
     # leans on might be the ones that went missing. A well the
@@ -546,12 +633,57 @@ def main(argv=None) -> int:
                  else "")
             r["rank_meaning"] = "" if m == r["rank"] else m
             r["depth"] = depth_bucket(r["rank"], m)
-    limits, n_blanks = blank_limits(wells, rows, args.min_depth)
+    # -- index misassignment -----------------------------------------------
+    # Every taxon in every placed well, chimeras aside, by (rank, taxon) -
+    # the key the blank limits use. Empty wells are placed too: they
+    # receive misassigned reads like any other.
+    by_key: dict = {}
+    for sid in geom:
+        c = Counter()
+        for r in rows.get(sid, []):
+            if r["group"] != "chimera":
+                c[(r["rank"], r["taxon"])] += r["reads"]
+        by_key[sid] = dict(c)
+    rng = random.Random(args.seed)
+    mis = fit_misassignment(geom, by_key, rng,
+                            default_rate=args.misassign_default_rate)
+    sharing = IndexSharing(geom, by_key)
+    if mis.get("applicable"):
+        # The most a pair of wells could plausibly leak, per axis: a
+        # fitted rate times the margin or the top of its interval,
+        # whichever is more; a bound or the default as it stands - each
+        # is already the high side of what the run allows.
+        mis["margin"] = args.misassign_margin
+        mis["for_calls_reach"] = {
+            ax: (max(args.misassign_margin * mis["for_calls"][ax],
+                     mis["for_calls_upper"][ax])
+                 if mis[ax]["basis"] == "fitted" else mis["for_calls"][ax])
+            for ax in ("row", "col")}
+
+    def expected(sid: str, r: dict, which: str) -> float:
+        """Reads misassignment is expected to have put in this row of a
+        well, at the rates for `which` ('for_calls', 'for_calls_reach',
+        'for_blanks'). A (rank, taxon) can span rows with different
+        labels; each gets its share of the taxon's expectation."""
+        if not mis.get("applicable") or sid not in geom or \
+                r["group"] == "chimera":
+            return 0.0
+        k = (r["rank"], r["taxon"])
+        tot = by_key[sid].get(k, 0)
+        rate = mis[which]
+        e = sharing.expected(sid, k, rate["row"], rate["col"])
+        return e * r["reads"] / tot if tot else e
+
+    limits, n_blanks = blank_limits(
+        wells, rows, args.min_depth,
+        (lambda sid, r: expected(sid, r, "for_blanks"))
+        if mis.get("applicable") else None)
 
     os.makedirs(args.outdir, exist_ok=True)
     call_cols = ["run_id", "sample_id", "sample_type", "rank", "taxon",
                  "label", "reads", "rel_abundance", "call", "limit_reads",
-                 "limit_basis", "identity", "clusters", "lineage",
+                 "limit_basis", "misassign_expected", "misassign_excess",
+                 "identity", "clusters", "lineage",
                  "group", "group_reads", "group_share", "primer_fit",
                  "margin", "rank_meaning", "database_version"]
     calls = []
@@ -578,12 +710,28 @@ def main(argv=None) -> int:
                          "proportional: share of a blank" if prop + 1 == limit
                          and prop else "fixed floor - blanks were clean "
                          "for this taxon")
+                if lim and lim["net_of_misassignment"]:
+                    basis = ("fixed floor - blanks clean for this taxon "
+                             "once their reads are net of index "
+                             "misassignment" if basis.startswith("fixed")
+                             else basis + "; the blanks' reads net of "
+                             "index misassignment")
+            # What misassignment could have put here (for_calls_reach),
+            # with Poisson noise on top. A call under that is not evidence
+            # of the taxon in this well. Under one read, nothing could
+            # have, so a rate of about zero changes no call.
+            exp = expected(sid, r, "for_calls")
+            reach = expected(sid, r, "for_calls_reach")
+            explained = mis.get("applicable") and reach >= 1 and \
+                r["reads"] <= reach + 3 * math.sqrt(reach)
             if r["group"] == "chimera":
                 call = "chimera"
             elif w.depth < args.min_depth:
                 call = "low_depth"
             elif r["reads"] < limit:
                 call = "below_blanks"
+            elif explained:
+                call = "misassigned"
             elif rel < args.min_rel_abundance:
                 call = "below_floor"
             else:
@@ -594,6 +742,11 @@ def main(argv=None) -> int:
                 "taxon": r["taxon"], "label": r["label"],
                 "reads": r["reads"], "rel_abundance": f"{rel:.6f}",
                 "call": call, "limit_reads": limit, "limit_basis": basis,
+                # Blank where the plate has no positions to model.
+                "misassign_expected": f"{exp:.1f}"
+                if mis.get("applicable") and r["group"] != "chimera" else "",
+                "misassign_excess": f"{r['reads'] - exp:.1f}"
+                if mis.get("applicable") and r["group"] != "chimera" else "",
                 "identity": f"{r['identity']:.4f}", "clusters": r["clusters"],
                 "lineage": r["lineage"], "group": r["group"],
                 "group_reads": in_group[r["group"]],
@@ -703,6 +856,66 @@ def main(argv=None) -> int:
                          "max_share_in_group": f"{p['max_share']:.4f}",
                          "database_version": version})
 
+    # -- plate position --------------------------------------------------
+    # Field wells only, as in the panel synthesis. Shares, not reads, for
+    # the groups and taxa: a row effect in depth would otherwise come
+    # back as a row effect in everything.
+    placed = [sid for sid in sorted(wells) if sid in geom
+              and wells[sid].sample_type not in NOT_FIELD]
+    series = [("depth", [float(wells[sid].depth) for sid in placed])]
+    grp_reads = {w2["sample_id"]: w2 for w2 in wells_out}
+    for g in GROUPS:
+        series.append((f"{g} share", [
+            int(grp_reads[sid][f"{g}_reads"]) / wells[sid].depth
+            if wells[sid].depth else 0.0 for sid in placed]))
+    seen = Counter((c["rank"], c["taxon"]) for c in calls
+                   if c["sample_id"] in placed and c["call"] == "detected")
+    names = {(c["rank"], c["taxon"]): run_label(c["label"]) for c in calls}
+    for k, n in sorted(seen.items(), key=lambda kv: (-kv[1], kv[0])
+                       )[:PLATE_TAXA]:
+        if n < 3:
+            break
+        series.append((names[k], [
+            sum(r["reads"] for r in rows[sid]
+                if (r["rank"], r["taxon"]) == k) / wells[sid].depth
+            if wells[sid].depth else 0.0 for sid in placed]))
+    geometry = plate_effects([geom[sid][0] for sid in placed],
+                             [geom[sid][1] for sid in placed], series,
+                             random.Random(args.seed), args.permutations)
+
+    # -- index misassignment, for the record -----------------------------
+    matrix = (read_table(args.index_matrix)
+              if args.index_matrix and os.path.exists(args.index_matrix)
+              else [])
+    mis["unused_combinations"] = (sentinel_rates(matrix, mis.get("for_calls"))
+                                  if matrix else None)
+    # Two measurements of one thing: say where they part company. The
+    # unused cells count every read and the fit classified ones, so some
+    # difference is expected; five-fold is not that.
+    disagree = []
+    for ax in ("row", "col"):
+        su = (mis["unused_combinations"] or {}).get(ax)
+        fa = mis.get(ax) or {}
+        if su and su["rate"] > 0 and fa.get("basis") == "fitted" and \
+                not 0.2 <= fa["rate"] / su["rate"] <= 5:
+            disagree.append(ax)
+    if mis.get("applicable"):
+        mis["fit_and_unused_disagree"] = disagree
+    if mis.get("applicable"):
+        mis["calls_misassigned"] = sum(1 for c in calls
+                                       if c["call"] == "misassigned")
+        # Blank taxa that misassignment explains, largest first: what
+        # would have raised a limit and no longer does.
+        mis["blanks_explained"] = sorted(
+            ({"sample_id": c["sample_id"], "rank": c["rank"],
+              "taxon": c["taxon"], "reads": c["reads"],
+              "expected": float(c["misassign_expected"])}
+             for c in calls if c["sample_type"] in NEGATIVE_TYPES
+             and c["misassign_expected"]
+             and float(c["misassign_expected"]) >= 0.5 * c["reads"]
+             and c["reads"] >= args.absolute_floor),
+            key=lambda b: -b["reads"])[:30]
+
     split = {}
     if args.split_summary and os.path.exists(args.split_summary):
         with open(args.split_summary, encoding="utf-8") as fh:
@@ -726,6 +939,11 @@ def main(argv=None) -> int:
                                      .get("floors") for w in wells.values()
                                      if w.summary), None)},
         "call_meaning": CALL_MEANING,
+        # The run's per-pair index misassignment rates along rows (i7
+        # misread) and columns (i5 misread): how they were arrived at,
+        # what they rest on, and what they did to the calls. Kept per
+        # run so drift between flow cells and basecallers shows.
+        "index_misassignment": mis,
         "groups": {"order": list(GROUPS), "target": list(TARGET_GROUPS),
                    "helminth_classes": sorted(HELMINTH_CLASSES)},
         "samples_tested": len(tested),
@@ -778,6 +996,17 @@ def main(argv=None) -> int:
                          if c["label"].startswith("windows disagree")),
             "samples": len({c["sample_id"] for c in calls
                             if c["label"].startswith("windows disagree")})},
+        "plate_geometry": geometry,
+        "plate_geometry_note": (
+            "Wells hold unrelated samples, so position should explain "
+            "nothing. A small p-value is evidence about the plate - a "
+            "channel, a gradient, evaporation at the edges - not about the "
+            "samples. These are unadjusted for multiple testing; with one "
+            "test per quantity per axis, expect roughly one in twenty to "
+            "fall below 0.05 by chance alone. Index misassignment also "
+            "runs along rows and columns: a taxon with a row or column "
+            "effect and a heavy source in that row or column may be "
+            "showing it."),
         "near_3prime_calls": sorted(
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),
@@ -788,6 +1017,12 @@ def main(argv=None) -> int:
     print(f"database synthesis: {len(wells)} wells, "
           f"{qc['calls'].get('detected', 0)} detected calls, "
           f"{len(blanks)} blanks, release {version}")
+    if mis.get("applicable"):
+        print("    index misassignment per pair: " + ", ".join(
+            f"{ax} {mis[ax]['basis']}"
+            + (f" {mis[ax]['rate']:.2e}" if mis[ax]["rate"] else "")
+            for ax in ("row", "col"))
+            + f"; {mis.get('calls_misassigned', 0)} call(s) misassigned")
     return 0
 
 

@@ -221,6 +221,15 @@ ENDS_ORDER = (
      "an insertion or deletion shifted one copy"))
 
 
+def mis_cell(c: dict) -> str:
+    """Expected misassigned reads, the excess over them on hover."""
+    e = c.get("misassign_expected") or ""
+    if not e:
+        return "—"
+    return (f"<span title='{esc(c.get('misassign_excess', ''))} reads over "
+            f"it'>{fmt(round(float(e)))}</span>")
+
+
 def rank_cell(c: dict) -> str:
     """PR2's column, and what it really is for this clade where that
     differs (rank_names.tsv): "family = order" for a nematode."""
@@ -321,6 +330,149 @@ def barcode_ends_html(be: dict) -> str:
     return "".join(out)
 
 
+AXIS_WORDS = {
+    "row": ("same row", "shares the i5; the i7 was misread"),
+    "col": ("same column", "shares the i7; the i5 was misread"),
+}
+BASIS_WORDS = {
+    "fitted": "measured on this run",
+    "upper_bound": "below what this run can see",
+    "default": "not measurable on this run: default used",
+}
+
+
+def rate_txt(x) -> str:
+    """A per-pair rate as a percentage with two significant figures."""
+    if x is None:
+        return "—"
+    return f"{100 * x:.2g}%"
+
+
+def misassignment_html(mis: dict) -> str:
+    """The run's index misassignment: the two per-pair rates, what they
+    rest on, the unused combinations beside them, and what they changed."""
+    out = ["<h2 id='misassign'>Index misassignment</h2>"]
+    if not mis.get("applicable"):
+        out.append("<p class='note'>Not modelled: "
+                   + esc(mis.get("note") or "no plate positions") + ".</p>")
+        return "".join(out)
+    out.append(
+        "<p>The plate is indexed by combination: each i5 is a row and each "
+        "i7 a column. A read with one index misread lands in a well that "
+        "shares the other - the same row or the same column - so a heavy "
+        "well leaks a small share of its reads along both, and a blank "
+        "next to it looks contaminated. The rates below are <b>per pair of "
+        "wells</b>: the share of one well's reads that lands in one "
+        "particular other well. They are measured from this run's own "
+        "calls, pooled over every taxon, and used two ways: a blank's "
+        "reads that misassignment explains do not raise the detection "
+        "limit, and a call no larger than misassignment could make is "
+        "<i>misassigned</i> rather than <i>detected</i>.</p>")
+    su = mis.get("unused_combinations") or {}
+    rows = []
+    for ax in ("row", "col"):
+        a = mis.get(ax) or {}
+        name, what = AXIS_WORDS[ax]
+        basis = a.get("basis", "")
+        # An interval only for a rate that was accepted; a rejected one's
+        # is in its reason.
+        ci = a.get("ci95") if basis == "fitted" else None
+        lev = {"fitted": "ok", "upper_bound": "ok"}.get(basis, "warn")
+        direct = su.get(ax) if su else None
+        rows.append(
+            f"<tr><td>{name}<br><span class='note'>{what}</span></td>"
+            f"<td class='num'>{rate_txt(a.get('rate'))}</td>"
+            f"<td class='num'>{'—' if not ci else rate_txt(ci[0]) + ' – ' + rate_txt(ci[1])}</td>"
+            f"<td>{flag(lev, BASIS_WORDS.get(basis, basis))}"
+            + (f"<br><span class='note'>{esc(a['reason'])}</span>"
+               if a.get("reason") else "")
+            + f"</td><td class='num'>{fmt(a.get('pairs'))}</td>"
+            f"<td class='num'>{rate_txt(mis['for_calls'][ax])}</td>"
+            f"<td class='num'>{rate_txt(direct['rate']) if direct else '—'}"
+            + (f"<br><span class='note'>{direct['cells']} cell"
+               f"{'' if direct['cells'] == 1 else 's'}, "
+               f"{rate_txt(direct['range'][0])}–{rate_txt(direct['range'][1])}"
+               "</span>" if direct else "")
+            + "</td></tr>")
+    out.append(
+        "<table><thead><tr><th>Misassigned into</th>"
+        "<th class='num'>Rate per pair</th><th class='num'>95% interval</th>"
+        "<th>Basis</th><th class='num'>Pairs</th>"
+        "<th class='num'>Calls checked at</th>"
+        "<th class='num'>Unused combinations</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table>")
+    notes = [
+        "<i>Pairs</i>: well-taxon pairs with enough reads of the taxon next "
+        "door to show a leak; most hold the taxon for real, and sit above "
+        "the rate. The rate is where the pairs without it pile up, and it "
+        "is accepted only when that pile is tighter with each well's true "
+        "neighbours than with the wells shuffled over the plate.",
+        "<i>Calls checked at</i>: the rate each call is compared with. A "
+        "rate that could not be measured is checked at the conservative "
+        f"default ({rate_txt(mis['settings']['default_rate'])} per pair) "
+        "and is <b>not</b> taken off the blanks; one below what the run "
+        "can see is not checked at all; a fitted rate is "
+        f"allowed {mis.get('margin', 2):g}x for index pairs that leak more "
+        "than most (a misread lands on the nearest index).",
+    ]
+    if su:
+        notes.append(
+            f"<i>Unused combinations</i>: {fmt(su.get('unused_combinations'))} "
+            "index pairs no well claims, holding "
+            f"{fmt(su.get('reads_on_unused'))} reads - which can only be "
+            "misassignment. Measured over every demultiplexed read rather "
+            "than classified ones, so some difference from the fit is "
+            "expected; it is a cross-check, and a full plate has none.")
+    for ax in mis.get("fit_and_unused_disagree") or []:
+        notes.append(flag("warn", "disagree") + f" Along the "
+                     f"{AXIS_WORDS[ax][0]}, the fit and the unused "
+                     "combinations differ more than five-fold: one of them "
+                     "is not measuring misreads. Wells laid out by group "
+                     "along that axis can look like misassignment to the "
+                     "fit.")
+    out.append("<ul>" + "".join(f"<li class='note'>{n}</li>" for n in notes)
+               + "</ul>")
+    be = mis.get("blanks_explained") or []
+    if be:
+        out.append(
+            "<h3>Blank reads explained by misassignment</h3><p>Reads in "
+            "the blanks that misassignment from wells sharing an index "
+            "accounts for at least half of. Only a <i>measured</i> rate is "
+            "taken off a blank before it sets a limit.</p>"
+            "<div class='scroll' style='max-height:240px'><table><thead><tr>"
+            "<th>blank</th><th>taxon</th><th class='num'>reads</th>"
+            "<th class='num'>expected from misassignment</th></tr></thead>"
+            "<tbody>" + "".join(
+                f"<tr><td>{esc(b['sample_id'])}</td>"
+                f"<td>{esc(b['taxon'])} <span class='note'>{esc(b['rank'])}"
+                f"</span></td><td class='num'>{fmt(b['reads'])}</td>"
+                f"<td class='num'>{fmt(round(b['expected']))}</td></tr>"
+                for b in be) + "</tbody></table></div>")
+    return "".join(out)
+
+
+def plate_html(qc: dict) -> str:
+    geo = qc.get("plate_geometry") or []
+    if not geo:
+        return ""
+    out = ["<h2 id='plate'>Plate position</h2>",
+           "<p>Row, column and edge effects on depth, on each organism "
+           "group's share of the well and on the commonest taxa's, by "
+           "permutation (field samples only). p under 0.01 is flagged.</p>",
+           "<table><thead><tr><th>Quantity</th><th class='num'>Row p</th>"
+           "<th class='num'>Column p</th><th class='num'>Edge p</th>"
+           "</tr></thead><tbody>"]
+    for g in geo:
+        def cell(p):
+            return (f"<td class='num'>{flag('warn', f'{p:.4f}')}</td>"
+                    if p < 0.01 else f"<td class='num'>{p:.4f}</td>")
+        out.append(f"<tr><td>{esc(g['quantity'])}</td>" + cell(g["row_p"])
+                   + cell(g["col_p"]) + cell(g["edge_p"]) + "</tr>")
+    out.append("</tbody></table>")
+    out.append(f"<p class='note'>{esc(qc.get('plate_geometry_note', ''))}</p>")
+    return "".join(out)
+
+
 def build(args) -> str:
     d = args.synthesis_dir
     calls = read_table(os.path.join(d, "db_calls.tsv"))
@@ -367,7 +519,9 @@ def build(args) -> str:
              + " · ".join(f"<a href='#{g}'>{GROUP_LABEL[g]}</a>"
                           for g in DETAIL)
              + " · <a href='#offtarget'>off-target</a> · <a href='#rank'>"
-             "naming depth</a> · <a href='#calls'>every call</a></p>")
+             "naming depth</a> · <a href='#misassign'>index "
+             "misassignment</a> · <a href='#plate'>plate position</a> · "
+             "<a href='#calls'>every call</a></p>")
 
     # -- the read funnel, as in the panel report -------------------------
     # The per-well figures start at reads that reached a sample, already
@@ -501,6 +655,36 @@ def build(args) -> str:
                 f"{'' if f['margin'] == 1 else 's'}, {len(f['samples'])} "
                 f"sample{'' if len(f['samples']) == 1 else 's'})"
                 for f in tf[:20])) + (" …" if len(tf) > 20 else "") + ".")
+    mis = qc.get("index_misassignment") or {}
+    if mis.get("applicable"):
+        fitted = [ax for ax in ("row", "col")
+                  if (mis.get(ax) or {}).get("basis") == "fitted"]
+        items.append(
+            flag("ok" if len(fitted) == 2 else "warn", "misassignment")
+            + " Index misassignment per pair of wells: "
+            + "; ".join(
+                f"{AXIS_WORDS[ax][0]} "
+                + (rate_txt(mis[ax]["rate"]) if mis[ax].get("rate") is not None
+                   else "not measured")
+                + f" ({BASIS_WORDS.get(mis[ax]['basis'], '')})"
+                for ax in ("row", "col"))
+            + f". {fmt(mis.get('calls_misassigned', 0))} call(s) were no "
+            "larger than misassignment from wells sharing an index could "
+            "make them"
+            + (f", and {len(mis['blanks_explained'])} blank taxa were "
+               "largely explained by it" if mis.get("blanks_explained")
+               else "")
+            + ". See <a href='#misassign'>index misassignment</a>.")
+    geo = [g for g in qc.get("plate_geometry") or []
+           if min(g["row_p"], g["col_p"], g["edge_p"]) < 0.01]
+    if geo:
+        items.append(
+            flag("warn", "plate position") + f" {len(geo)} quantit"
+            f"{'y varies' if len(geo) == 1 else 'ies vary'} with position "
+            "on the plate (p &lt; 0.01): " + esc(", ".join(
+                g["quantity"] for g in geo[:8]))
+            + (" …" if len(geo) > 8 else "")
+            + ". See <a href='#plate'>plate position</a>.")
     near = qc.get("near_3prime_calls") or []
     if near:
         items.append(flag("warn", "primer fit") + " Detected with a best hit "
@@ -509,6 +693,9 @@ def build(args) -> str:
                      "sample: " + esc("; ".join(near[:20]))
                      + (" …" if len(near) > 20 else "") + ".")
     P.append("<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>")
+
+    P.append(misassignment_html(mis))
+    P.append(plate_html(qc))
 
     # -- all reads, by group (VESPA Figs 3a, 4a) --------------------------
     present = [g for g, _c, _l in GROUP_STYLE
@@ -668,7 +855,8 @@ def build(args) -> str:
                 "<p class='note'>A number is the taxon's percentage within "
                 f"the well's {GROUP_LABEL[g]}, where it was detected; a dot "
                 "means it was seen but not called (below the blanks or the "
-                "relative floor; hover for which). Prevalence counts samples "
+                "relative floor, or no more than index misassignment could "
+                "put there; hover for which). Prevalence counts samples "
                 "deep enough to call anything, blanks excluded.</p>")
 
     # -- off-target --------------------------------------------------------
@@ -718,7 +906,7 @@ def build(args) -> str:
     # -- the calls ---------------------------------------------------------
     P.append("<h2 id='calls'>Every call</h2>")
     lev = {"detected": "ok", "below_blanks": "warn", "below_floor": "warn",
-           "low_depth": "bad", "chimera": "warn"}
+           "misassigned": "warn", "low_depth": "bad", "chimera": "warn"}
     order = {g: i for i, (g, _c, _l) in enumerate(GROUP_STYLE)}
     cr = []
     for c in sorted(calls, key=lambda c: (c["sample_id"],
@@ -743,11 +931,13 @@ def build(args) -> str:
             f"<td class='num'>{100 * float(c['identity']):.1f}%</td>"
             f"<td>{flag(lev.get(c['call'], 'warn'), c['call'])}</td>"
             f"<td class='num' title='{esc(c['limit_basis'])}'>{fmt(c['limit_reads'])}</td>"
+            f"<td class='num'>{mis_cell(c)}</td>"
             f"<td>{esc(notes)}</td></tr>")
     P.append("<div class='scroll'><table><thead><tr><th>sample</th><th>group</th>"
              "<th>rank</th><th>taxon</th><th class='num'>reads</th>"
              "<th class='num'>of well</th><th class='num'>of group</th>"
              "<th class='num'>identity</th><th>call</th><th class='num'>limit</th>"
+             "<th class='num'>misassigned</th>"
              "<th>notes</th></tr></thead><tbody>" + "".join(cr)
              + "</tbody></table></div>")
     P.append(
@@ -758,7 +948,10 @@ def build(args) -> str:
         "is a fragile name (the <code>margin</code> column of "
         "<code>db_calls.tsv</code>; blank before release v0.8.0). "
         "<i>Limit</i> is the fewest reads that beat the blanks "
-        "(hover for how it was set). The cluster sequences, best hits and "
+        "(hover for how it was set). <i>Misassigned</i> is the reads index "
+        "misassignment from wells sharing an i5 or i7 is expected to have "
+        "put there (blank where the plate has no positions). The cluster "
+        "sequences, best hits and "
         "full lineages are in <code>assign_db/&lt;sample&gt;.clusters.tsv</code>; "
         "this table is <code>synthesis/db_calls.tsv</code>.</p>")
 
