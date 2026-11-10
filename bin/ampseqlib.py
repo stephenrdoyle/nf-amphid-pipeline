@@ -1425,6 +1425,13 @@ def expected_errors(qual: str) -> float:
 # for each, blank where PR2 has only a placeholder.
 RANKS = ["domain", "supergroup", "division", "subdivision", "class",
          "order", "family", "genus", "species"]
+# NCBI's eight, as nemabiome-its2-refdb releases carry them: real ranks,
+# no placeholders and no rank_names.tsv.
+NCBI_RANKS = ["superkingdom", "kingdom", "phylum", "class", "order",
+              "family", "genus", "species"]
+# The rank sets a taxonomy.tsv header is recognised by, PR2's first so a
+# vespa release reads exactly as it always has.
+KNOWN_RANKS = (RANKS, NCBI_RANKS)
 
 # What the pipeline reads. A release missing any of these cannot be used.
 REFDB_REQUIRED = ["manifest.json", "refdb.fasta", "taxonomy.tsv",
@@ -1556,10 +1563,189 @@ def open_text(path: str):
     return open(path, encoding="utf-8")
 
 
-def load_taxonomy(path: str) -> dict[str, dict[str, str]]:
-    """id -> {rank: name} over RANKS, blanks kept as ''."""
-    out = {}
+def ranks_in(header, manifest: dict | None = None) -> list[str] | None:
+    """The rank columns of a taxonomy.tsv header, shallowest first: the
+    manifest's `ranks` when it gives them, else the first known set
+    (PR2's nine, NCBI's eight) whose every column is present. None when
+    neither fits."""
+    given = (manifest or {}).get("ranks")
+    if isinstance(given, list) and given and all(r in header for r in given):
+        return [str(r) for r in given]
+    return next((list(rs) for rs in KNOWN_RANKS
+                 if all(r in header for r in rs)), None)
+
+
+# Per-record columns kept beside the ranks when a release has them
+# (nemabiome-its2-refdb): species_status says whether a record with no
+# species names one (named), two or more (shared) or none (unnamed);
+# grade and coverage how much of the marker it holds.
+RECORD_FIELDS = ("species_status", "grade", "coverage")
+
+
+class Taxonomy(dict):
+    """id -> {rank: name}, which is what every caller indexes, plus the
+    release's rank columns as `ranks` and, for shared records, the
+    species their members name (`shared`)."""
+
+    def __init__(self, ranks: list[str]):
+        super().__init__()
+        self.ranks = ranks
+        self.shared: dict[str, list[str]] = {}
+
+
+def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
+    """id -> {rank: name} over the release's ranks, blanks kept as '';
+    RECORD_FIELDS too where the release has them. The ranks are read from
+    the header (ranks_in), so PR2 and NCBI releases both load; a
+    members.tsv beside the table gives what each shared record's members
+    name."""
     with open_text(path) as fh:
-        for r in csv.DictReader(fh, delimiter="\t"):
-            out[r["id"]] = {k: (r.get(k) or "").strip() for k in RANKS}
+        rdr = csv.DictReader(fh, delimiter="\t")
+        ranks = ranks_in(rdr.fieldnames or [], manifest) or RANKS
+        extra = [k for k in RECORD_FIELDS if k in (rdr.fieldnames or [])]
+        out = Taxonomy(ranks)
+        for r in rdr:
+            rec = {k: (r.get(k) or "").strip() for k in ranks}
+            for k in extra:
+                rec[k] = (r.get(k) or "").strip()
+            out[r["id"]] = rec
+    members = os.path.join(os.path.dirname(path), "members.tsv")
+    shared = {i for i, r in out.items() if r.get("species_status") == "shared"}
+    if shared and os.path.exists(members):
+        with open_text(members) as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                if r.get("id") in shared and r.get("role") == "kept":
+                    sp = (r.get("label") or "").split(";")[-1].strip()
+                    names = out.shared.setdefault(r["id"], [])
+                    if sp and sp not in names:
+                        names.append(sp)
+        for names in out.shared.values():
+            names.sort()
     return out
+
+
+def scores_over_reference(manifest: dict) -> bool:
+    """Whether a release's records are scored over their own span, the
+    query's overhang free (manifest `score_over`; nemabiome ITS2).
+
+    ITS2 records stop where the ~47-base 28S stretch before NC2 starts,
+    and many are partial, so a read runs past its record. vespa's V4
+    records are whole primer-to-primer inserts with no `score_over`, and
+    there an unaligned end of the query is a real difference."""
+    return "reference" in str(manifest.get("score_over", "")).lower()
+
+
+def calling_rule(manifest: dict, override: str | None = None) -> str:
+    """'floors' (an identity floor per rank, as for V4) or 'gap' (ITS2:
+    species only when the next species is several edits further off).
+    An explicit choice wins; then the manifest's `calling_rule`; then a
+    release scored over its records' span takes the gap rule, the rule it
+    was validated with; everything else keeps the floors."""
+    if override and override != "auto":
+        return override
+    given = str(manifest.get("calling_rule", "")).lower()
+    if given in ("floors", "gap"):
+        return given
+    return "gap" if scores_over_reference(manifest) else "floors"
+
+
+def illumina_tail(manifest: dict, read_length: int | None = None) -> int:
+    """Bases a primer-trimmed R2 reads before its record's span starts.
+
+    0 for a release scored over whole inserts. For one scored over its
+    records' span (ITS2), R2 opens with the 28S stretch the records stop
+    short of, and the release's windows count record bases only (130 +
+    83 at 2x150): a geometry's read length, less its reverse primer and
+    its R2 window, is that stretch (150 - 20 - 83 = 47)."""
+    if not scores_over_reference(manifest):
+        return 0
+    rev = len(((manifest.get("primers") or {}).get("reverse") or {})
+              .get("sequence", ""))
+    geoms = [g for g in manifest.get("illumina_geometries") or []
+             if isinstance(g, dict) and len(g.get("windows") or []) == 2
+             and g.get("read_length")]
+    if not geoms or not rev:
+        return 0
+    fits = [g for g in geoms
+            if read_length and int(g["read_length"]) <= read_length]
+    g = max(fits, key=lambda g: int(g["read_length"])) if fits else \
+        min(geoms, key=lambda g: int(g["read_length"]))
+    return max(0, int(g["read_length"]) - rev - int(g["windows"][1]))
+
+
+# --------------------------------------------------------------------------
+# span distances (releases scored over their records' span)
+# --------------------------------------------------------------------------
+
+
+def _myers_columns(ref: str, read: str):
+    """Myers' bit-parallel edit distance of `ref` against `read`, the
+    read's start free (no boundary bit). Yields, after each read base,
+    (score, pv, mv): the cost of all of ref ending there, and the column's
+    vertical deltas (bit i: D[i+1] - D[i] is +1 in pv, -1 in mv)."""
+    m = len(ref)
+    peq: dict[str, int] = {}
+    for i, c in enumerate(ref):
+        peq[c] = peq.get(c, 0) | (1 << i)
+    full, top = (1 << m) - 1, 1 << (m - 1)
+    pv, mv, score = full, 0, m
+    for c in read:
+        eq = peq.get(c, 0)
+        xv = eq | mv
+        xh = (((eq & pv) + pv) ^ pv) | eq
+        ph = mv | (~(xh | pv) & full)
+        mh = pv & xh
+        if ph & top:
+            score += 1
+        elif mh & top:
+            score -= 1
+        ph = (ph << 1) & full
+        mh = (mh << 1) & full
+        pv = mh | (~(xv | ph) & full)
+        mv = ph & xv
+        yield score, pv, mv
+
+
+def infix_distance(ref: str, read: str) -> int:
+    """Edits to place all of `ref` somewhere inside `read`, the read's
+    bases either side free: a whole insert scored over its record's span
+    (as nemabiome-its2-refdb's bin/build.py)."""
+    if not ref:
+        return 0
+    best = len(ref)
+    for score, _pv, _mv in _myers_columns(ref, read):
+        best = min(best, score)
+    return best
+
+
+def anchored_distance(ref: str, read: str, min_span: int = 1) -> tuple:
+    """(edits, span) of a read window against the START of a record.
+
+    The record's first base is aligned (a partial record that starts late
+    leaves the read's bases before it free). Then either the window is
+    read to its last base and the record past it is free, or - a window
+    longer than the record, R1 reading into the 28S stretch at 2x250 -
+    the whole record is aligned and the window past it is free. span is
+    the record bases aligned. Of the possible end points, the one with
+    the best identity over at least min_span bases. For a window against
+    a record's END, pass both reversed: R2's 28S stretch, past the
+    record's end, is then the free overhang. (inf, 0) when nothing fits.
+    """
+    m = len(ref)
+    if not m or not read:
+        return float("inf"), 0
+    pv = mv = 0
+    whole = m
+    for s, pv, mv in _myers_columns(ref, read):
+        whole = min(whole, s)
+    best, d = None, 0
+    for i in range(1, m + 1):
+        d += (pv >> (i - 1) & 1) - (mv >> (i - 1) & 1)
+        # The record ending inside the window: all of it, read past free.
+        if i == m:
+            d = min(d, whole)
+        # The best identity; on a tie, the longer span.
+        if i >= min_span and (best is None or
+                              d * best[1] <= best[0] * i):
+            best = (d, i)
+    return best if best else (float("inf"), 0)

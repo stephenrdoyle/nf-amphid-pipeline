@@ -377,6 +377,20 @@ the way DADA2 or UNOISE would, and each surviving pair is classified on
 both windows together. A pair whose insert is shorter than a read is
 kept whole.
 
+An ITS2 release (nemabiome-its2-refdb, NC1/NC2) runs the same way and is
+recognised from its manifest (`score_over`): its records stop where the
+28S stretch before NC2 starts, so every read and consensus is scored
+over its record's span with that stretch free; its windows count ITS2
+bases (130 + 83 at 2x150, 230 + 183 at 2x250) and R2 also reads the
+stretch; overlapping mates (most pairs at 2x250) are merged and scored
+whole; and species calls follow the gap rule (`--db_calling_rule`).
+Each call then carries `nearest`, `next`, `gap`, `grade` and `span`:
+"Cooperia; nearest Cooperia oncophora 100%; next Cooperia surnabada +1"
+is a genus call because a sister is one edit away, not because nothing
+is close. Give the NC1/NC2 primers (`assets/primers_nemabiome_its2.tsv`)
+and `--db_primer_offset 3`, for the protocol's 0-3 spacer bases.
+REFERENCE_DATABASE.md §12.
+
 ---
 
 ## 3. Parameters
@@ -465,7 +479,12 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
 | `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
 | `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's windows for `--illumina_read_length` (`illumina_geometries`: 132 at 2x150 or 2x250, 250 at 2x300) |
-| `--db_window_r2` | `null` | the same for R2 (128 at 2x150, 200 at 2x300) |
+| `--db_window_r2` | `null` | the same for R2 (128 at 2x150, 200 at 2x300). For an ITS2 release both count ITS2 bases; R2 also reads the 28S stretch |
+| `--db_calling_rule` | `auto` | `floors` (the floors above) or `gap`: species only at >= 99% identity with the nearest other species `--db_gap_edits` further off over the same span. `auto` takes the release's: `gap` for a release scored over its records' span (ITS2), `floors` for V4 |
+| `--db_gap_floors` | `species=0.99,genus=0.97,family=0.95` | identity floors under the gap rule |
+| `--db_gap_edits` | `4` | edits the nearest other species must be further off for a species call under the gap rule. A `shared` record counts as another species; an `unnamed` one does not |
+| `--db_min_species_span` | `100` | record bases a span-scored species call must rest on |
+| `--db_primer_offset` | `0` | spacer bases a protocol puts before each primer: both Illumina windows are this much shorter, so every pair fills them (nemabiome NC1/NC2: `3`) |
 
 ### 3.7 Control plasmids
 
