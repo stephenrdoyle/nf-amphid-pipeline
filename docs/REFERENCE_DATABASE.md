@@ -641,3 +641,121 @@ Two additive release files, read when present and ignored by older releases.
   - The label is now "windows disagree: R1 NN% to X, R2 NN% to Y (a chimera, an artefact, or a stretch the database has nothing close to)". Each window's identity there is from a full alignment to its own best record.
   - On VESPA's primate samples most of these are gregarines: R2 at 97% to *Leidyana*, with R1 at 74–81% to the same record. An unrelated 18S record gives R1 64% at the median, 74% at the 99th percentile and up to 80%. So a divergent region of one organism can't be told from a join, and the label doesn't claim either.
   - The report counts these reads before the results.
+
+## 12. ITS2 releases (nemabiome-its2-refdb, 2026-11-10)
+
+nemabiome-its2-refdb v0.1.0 (`nemits2`) is the nematode ITS2 database
+for NC1/NC2 "nemabiome" amplicons, in vespa-18s-refdb's release format.
+Five of the V4 assumptions do not hold for it, and each is now read from
+the release rather than assumed (issue #9). A vespa release reads exactly
+as before: on the database fixture every output of both platforms is
+byte-identical to the code before this change.
+
+### 12.1 Loading
+
+- **Ranks.** `taxonomy.tsv` has NCBI's eight ranks (superkingdom ...
+  species), not PR2's nine positional levels. The rank columns are read
+  from the header (`ampseqlib.ranks_in`: the manifest's `ranks` if it
+  lists them, else PR2's nine, else NCBI's eight) and carried on the
+  loaded taxonomy; every lineage, LCA, floor and label follows them.
+  There is no `rank_names.tsv`, and none is needed: the ranks are real.
+- **Record columns.** `species_status` (`named` / `shared` / `unnamed`),
+  `grade` and `coverage` are kept beside the ranks. For a shared record,
+  the species its members name are read from `members.tsv`.
+- **Synthesis** places calls in organism groups by rank name for an NCBI
+  release (phylum Nematoda is a helminth). Pass `--db_host_clade
+  Chordata`: Craniata is PR2's name.
+- **Pre-flight** accepts either rank set, and a manifest with
+  `illumina_geometries` but no `illumina_windows`.
+
+### 12.2 Scoring over the record's span
+
+A record runs from the 3' end of NC1 to the START of the ~47-base 28S
+stretch before NC2. Reads carry the stretch; records do not, and two
+thirds are partial at one end or both. The manifest says so
+(`score_over`), and then (`ampseqlib.scores_over_reference`):
+
+- every query is scored exactly against the records minimap2 proposes,
+  over each record's span with the query's overhang free
+  (`assign_db.span_scores`): a whole insert or consensus has the record
+  placed inside it (`infix_distance`); R1's window is aligned from the
+  record's start, R2's to its end, with R2's 28S stretch and any read
+  past a short record free (`anchored_distance`; both bit-parallel, as
+  the database's own build);
+- records are ranked by identity over their span, not by edits, and a
+  record must cover 100 bases to count. Ties are every record at the best
+  identity within 5 bases of the longest such span, so a partial matching
+  over a shorter span does not tie with a full-length match;
+- candidates are the 100 records minimap2 ranks best by identity over the
+  record's span, plus any tied with the last. By score instead, a species
+  with hundreds of records pushed the partial sister record that decided
+  a gap to 247th.
+
+### 12.3 Illumina
+
+The geometries give windows in ITS2 bases (130 + 83 at 2x150, 230 + 183
+at 2x250). R2 reads the 28S stretch first, so its window takes that too
+(`illumina_tail`: geometry read length - reverse primer - R2 window =
+47). `--db_primer_offset` shortens both windows by the protocol's spacer
+(NC1/NC2: 0-3 bases, so 3); without it every pair with a spacer was too
+short. The primer search already allowed a start up to 4 bases in.
+
+Mates that overlap are merged into the insert and scored whole
+(`merge_pair`). At 2x250 that is nearly every pair. Kept as two
+overlapping windows, every difference in the overlap was counted twice:
+the two-base AT-repeat stutter of an *Oesophagostomum* ITS2 then fell
+under 99%.
+
+### 12.4 Calling: the gap rule
+
+`--db_calling_rule auto` takes the gap rule for a release scored over its
+span: species at >= 99% identity AND the nearest record of any other
+species >= 4 edits further off over the same span; genus >= 97%, family
+>= 95%. A `shared` record counts as another species, an `unnamed` one
+(hybrids, cf., environmental) does not. The V4 floors stay the rule for
+vespa. Each span-scored call adds `span`, `edits`, `gap`, `nearest`
+("Cooperia oncophora 100.0%"), `next` ("Cooperia surnabada +1", or "none
+close") and `grade` to `clusters.tsv`; synthesis carries `nearest`,
+`next` and `grade` into `db_calls.tsv`.
+
+### 12.5 Checked against the database's own results (v0.1.0)
+
+**Agreement with the reference classifier.** On amphid's own sequences,
+nemabiome-its2-refdb's `classify_asvs.py` (with its candidate cap lifted,
+below) gives the same call for 99.8% (Šlapeta 2x250) and 99.99%
+(Gilleard 2x250) of reads. On its leave-one-out (3,164 queries, 1,210
+species), whole reads give identical species and genus rates: 52.8% of
+present species named right, 0.7% wrong; 6.7% of missing species named
+as another. At 2x150 amphid is about two points more conservative
+(54.2% vs 56.3% right; 6.9% vs 9.0% wrong): a window is aligned from its
+record's first base, where the reference lets a trimmed window leave up
+to 10 of the record's first bases free.
+
+**Share of reads named to species** (two public sets; 2x150 cut from the
+2x251 reads):
+
+| set | issue #9 target | reference, all candidates | amphid |
+|---|---:|---:|---:|
+| PRJNA936713 (Šlapeta, sheep) 2x250 | 92.2% | 84.1% | 78.1% |
+| PRJNA936713 2x150 | 90.5% | 52.4% | 84.9% |
+| PRJNA1524548 (Gilleard, cattle) 2x250 | 86.9% | 62.4% | 64.0% |
+| PRJNA1524548 2x150 | 86.9% | 37.3% | 59.9% |
+
+The targets are the reference gap rule on DADA2 ASVs. They depend on
+its scoring only minimap2's top 40 candidates: with every candidate
+minimap2 reports (third column, same ASVs), the nearest other species is
+often a record the cap had hidden (*H. contortus* has hundreds), and the
+gap closes. Nearly all of amphid's Gilleard *Haemonchus* genus calls (23%
+of reads) are this: "nearest *H. placei* 100%, next *H. contortus* +3".
+
+The rest of the 2x250 shortfall on Šlapeta is sequence inference, not
+scoring. An *Oesophagostomum* ITS2 carries an AT repeat read at four
+lengths; DADA2 folds them into one ASV, amphid's denoiser keeps each,
+and the stutter variants are 2-4 indels (< 99%) from the record. At 2x150
+the gap between the windows hides the repeat.
+
+**Species never disagree.** Of amphid's species reads, 92-97% match a
+DADA2 ASV exactly; on those, amphid's species is that of assignTaxonomy
+and IdTaxa (against this database with the 28S stretch cut, and against
+nemabiome's) wherever they name a species, on all four sets: 0 reads
+disagree.

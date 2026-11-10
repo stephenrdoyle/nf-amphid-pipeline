@@ -52,6 +52,12 @@ ORGANISM GROUPS
                         Metamonada, Blastocystis, ciliates...
       unassigned        not placed deep enough to say
 
+    A release over NCBI's ranks (nemabiome ITS2) is read by rank name
+    instead: helminths are the phyla Nematoda, Platyhelminthes and
+    Acanthocephala, microsporidia the phylum Microsporidia, fungi,
+    invertebrates and plants the kingdoms Fungi, Metazoa and
+    Viridiplantae.
+
     helminths, protists and microsporidia are the TARGET groups - what
     the protocol is for; the rest are off-target, reported as fractions
     of each well, as VESPA does.
@@ -78,8 +84,8 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, load_rank_names, load_release_manifest, rank_meaning, read_table,
-    release_version, restore_declared_ids, writer,
+    RANKS, load_rank_names, load_release_manifest, rank_meaning, ranks_in,
+    read_table, release_version, restore_declared_ids, writer,
 )
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
@@ -118,10 +124,13 @@ HELMINTH_CLASSES = {"Nematoda", "Platyhelminthes", "Acanthocephala"}
 DETAIL_GROUPS = TARGET_GROUPS + ("fungi",)
 
 
-def organism_group(lineage: list[str], host_clade: str) -> str:
+def organism_group(lineage: list[str], host_clade: str,
+                   ranks: list[str] = RANKS) -> str:
     """The reporting group of a call, from its lineage down to the rank
     it reached (module docstring). 'unassigned' when that lineage stops
     too high to tell."""
+    if ranks != RANKS:
+        return organism_group_named(dict(zip(ranks, lineage)), host_clade)
     lin = lineage + [""] * (len(RANKS) - len(lineage))
     dom, sup, sub, cls, order = lin[0], lin[1], lin[3], lin[4], lin[5]
     if dom in ("Bacteria", "Archaea"):
@@ -151,6 +160,41 @@ def organism_group(lineage: list[str], host_clade: str) -> str:
     return "protists" if sup else "unassigned"
 
 
+def organism_group_named(lin: dict, host_clade: str) -> str:
+    """organism_group() for a release whose ranks are real ones (NCBI's
+    superkingdom ... species): the same groups, read by rank name."""
+    top = lin.get("superkingdom") or lin.get("domain") or ""
+    phylum, kingdom = lin.get("phylum", ""), lin.get("kingdom", "")
+    if top in ("Bacteria", "Archaea"):
+        return "bacteria_archaea"
+    if top != "Eukaryota":
+        return "unassigned"
+    if host_clade and host_clade in lin.values():
+        return "host"
+    if phylum in HELMINTH_CLASSES:
+        return "helminths"
+    if phylum == "Microsporidia":
+        return "microsporidia"
+    if kingdom == "Fungi":
+        return "fungi"
+    if kingdom == "Metazoa":
+        return "invertebrates" if phylum else "unassigned"
+    if kingdom == "Viridiplantae":
+        return "plants"
+    return "protists" if kingdom or phylum else "unassigned"
+
+
+def release_ranks(release: str) -> list[str]:
+    """The rank columns of a release's taxonomy.tsv (ampseqlib.ranks_in),
+    PR2's when the header names neither set."""
+    path = os.path.join(release, "taxonomy.tsv")
+    if not os.path.exists(path):
+        return RANKS
+    with open(path, encoding="utf-8") as fh:
+        head = fh.readline().rstrip("\r\n").split("\t")
+    return ranks_in(head) or RANKS
+
+
 class Well:
     def __init__(self, sid: str):
         self.sid = sid
@@ -177,7 +221,8 @@ def load_wells(assign_dir: str) -> dict[str, Well]:
     return wells
 
 
-def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
+def taxon_rows(w: Well, host_clade: str, primer_fit: dict,
+               ranks: list[str] = RANKS) -> list[dict]:
     """One row per (rank, taxon, label) in a well, clusters pooled."""
     agg: dict = {}
     for c in w.clusters:
@@ -194,6 +239,7 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
                                  "top": -1})
         if key[2] != "chimera" and int(c["reads"]) > a["top"]:
             a["label"], a["top"] = c["label"], int(c["reads"])
+            a["span"] = {k: c[k] for k in SPAN_FIELDS if k in c}
         a["reads"] += int(c["reads"])
         a["clusters"] += 1
         a["identity"] = max(a["identity"], float(c["identity"] or 0))
@@ -209,10 +255,17 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict) -> list[dict]:
                     "identity": a["identity"], "lineage": a["lineage"],
                     "group": "chimera" if label == "chimera" else organism_group(
                         [x for x in a["lineage"].split(";")] if a["lineage"]
-                        else [], host_clade),
+                        else [], host_clade, ranks),
                     "primer_fit": ",".join(fits),
-                    "margin": weakest_margin(a["margins"])})
+                    "margin": weakest_margin(a["margins"]),
+                    **a.get("span", {})})
     return out
+
+
+# What a span-scored call (nemabiome ITS2) says of how close it came, from
+# its largest cluster: the tied species and their identity, the nearest
+# other species and how many edits further, and the best record's grade.
+SPAN_FIELDS = ("nearest", "next", "grade")
 
 
 def weakest_margin(margins: list[str]) -> str:
@@ -532,7 +585,8 @@ def main(argv=None) -> int:
               encoding="utf-8") as fh:
         pf_summary = json.load(fh)
 
-    rows = {sid: taxon_rows(w, args.host_clade, primer_fit)
+    tax_ranks = release_ranks(args.database)
+    rows = {sid: taxon_rows(w, args.host_clade, primer_fit, tax_ranks)
             for sid, w in wells.items()}
     # What the rank reached actually is, where PR2's column is not that
     # rank (rank_names.tsv, v0.8.0 on): "order" for a nematode's family
@@ -608,7 +662,10 @@ def main(argv=None) -> int:
                 # What the rank column really is for this clade, where it
                 # is not what it says (rank_names.tsv).
                 "rank_meaning": r["rank_meaning"],
-                "database_version": version})
+                "database_version": version,
+                **{k: r[k] for k in SPAN_FIELDS if k in r}})
+    # Only where the calls have them, so a V4 run's table is as it was.
+    call_cols += [k for k in SPAN_FIELDS if any(k in c for c in calls)]
     with open(os.path.join(args.outdir, "db_calls.tsv"), "w",
               encoding="utf-8") as fh:
         wr = writer(fh, call_cols)

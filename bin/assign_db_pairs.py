@@ -48,6 +48,21 @@ Per sample:
   5. LCA and floors as on nanopore, on the identity of both windows
      together (unaligned ends counted as differences).
 
+A release scored over its records' span (manifest score_over; nemabiome
+ITS2) differs in three places. Its windows count record bases, and R2
+opens with the 28S stretch the records stop short of, so R2's window
+takes that stretch too (illumina_tail: 130 + 83 at 2x150 is 130 + 130
+read bases). Step 4 only proposes candidate records; each is scored
+exactly over its own span, the stretch free (assign_db.span_scores).
+And step 5 is the release's calling rule, the gap rule for ITS2
+(assign_db.span_call). --primer-offset shortens both windows by the
+spacer bases some protocols put before each primer (0-3 for NC1/NC2),
+so a pair with a 3-base spacer still fills them. And mates that overlap
+(most ITS2 pairs at 2x250) are merged into the insert and scored whole
+(merge_pair): in two overlapping windows every difference in the overlap
+is counted twice, and the AT-repeat stutter of an Oesophagostomum ITS2
+(two bases) fell under the 99% a species call needs.
+
 Expected errors come from the quality string; on SRA-Lite data, where
 every base reads '?' (Q30), that filter is blind and says so.
 
@@ -68,9 +83,9 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, illumina_windows, load_assay, load_primers, load_rank_names,
-    load_release_manifest,
-    load_taxonomy, read_table, release_version, revcomp, writer,
+    illumina_tail, illumina_windows, load_assay, load_primers,
+    load_rank_names, load_release_manifest, load_taxonomy, read_table,
+    release_version, revcomp, writer,
 )
 import assign_db as adb  # noqa: E402
 from prep_illumina import paired_reads, trim_readthrough  # noqa: E402
@@ -125,6 +140,43 @@ def orient(r1, r2, ps):
         return ((a[1][f[1]:].upper(), a[2][f[1]:]),
                 (b[1][r[1]:].upper(), b[2][r[1]:]), f[0], r[0])
     return None
+
+
+MERGE_MIN_OVERLAP = 20
+MERGE_MAX_MISMATCH = 0.05
+
+
+def merge_pair(s1: str, q1: str, s2: str, q2: str):
+    """(insert, quality) of a pair whose mates overlap, or None.
+
+    The overlap is R1's end against R2's reverse complement's start, found
+    from a 16-base seed at the start of R2's reverse complement (or the
+    next 16, if the first holds an error) and accepted at
+    MERGE_MIN_OVERLAP or more bases with at most MERGE_MAX_MISMATCH of
+    them mismatched; the longest such overlap wins. In the overlap R1's
+    bases are kept. As DADA2's mergePairs does in spirit, and as
+    nemabiome-its2-refdb's its2_classify.py merges."""
+    r = revcomp(s2)
+    rq = q2[::-1]
+    best = None
+    for off in (0, 16):
+        seed = r[off:off + 16]
+        if len(seed) < 16:
+            break
+        i = s1.find(seed)
+        while i >= 0:
+            ov = len(s1) - i + off
+            if MERGE_MIN_OVERLAP <= ov <= min(len(s1), len(r)) and \
+                    (best is None or ov > best):
+                a, b = s1[-ov:], r[:ov]
+                if sum(x != y for x, y in zip(a, b)) <= MERGE_MAX_MISMATCH * ov:
+                    best = ov
+            i = s1.find(seed, i + 1)
+        if best is not None:
+            break
+    if best is None:
+        return None
+    return s1 + r[best:], q1 + rq[best:]
 
 
 _LOW_BITS: dict[int, int] = {}
@@ -352,6 +404,14 @@ def main(argv=None) -> int:
     ap.add_argument("--floors", default=",".join(
         f"{k}={v}" for k, v in ILLUMINA_FLOORS.items()),
         help="identity floor per rank over both windows together")
+    adb.add_calling_args(ap)
+    ap.add_argument("--primer-offset", type=int, default=0,
+                    help="spacer bases a protocol may put before each primer "
+                    "(nemabiome NC1/NC2: 3). Both windows are this much "
+                    "shorter, so every pair fills them whatever its spacer")
+    ap.add_argument("--no-merge", action="store_true",
+                    help="span-scored releases: keep overlapping mates as two "
+                    "windows instead of merging them into the insert")
     ap.add_argument("--max-secondary", type=int, default=5000,
                     help="hits reported per window; the first window of V4 "
                     "is conserved enough to tie with thousands of records")
@@ -366,9 +426,15 @@ def main(argv=None) -> int:
     # reads can hold (250/200 at 2x300), unless set here.
     w1, w2, rtable = illumina_windows(man, args.read_length,
                                       args.window_r1, args.window_r2)
-    tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"))
+    # Read bases kept from each mate: the windows, R2's past-the-record
+    # stretch (0 for V4), less any spacer allowance.
+    tail = illumina_tail(man, args.read_length)
+    rw1 = w1 - args.primer_offset
+    rw2 = w2 + tail - args.primer_offset
+    tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"), man)
+    ranks = adb.ranks_of(tax)
     rank_names = load_rank_names(args.database)
-    floors = adb.parse_floors(args.floors)
+    exact, rule, floors = adb.calling_setup(args, man, tax)
     ps = load_primers(args.primers)
     ps.max_edits = args.primer_max_edits
     cfg = load_assay(args.assay)
@@ -404,13 +470,22 @@ def main(argv=None) -> int:
             counts[(t1, "")] += 1
             fate["whole_insert"] += 1
             continue
-        if len(s1) < w1 or len(s2) < w2:
+        if exact and not args.no_merge:
+            j = merge_pair(s1, q1, s2, q2)
+            if j is not None:
+                if expected_errors(j[1]) > args.max_ee:
+                    fate["low_quality"] += 1
+                    continue
+                counts[(j[0], "")] += 1
+                fate["merged"] += 1
+                continue
+        if len(s1) < rw1 or len(s2) < rw2:
             fate["too_short"] += 1
             continue
-        if expected_errors(q1[:w1]) + expected_errors(q2[:w2]) > args.max_ee:
+        if expected_errors(q1[:rw1]) + expected_errors(q2[:rw2]) > args.max_ee:
             fate["low_quality"] += 1
             continue
-        counts[(s1[:w1], s2[:w2])] += 1
+        counts[(s1[:rw1], s2[:rw2])] += 1
 
     # Denoise within each shape: windowed pairs together, whole inserts by
     # length (a pair key is joined with '|' so the two windows never
@@ -477,9 +552,12 @@ def main(argv=None) -> int:
                 return True
             h = max(hs.values(), key=lambda h: (h["AS"], h["t"]))
             return h["qs"] + h["qlen"] - h["qe"] > SR_CLIP * h["qlen"]
-        redo = {f"p{k}" for k, (x, y, _n) in enumerate(centroids)
-                if (poor("r1", f"p{k}") or poor("r2", f"p{k}") if y
-                    else poor("full", f"p{k}"))}
+        # Not for span scoring, which only takes candidates from these
+        # hits: R2's 28S stretch is unaligned in every pair there.
+        redo = set() if exact else {
+            f"p{k}" for k, (x, y, _n) in enumerate(centroids)
+            if (poor("r1", f"p{k}") or poor("r2", f"p{k}") if y
+                else poor("full", f"p{k}"))}
         if redo:
             seqs = {"r1": lambda x, y: x if y else "",
                     "r2": lambda x, y: y, "full": lambda x, y: "" if y else x}
@@ -496,7 +574,42 @@ def main(argv=None) -> int:
                     if q in again[name]:
                         hits[name][q] = again[name][q]
         fate["remapped"] = sum(centroids[int(q[1:])][2] for q in redo)
-        for k, (x, y, _n) in enumerate(centroids):
+        if exact:
+            # Every record either window proposed, scored exactly over
+            # its span with both windows (adb.span_scores): a pair is one
+            # sequence with a gap in it, and a record that minimap2 saw
+            # through one window only is still scored on both.
+            cands = {}
+            for k, (x, y, _n) in enumerate(centroids):
+                q = f"p{k}"
+                hs = [h for name in (("r1", "r2") if y else ("full",))
+                      for h in hits[name].get(q, {}).values()
+                      if h["strand"] == ("-" if name == "r2" else "+")]
+                if y:
+                    # Ranked on both windows together: matches over the
+                    # aligned blocks (a window's record runs past it, so
+                    # the record's unaligned ends say nothing), then score.
+                    both: dict = defaultdict(lambda: [0, 0, 0])
+                    for h in hs:
+                        b = both[h["t"]]
+                        b[0] += h["match"]
+                        b[1] += h["alen"]
+                        b[2] += h["AS"]
+                    hs = [{"t": t, "ident": m / max(1, a), "AS": sc}
+                          for t, (m, a, sc) in both.items()]
+                cands[k] = adb.span_candidates(hs)
+            need = {t for ts in cands.values() for t in ts}
+            recs = {i: s for i, s in adb.read_fasta(
+                os.path.join(args.database, "refdb.fasta")) if i in need}
+            for k, (x, y, _n) in enumerate(centroids):
+                parts = [(x, "start"), (revcomp(y), "end")] if y else \
+                    [(x, "whole")]
+                scorable = len(x) + max(0, len(y) - tail) if y else \
+                    len(x) - tail
+                calls[k] = adb.span_call(
+                    adb.span_scores(parts, cands[k], recs, tail), tax, rule,
+                    floors, args.gap_edits, scorable, args.min_species_span)
+        for k, (x, y, _n) in enumerate(centroids if not exact else []):
             q = f"p{k}"
             if not y:
                 calls[k] = adb.classify_hits(
@@ -540,7 +653,7 @@ def main(argv=None) -> int:
                 continue
             lin = [tax.get(c["best_hit"], {}) for c in one]
             depth = -1
-            for di, r in enumerate(RANKS):
+            for di, r in enumerate(ranks):
                 if di <= min(c["depth"] for c in one) and lin[0].get(r) \
                         and lin[0].get(r) == lin[1].get(r):
                     depth = di
@@ -548,7 +661,7 @@ def main(argv=None) -> int:
                     break
             worse = min(one, key=lambda c: c["identity"])
             calls[k] = {**worse, "depth": depth,
-                        "rank": RANKS[depth] if depth >= 0 else "",
+                        "rank": ranks[depth] if depth >= 0 else "",
                         "lca_depth": depth, "split_mates": True,
                         # Each window's own call, for the label: two
                         # windows that disagree below what they share
@@ -560,13 +673,15 @@ def main(argv=None) -> int:
         # divergent end and identity() charges all of it
         # (adb.aligned_identity). Joined pairs and whole inserts only; a
         # pair whose windows disagree has no one record to align to.
-        need = {c["best_hit"] for c in calls.values()
-                if c["best_hit"] and not c.get("split_mates")}
+        need = set() if exact else {
+            c["best_hit"] for c in calls.values()
+            if c["best_hit"] and not c.get("split_mates")}
         need |= {h for c in calls.values() for h, _i, _d in
                  c.get("windows") or [] if h}
-        recs = {i: s for i, s in adb.read_fasta(
-            os.path.join(args.database, "refdb.fasta")) if i in need}
-        for k, (x, y, _n) in enumerate(centroids):
+        if not exact:
+            recs = {i: s for i, s in adb.read_fasta(
+                os.path.join(args.database, "refdb.fasta")) if i in need}
+        for k, (x, y, _n) in enumerate(centroids if not exact else []):
             c = calls.get(k)
             if c and c.get("windows") and len(c["windows"]) == 2:
                 # Each window against its own best record, so the label's
@@ -585,7 +700,8 @@ def main(argv=None) -> int:
             parts = [(x, "start"), (revcomp(y), "end")] if y else \
                 [(x, "whole")]
             calls[k] = adb.refine_identity(c, parts,
-                                           recs.get(c["best_hit"]), floors)
+                                           recs.get(c["best_hit"]), floors,
+                                           ranks)
         mm_version = mm.version()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -631,7 +747,7 @@ def main(argv=None) -> int:
                   if not adb.parents_differ(calls[v[0]], calls[v[1]], tax)}
     chim = {k: v for k, v in chim.items() if k not in kept_joins}
     rows = []
-    label_depth = RANKS.index("family")
+    label_depth = ranks.index("family")
     for n, k in enumerate(order, 1):
         x, y, cnt = centroids[k]
         call = calls[k]
@@ -681,11 +797,11 @@ def main(argv=None) -> int:
             "rank": call["rank"], "taxon": taxon, "label": label,
             "identity": f"{call['identity']:.4f}",
             "coverage": f"{call['coverage']:.3f}",
-            "lineage": ";".join(lin.get(r, "") for r in RANKS[:d + 1]),
+            "lineage": ";".join(lin.get(r, "") for r in ranks[:d + 1]),
             "best_hit": call["best_hit"],
-            "best_hit_lineage": ";".join(lin.get(r, "") for r in RANKS),
+            "best_hit_lineage": ";".join(lin.get(r, "") for r in ranks),
             "near_hits": call["near_hits"],
-            "lca_rank": RANKS[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
+            "lca_rank": ranks[call["lca_depth"]] if call["lca_depth"] >= 0 else "",
             "db_resolution": resolution.get(call["best_hit"], ("",))[0],
             "db_margin": adb.margin_of(call["rank"], call["best_hit"],
                                        resolution),
@@ -697,12 +813,14 @@ def main(argv=None) -> int:
             "database_version": version,
             # The insert as far as it was read, gap marked by Ns.
             "consensus": x + ("N" * 10 + revcomp(y) if y else ""),
+            **(adb.span_columns(call, tax) if exact else {}),
         })
     cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
             "label", "identity", "coverage", "lineage", "best_hit",
             "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
             "db_margin", "origin", "merged", "chimera_of", "length",
-            "database_version", "consensus"]
+            "database_version", "consensus"] + (
+                adb.SPAN_COLUMNS if exact else [])
     with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
               encoding="utf-8") as fh:
         w = writer(fh, cols)
@@ -744,12 +862,16 @@ def main(argv=None) -> int:
         "elapsed_s": round(time.time() - t0, 2),
         "reads": {k: fate.get(k, 0) for k in
                   ("reads_in", "no_primer", "too_short", "low_quality",
-                   "clustered", "unclustered", "whole_insert")},
+                   "clustered", "unclustered", "whole_insert")
+                  + (("merged",) if exact else ())},
         "reads_note": (
             "Read pairs. reads_in = no_primer + too_short + low_quality + "
             "clustered + unclustered; whole_insert counts the pairs (within "
             "clustered or unclustered) whose insert was shorter than R1. "
-            "rel_abundance is over clustered pairs: relative 18S abundance."),
+            "rel_abundance is over clustered pairs: relative 18S abundance."
+            + (" merged counts the pairs (within clustered or unclustered) "
+               "whose mates overlapped and were merged into the insert."
+               if exact else "")),
         # Pairs whose windows -x sr could not align end to end, mapped
         # again with softer penalties (SR_DIVERGENT).
         "remapped_divergent": fate.get("remapped", 0),
@@ -771,6 +893,10 @@ def main(argv=None) -> int:
                      else "1.5% of length, at least 3",
                      "alpha": args.alpha, "floors": floors,
                      "lca_margin": args.lca_margin,
+                     **({"read_windows": [rw1, rw2],
+                         "primer_offset": args.primer_offset}
+                        if exact or args.primer_offset else {}),
+                     **adb.calling_settings(exact, rule, args),
                      "resolution_table": os.path.basename(rpath)
                      if resolution else ""},
         "rank_reached": dict(Counter(r["rank"] or "none" for r in rows)),
