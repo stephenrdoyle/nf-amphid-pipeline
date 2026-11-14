@@ -43,6 +43,11 @@ process ASSIGN_DB_PAIRS {
         --lca-margin ${params.db_lca_margin} \
         --primer-max-edits ${params.db_primer_max_edits} \\
         --floors '${params.db_floors_illumina}' \\
+        --calling-rule ${params.db_calling_rule} \\
+        --gap-floors '${params.db_gap_floors}' \\
+        --gap-edits ${params.db_gap_edits} \\
+        --min-species-span ${params.db_min_species_span} \\
+        --primer-offset ${params.db_primer_offset} \\
         --outdir assign_db
 
     cat <<-END_VERSIONS > versions.yml

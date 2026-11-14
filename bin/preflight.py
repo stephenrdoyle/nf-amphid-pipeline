@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
     LOOKALIKE_COLUMNS, LOOKALIKE_MAX_EDITS, RANKS, REFDB_EXPECTED,
     REFDB_REQUIRED, delimiter_for, find_anchor_cost, find_anchor_lookalikes,
-    illumina_windows, load_release_manifest, release_version, sanitise_id,
+    illumina_tail, illumina_windows, load_release_manifest, ranks_in,
+    release_version, sanitise_id,
 )
 from ampseqlib import load_assay as library_config  # noqa: E402
 from itertools import product
@@ -2022,10 +2023,20 @@ def check_reference_database(release: str, primers: dict,
             rdr = csv.reader(fh, delimiter="\t")
             head = next(rdr, [])
             tids = {r[0] for r in rdr if r}
-        lacking = [r for r in ["id"] + RANKS if r not in head]
-        if lacking:
+        # The rank columns are the release's own: PR2's nine (vespa) or
+        # NCBI's eight (nemabiome ITS2), or as its manifest lists them.
+        ranks = ranks_in(head, man)
+        if "id" not in head:
             diag.error(f"reference database {info['version']}: taxonomy.tsv "
-                       f"lacks column(s) {', '.join(lacking)}")
+                       "lacks column id")
+        if ranks is None:
+            lacking = [r for r in RANKS if r not in head]
+            diag.error(f"reference database {info['version']}: taxonomy.tsv "
+                       f"lacks column(s) {', '.join(lacking)} - its ranks "
+                       "are neither PR2's nine nor NCBI's eight, and "
+                       "manifest.json lists no others")
+        else:
+            info["ranks"] = ranks
         untaxed = ids - tids
         if untaxed:
             diag.error(
@@ -2069,11 +2080,14 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
     except ValueError:
         return          # reported by check_reference_database
     win = man.get("illumina_windows")
-    if not win or len(win) != 2:
+    geoms = [g for g in man.get("illumina_geometries") or []
+             if isinstance(g, dict) and len(g.get("windows") or []) == 2]
+    if (not win or len(win) != 2) and not geoms:
         diag.error(
             f"--reference_database: run(s) {', '.join(ill)} are Illumina, but "
-            "the release's manifest.json has no illumina_windows, so the "
-            "insert windows read from each mate are not defined")
+            "the release's manifest.json has neither illumina_windows nor "
+            "illumina_geometries, so the insert windows read from each mate "
+            "are not defined")
         return
     prim = man.get("primers") or {}
     lf = len((prim.get("forward") or {}).get("sequence", ""))
@@ -2081,6 +2095,9 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
     L = args.illumina_read_length
     # The windows assign_db_pairs.py will take at this read length.
     w1, w2, table = illumina_windows(man, L)
+    # Windows of a release scored over its records' span count record
+    # bases; R2 reads its 28S stretch first (illumina_tail).
+    w2 += illumina_tail(man, L)
     for mate, w, lp in (("R1", w1, lf), ("R2", w2, lr)):
         if L and w + lp > L:
             diag.warn(
