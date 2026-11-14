@@ -2262,55 +2262,125 @@ def _lowest_group(out: dict, geom: dict, counts: dict, rng: random.Random,
             pooled["from_group"] = g
 
 
+def _wls_through_origin(cells: list, fixed: dict) -> dict:
+    """Rates per axis for unused cells, reads ~ row x X_row + col x X_col,
+    by least squares weighted for Poisson counts (1 / (reads + 1)) and
+    held non-negative. An axis in `fixed` is taken off first and not
+    fitted; an axis whose sources are all zero is not fitted (None)."""
+    w = [1.0 / (n + 1) for n, _x, _z in cells]
+    free = [ax for ax in AXES if ax not in fixed
+            and any((x if ax == "row" else z) for _n, x, z in cells)]
+    y = [n - fixed.get("row", 0.0) * x - fixed.get("col", 0.0) * z
+         for n, x, z in cells]
+    col = {"row": [x for _n, x, _z in cells], "col": [z for _n, _x, z in cells]}
+
+    def sse(rates):
+        return sum(wi * (yi - sum(rates[a] * col[a][k] for a in rates)) ** 2
+                   for k, (wi, yi) in enumerate(zip(w, y)))
+
+    def one(ax):
+        sxx = sum(wi * v * v for wi, v in zip(w, col[ax]))
+        sxy = sum(wi * v * yi for wi, v, yi in zip(w, col[ax], y))
+        return max(0.0, sxy / sxx) if sxx else 0.0
+
+    out: dict = {ax: None for ax in AXES if ax not in fixed}
+    if len(free) == 1:
+        out[free[0]] = one(free[0])
+    elif len(free) == 2:
+        a, b = col["row"], col["col"]
+        saa = sum(wi * v * v for wi, v in zip(w, a))
+        sbb = sum(wi * v * v for wi, v in zip(w, b))
+        sab = sum(wi * u * v for wi, u, v in zip(w, a, b))
+        say = sum(wi * u * yi for wi, u, yi in zip(w, a, y))
+        sby = sum(wi * v * yi for wi, v, yi in zip(w, b, y))
+        det = saa * sbb - sab * sab
+        r = c = -1.0
+        if det > 1e-9 * saa * sbb:
+            r, c = (say * sbb - sby * sab) / det, (sby * saa - say * sab) / det
+        if r >= 0 and c >= 0:
+            out.update(row=r, col=c)
+        else:
+            # the constraint binds: the better of each axis alone
+            cand = [{"row": one("row"), "col": 0.0},
+                    {"row": 0.0, "col": one("col")}]
+            out.update(min(cand, key=sse))
+    return out
+
+
 def sentinel_rates(matrix: list[dict], fitted: dict | None = None,
-                   dominance: float = MISASSIGN_DOMINANCE) -> dict | None:
+                   n_boot: int = 200, seed: int = 1) -> dict | None:
     """The direct measurement, where the plate has unused combinations.
 
     A read on an index pair no well claims can only be misassignment, so
     its count against the reads of its row (same i5) and its column (same
-    i7) measures the per-pair rates outright: the median over the unused
-    cells where that axis carries most of the source reads, with what the
-    other axis is expected to have added taken off - by alternation where
-    both axes can be measured, else at `fitted` (the run's own fit).
-    `matrix` is the demultiplexer's index_matrix.tsv. Counted over every
-    demultiplexed read, classified or not, so it can differ somewhat from
-    the fitted rates, which are over classified reads. None without
-    unused combinations.
+    i7) measures the per-pair rates outright. `matrix` is the
+    demultiplexer's index_matrix.tsv. Each axis is measured with the
+    other taken off at its rate in `fitted` (measured from the calls)
+    where there is one; otherwise the two are fitted together over the
+    unused cells by non-negative least squares. Unused cells in
+    a part-filled column share that column's sources while their rows'
+    differ, so the two separate - a median of row ratios alone ran 20-75%
+    high on such a plate. The 95% interval is from resampling the cells.
+    Counted over every demultiplexed read, classified or not, so it can
+    differ somewhat from the fitted rates, which are over classified
+    reads. None without unused combinations.
     """
     rows: dict = defaultdict(int)
     cols: dict = defaultdict(int)
-    cells = []
+    raw = []
     for r in matrix:
         n = int(r.get("reads") or 0)
         if r.get("assigned") == "yes":
             rows[r["index_i5"]] += n
             cols[r["index_i7"]] += n
         else:
-            cells.append((r["index_i5"], r["index_i7"], n))
-    if not cells:
+            raw.append((r["index_i5"], r["index_i7"], n))
+    if not raw:
         return None
-    out: dict = {"unused_combinations": len(cells),
-                 "reads_on_unused": sum(n for _a, _b, n in cells)}
-    rate = {ax: (fitted or {}).get(ax) or 0.0 for ax in AXES}
-    found: dict = {}
-    for _ in range(12):
-        for ax in AXES:
-            other = rate["col" if ax == "row" else "row"]
-            ratios = []
-            for a, b, n in cells:
-                x, xo = ((rows[a], cols[b]) if ax == "row"
-                         else (cols[b], rows[a]))
-                if x and x >= dominance * xo:
-                    ratios.append(max(0.0, n - other * xo) / x)
-            found[ax] = ratios
-            if ratios:
-                rate[ax] = _quantile(ratios, 0.5)
-    for ax in AXES:
-        r = found[ax]
-        out[ax] = ({"rate": _quantile(r, 0.5), "range": [min(r), max(r)],
-                    "cells": len(r)} if r else None)
-    return out
+    cells = [(n, rows[a], cols[b]) for a, b, n in raw]
+    known = {ax: v for ax, v in (fitted or {}).items() if v and v > 0}
 
+    def measure(cs):
+        # each axis with the OTHER held at its fitted rate where there is
+        # one, else both together
+        joint = None
+        res = {}
+        for ax in AXES:
+            other = "col" if ax == "row" else "row"
+            if other in known:
+                res[ax] = _wls_through_origin(
+                    cs, {other: known[other]}).get(ax)
+            else:
+                if joint is None:
+                    joint = _wls_through_origin(cs, {})
+                res[ax] = joint.get(ax)
+        return res
+
+    est = measure(cells)
+    rng = random.Random(seed)
+    boots: dict = {ax: [] for ax in est}
+    for _ in range(n_boot):
+        b = measure([rng.choice(cells) for _c in cells])
+        for ax in est:
+            if b.get(ax) is not None:
+                boots[ax].append(b[ax])
+    out: dict = {"unused_combinations": len(cells),
+                 "reads_on_unused": sum(n for n, _x, _z in cells)}
+    for ax in AXES:
+        idx = 1 if ax == "row" else 2
+        n_cells = sum(1 for c in cells if c[idx])
+        if est.get(ax) is None or not n_cells:
+            out[ax] = None
+            continue
+        bs = sorted(boots[ax])
+        ci = ([bs[int(0.025 * len(bs))],
+               bs[min(len(bs) - 1, int(math.ceil(0.975 * len(bs))) - 1)]]
+              if bs else None)
+        out[ax] = {"rate": est[ax], "ci95": ci, "cells": n_cells,
+                   "other_axis": ("taken off at the fitted rate"
+                                  if ("col" if ax == "row" else "row")
+                                  in known else "fitted together")}
+    return out
 
 def scores_over_reference(manifest: dict) -> bool:
     """Whether a release's records are scored over their own span, the

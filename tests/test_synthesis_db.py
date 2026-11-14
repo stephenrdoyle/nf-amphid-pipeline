@@ -618,7 +618,7 @@ SIM_LIN = {
 }
 
 
-def plate_case(tmp, p, positions=True):
+def plate_case(tmp, p, positions=True, matrix=False):
     """write_case for a simulated plate; each simulated taxon its own
     species under a lineage of its kind (worm and rare: helminths)."""
     wells = {}
@@ -640,6 +640,15 @@ def plate_case(tmp, p, positions=True):
             for sid, t in p["types"].items():
                 r, c = p["geom"][sid]
                 fh.write(f"R1\t{sid}\t{sid}\t{r}\t{c}\t{t}\n")
+    if matrix:
+        mp = os.path.join(tmp, "index_matrix.tsv")
+        with open(mp, "w") as fh:
+            w = csv.DictWriter(fh, ["index_i5", "index_i7", "reads",
+                                    "assigned"], delimiter="\t",
+                               lineterminator="\n")
+            w.writeheader()
+            w.writerows(p["matrix"])
+        args += ["--index-matrix", mp]
     return args + ["--permutations", "200"]
 
 
@@ -788,6 +797,39 @@ def test_misassignment_fallback() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_misassignment_unused_fallback() -> None:
+    """Where the calls cannot measure an axis but the unused index
+    combinations can, their direct rate stands in: measured, so used for
+    the blanks too. A shallow plate whose last column is unused."""
+    print("\nthe unused combinations stand in where the fit cannot")
+    p = sim.simulate_plate_counts(sim.random.Random(1), 8, 12,
+                                  rate_row=4e-4, rate_col=7e-4, unused=8,
+                                  depth=3000)
+    tmp = tempfile.mkdtemp()
+    try:
+        _calls, _w, qc = run(plate_case(tmp, p, matrix=True))
+        mis = qc["index_misassignment"]
+        a = mis["row"]
+        check("the row axis is taken from the unused combinations",
+              a["basis"] == "unused_combinations"
+              and a["fit"]["basis"] == "default",
+              f"{a['basis']} {a.get('reason')}")
+        check("within 25% of the truth, with an interval",
+              a["rate"] and abs(a["rate"] / 4e-4 - 1) <= 0.25
+              and a["ci95"][0] <= a["rate"] <= a["ci95"][1],
+              f"{a['rate']} {a['ci95']}")
+        check("measured, so used for calls and blanks alike",
+              mis["for_calls"]["row"] == mis["for_blanks"]["row"]
+              == a["rate"])
+        check("an axis they do not measure keeps the default, and is "
+              "not taken off the blanks",
+              mis["col"]["basis"] == "default"
+              and mis["for_blanks"]["col"] == 0.0,
+              str(mis["col"]["basis"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_misassignment_none() -> None:
     """No misassignment: the rates are bounds, and every call, limit and
     basis is what it was without the model."""
@@ -824,6 +866,7 @@ def main() -> int:
     test_misassignment_blank()
     test_misassignment_real_contamination()
     test_misassignment_fallback()
+    test_misassignment_unused_fallback()
     test_misassignment_none()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")

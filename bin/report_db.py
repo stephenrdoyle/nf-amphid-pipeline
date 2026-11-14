@@ -336,6 +336,7 @@ AXIS_WORDS = {
 }
 BASIS_WORDS = {
     "fitted": "measured on this run",
+    "unused_combinations": "measured on the unused combinations",
     "upper_bound": "below what this run can see",
     "default": "not measurable on this run: default used",
 }
@@ -376,8 +377,10 @@ def misassignment_html(mis: dict) -> str:
         basis = a.get("basis", "")
         # An interval only for a rate that was accepted; a rejected one's
         # is in its reason.
-        ci = a.get("ci95") if basis == "fitted" else None
-        lev = {"fitted": "ok", "upper_bound": "ok"}.get(basis, "warn")
+        ci = a.get("ci95") if basis in ("fitted", "unused_combinations") \
+            else None
+        lev = {"fitted": "ok", "upper_bound": "ok",
+               "unused_combinations": "ok"}.get(basis, "warn")
         direct = su.get(ax) if su else None
         rows.append(
             f"<tr><td>{name}<br><span class='note'>{what}</span></td>"
@@ -394,9 +397,10 @@ def misassignment_html(mis: dict) -> str:
             f"<td class='num'>{rate_txt(mis['for_calls'][ax])}</td>"
             f"<td class='num'>{rate_txt(direct['rate']) if direct else '—'}"
             + (f"<br><span class='note'>{direct['cells']} cell"
-               f"{'' if direct['cells'] == 1 else 's'}, "
-               f"{rate_txt(direct['range'][0])}–{rate_txt(direct['range'][1])}"
-               "</span>" if direct else "")
+               f"{'' if direct['cells'] == 1 else 's'}"
+               + (f", {rate_txt(direct['ci95'][0])}–"
+                  f"{rate_txt(direct['ci95'][1])}" if direct.get("ci95")
+                  else "") + "</span>" if direct else "")
             + "</td></tr>")
     out.append(
         "<table><thead><tr><th>Misassigned into</th>"
@@ -415,8 +419,12 @@ def misassignment_html(mis: dict) -> str:
         "lies wholly below the pooled rate, taxa present in most wells "
         "(diet plants, gut flora) are lifting the pool, and that group's "
         "rate is used.",
-        "<i>Calls checked at</i>: the rate each call is compared with. A "
-        "rate that could not be measured is checked at the conservative "
+        "<i>Calls checked at</i>: the rate each call is compared with. "
+        "Where the calls cannot measure an axis but the unused "
+        "combinations do (two cells or more), their rate is used, blanks "
+        "included, when its interval over the cells is as tight as a fit's "
+        "must be. A "
+        "rate that could not be measured at all is checked at the conservative "
         f"default ({rate_txt(mis['settings']['default_rate'])} per pair) "
         "and is <b>not</b> taken off the blanks; one below what the run "
         "can see is not checked at all; a fitted rate is "
@@ -669,7 +677,8 @@ def build(args) -> str:
     mis = qc.get("index_misassignment") or {}
     if mis.get("applicable"):
         fitted = [ax for ax in ("row", "col")
-                  if (mis.get(ax) or {}).get("basis") == "fitted"]
+                  if (mis.get(ax) or {}).get("basis")
+                  in ("fitted", "unused_combinations")]
         items.append(
             flag("ok" if len(fitted) == 2 else "warn", "misassignment")
             + " Index misassignment per pair of wells: "

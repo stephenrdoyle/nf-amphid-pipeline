@@ -746,7 +746,8 @@ own rates and allows for them (docs/REFERENCE_DATABASE.md §11.9):
 - **Calls**: a call no larger than misassignment could have made it
   (`--db_misassign_margin` times the fitted rate, or the top of its
   interval, plus Poisson noise) is `misassigned`, not `detected`.
-- **When a rate cannot be measured** - too few wells next to an abundant
+- **When a rate cannot be measured** from the calls or the unused
+  combinations - too few wells next to an abundant
   source, no clear pattern, a pattern that does not follow the indexes,
   or one too high to be misreading - the run QC and the report say why,
   calls are checked at `--db_misassign_default_rate`, and nothing is
@@ -754,9 +755,12 @@ own rates and allows for them (docs/REFERENCE_DATABASE.md §11.9):
   nothing, the rate is reported as a bound, and nothing is checked
   against it.
 - **Unused combinations**, where the plate has them, measure the rates
-  directly from the demultiplexer's `index_matrix.tsv`; the report sets
+  directly from the demultiplexer's `index_matrix.tsv`. The report sets
   them beside the fit as a cross-check, and says so if they disagree
-  five-fold.
+  five-fold. Where the calls cannot measure an axis and the unused cells
+  pin it (at least two cells, interval within 10-fold), their rate is
+  used instead of the default, for the blanks too (basis
+  `unused_combinations`).
 
 Samples laid out by group along a row or column - one host per column,
 say - share taxa along that axis for real. The fit rejects a "rate"

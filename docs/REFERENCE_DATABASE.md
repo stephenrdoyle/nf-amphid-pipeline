@@ -759,15 +759,33 @@ What the checks cannot separate:
   neighbours and the whole plate then predict the same reads. In
   simulation such contamination was fitted on 2 of 16 axes.
 
-**Unused combinations** are reported beside the fit as a cross-check,
-not used in the fit, so that a full plate and a part-filled one are
-measured the same way. They come from the demultiplexer's
-`index_matrix.tsv`: reads on each unused pair over the reads of its row
-(same i5) or column (same i7), with the other axis's expected share taken
-off. They count every demultiplexed read rather than classified ones. A
-five-fold disagreement with the fit is flagged. Usually only one axis is
-measurable: unused cells sit in a part-filled column, whose column has
-few reads.
+**Unused combinations** come from the demultiplexer's
+`index_matrix.tsv`. They count every demultiplexed read rather than
+classified ones, and are used in two ways:
+
+- **As a cross-check** on every run that has them. Each axis is measured
+  from the unused cells, with the other axis taken off at its fitted
+  rate where the calls measured one. Otherwise both axes are fitted
+  together, by non-negative least squares weighted for Poisson counts,
+  with a 95% interval from resampling the cells. A five-fold
+  disagreement with the fit is flagged. Least squares, not a median of
+  ratios, because unused cells in a part-filled column share that
+  column's sources while their rows' differ. On a 42-well plate with two
+  used wells in the unused cells' column, a median of row ratios ran
+  20–75% high, and least squares came within 25% at normal depth.
+- **As the fallback.** Where the calls cannot measure an axis (basis
+  `default`), the unused cells' rate takes its place
+  (`unused_combinations`), if at least two cells measure that axis and
+  their interval spans at most 10-fold, as a fit's must. It is measured,
+  not assumed, so it is used for the blanks and gets the margin, as a
+  fitted rate does; the fit's own basis and reason are kept beside it
+  (`fit`). An axis the fit bounded keeps its bound, because the
+  classified reads showed nothing where a leak would show. In simulation,
+  on 88-well plates at 2,000–5,000 reads a well, the calls could not
+  measure the row axis but the unused column gave 0.82–1.01 of the truth.
+  Where the unused cells share a column with used wells and are few, the
+  axes do not separate (the interval reaches zero) and the default
+  stands.
 
 **How the rates are used.**
 
@@ -802,7 +820,7 @@ few reads.
 |---|---|---|
 | row (i7 misread) | fitted 5.0e-4 (2.5–7.0e-4), pooled | default: interval 3.4e-3 to ∞ |
 | column (i5 misread) | fitted 5.0e-4 (2.0e-4–8.9e-4), from helminths; pooled 1.5e-3 | default: 1.3e-1, samples grouped by column |
-| unused combinations, row | 3.0–6.5e-4 (6 cells: 740–1,979 reads, 0.030–0.065% of their rows) | 2.8e-4 (0.9–5.4e-4, 6 cells) |
+| unused combinations, row | 3.0–6.5e-4 (6 cells: 740–1,979 reads, 0.030–0.065% of their rows) | 2.8e-4 (0–4.4e-4, 6 cells sharing a column with two used wells): too loose to stand in, so the default stays |
 | extraction blank, *T. trichiura* | 2,348 reads, 1,963 expected, within reach: explained | — |
 | NTC1 / NTC2, *T. trichiura* | 180 / 106 reads, explained | — |
 | *T. trichiura* in STOP wells | detected in 22 of 24 (was 6); STOP1 and STOP2 detected; 2 misassigned (STOP10 766 and STOP17 699 reads) | — |

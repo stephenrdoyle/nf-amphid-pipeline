@@ -387,6 +387,42 @@ def misassign_taxa(which: str, wells: dict, rows: dict, geom: dict,
     return {k for k in every if seen[k] <= 0.25 * len(field)}
 
 
+# Rates measured on the run, as opposed to a bound or the assumed default:
+# only these come off the blanks, and only these get the margin.
+MEASURED = ("fitted", "unused_combinations")
+# Unused cells an axis needs before their rate stands in for a fit.
+MIN_UNUSED_CELLS = 2
+
+
+def unused_fallback(mis: dict) -> None:
+    """Where the fit could not measure an axis (basis 'default'), the
+    unused index combinations' direct rate takes its place, if they
+    measure that axis in at least MIN_UNUSED_CELLS cells and pin it as
+    the fit must (a 95% interval no wider than max_spread). Measured,
+    not assumed, so it is used for the blanks as a fitted rate is. An
+    axis the fit bounded keeps
+    its bound: the classified reads showed nothing where a leak would
+    be seen, which the unused cells - counting every read - do not
+    overturn."""
+    su = mis.get("unused_combinations") or {}
+    for ax in ("row", "col"):
+        a, u = mis[ax], su.get(ax)
+        spread = mis["settings"]["max_spread"]
+        if a["basis"] != "default" or not u or u["rate"] <= 0 \
+                or u["cells"] < MIN_UNUSED_CELLS or not u["ci95"] \
+                or u["ci95"][0] <= 0 or u["ci95"][1] > spread * u["ci95"][0]:
+            continue
+        a["fit"] = {k: a.get(k) for k in ("basis", "reason")}
+        a.update(basis="unused_combinations", rate=u["rate"],
+                 ci95=list(u["ci95"]),
+                 reason=f"not measurable from the calls ({a['reason']}); "
+                 f"measured directly on {u['cells']} unused index "
+                 "combinations")
+        mis["for_calls"][ax] = u["rate"]
+        mis["for_calls_upper"][ax] = u["ci95"][1]
+        mis["for_blanks"][ax] = u["rate"]
+
+
 def explained(reads: int, reach: float) -> bool:
     """No more reads than misassignment could plausibly have put there:
     the reach, with Poisson noise on top. Under one read nothing could
@@ -766,20 +802,28 @@ def main(argv=None) -> int:
                                     if args.misassign_taxa == "grouped"
                                     else None))
     sharing = IndexSharing(geom, by_key)
+    # The unused index combinations: a direct measurement, beside the fit
+    # and, where the fit could not measure an axis, in its place.
+    matrix = (read_table(args.index_matrix)
+              if args.index_matrix and os.path.exists(args.index_matrix)
+              else [])
     if mis.get("applicable"):
+        mis["unused_combinations"] = (
+            sentinel_rates(matrix, mis["for_blanks"]) if matrix else None)
+        unused_fallback(mis)
         # The most a pair of wells could plausibly leak, per axis: a
-        # fitted rate times the margin or the top of its interval,
+        # measured rate times the margin or the top of its interval,
         # whichever is more; a bound or the default as it stands - each
         # is already the high side of what the run allows.
         mis["margin"] = args.misassign_margin
         mis["for_calls_reach"] = {
             ax: (max(args.misassign_margin * mis["for_calls"][ax],
                      mis["for_calls_upper"][ax])
-                 if mis[ax]["basis"] == "fitted" else mis["for_calls"][ax])
+                 if mis[ax]["basis"] in MEASURED else mis["for_calls"][ax])
             for ax in ("row", "col")}
         # The same for the blanks, from measured rates only.
         mis["for_blanks_reach"] = {
-            ax: (mis["for_calls_reach"][ax] if mis[ax]["basis"] == "fitted"
+            ax: (mis["for_calls_reach"][ax] if mis[ax]["basis"] in MEASURED
                  else 0.0) for ax in ("row", "col")}
 
     def expected(sid: str, r: dict, which: str) -> float:
@@ -1009,11 +1053,9 @@ def main(argv=None) -> int:
                              random.Random(args.seed), args.permutations)
 
     # -- index misassignment, for the record -----------------------------
-    matrix = (read_table(args.index_matrix)
-              if args.index_matrix and os.path.exists(args.index_matrix)
-              else [])
-    mis["unused_combinations"] = (sentinel_rates(matrix, mis.get("for_calls"))
-                                  if matrix else None)
+    if not mis.get("applicable"):
+        mis["unused_combinations"] = (sentinel_rates(matrix)
+                                      if matrix else None)
     # Two measurements of one thing: say where they part company. The
     # unused cells count every read and the fit classified ones, so some
     # difference is expected; five-fold is not that.
