@@ -87,6 +87,9 @@ workflow NANOPORE_PATH {
     // and every percentage below is taken against a denominator the
     // split quietly changed.
     split    = MERGE_SPLIT.out.summary
+    // Reads on every index pair, used or not: the unused ones measure
+    // misassignment directly, beside the rate synthesis fits.
+    matrix   = DEMUX_ONT.out.matrix
     versions = DEMUX_ONT.out.versions
         .mix(SPLIT_CONCATEMERS.out.versions,
              SPLIT_LIST.out.versions,

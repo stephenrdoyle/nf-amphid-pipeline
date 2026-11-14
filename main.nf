@@ -337,6 +337,7 @@ workflow {
             // (see the NO_ placeholders above).
             NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
             NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT_DB")),
+            NANOPORE_PATH.out.matrix.ifEmpty(file("${projectDir}/assets/NO_MATRIX_DB")),
             PREFLIGHT.out.dir,
             ch_database,
         )

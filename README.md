@@ -582,6 +582,7 @@ python3 tests/test_prep.py         #  32 assertions
 python3 tests/test_assign.py       #  39 assertions
 python3 tests/test_synthesis.py    #  65 assertions, ~90s
 python3 tests/test_report.py       #  53 assertions
+python3 tests/test_misassignment.py  # simulated plates: misassignment rates, ~45s
 python3 tests/test_nextflow.py     #  14 static checks on the workflow
 ```
 
@@ -828,6 +829,15 @@ in a 3-read NTC is not a 33% carryover rate - used as one, it would hold
 a 20,000-read sample to 6,667 reads before anything could be detected.
 Shallow blanks still set the absolute floor.
 
+On a combinatorial plate a blank also holds what index misassignment
+brought from the wells sharing its i5 or i7, and a deep well in its row
+or column can make it look contaminated. Database mode measures each
+run's misassignment rate along rows and columns from its own calls, and
+takes that share off the blanks before they set a limit. It also marks a
+call no larger than misassignment could make it as `misassigned`
+(docs/REFERENCE_DATABASE.md §11.9; docs/USAGE.md, *Index misassignment
+and plate position*).
+
 ### The third state
 
 `not_detected` is a claim about the sample. It is only available when the
@@ -870,6 +880,13 @@ rows. So it will catch a gross plate problem and will miss a subtle one —
 worth knowing before treating a clean result as evidence of a clean plate.
 The p-values are unadjusted, and `run_qc.json` says so: with one test per
 taxon per axis, roughly one in twenty falls below 0.05 by chance.
+
+Database mode runs the same tests (`ampseqlib.plate_effects`, shared by
+both syntheses). They cover depth, each organism group's share of the
+well and the twelve commonest detected taxa, and the results go in
+`db_run_qc.json` and the report. There, a taxon with a row or column
+effect may also be index misassignment from a heavy well on that row or
+column; the misassignment section beside it gives the run's rates.
 
 ## Two runs of the same samples
 
