@@ -21,10 +21,15 @@ process ASSIGN_DB {
     script:
     // Per sample, single-threaded under the field profile like ASSIGN:
     // the samples are the parallelism. minimap2 gets the task's cores
-    // where a profile gives it more than one.
+    // where a profile gives it more than one. Single reads of any
+    // platform - nanopore's, demultiplexed here, or a predemultiplexed
+    // run's (several files are read as one) - with the read type the
+    // platform adapter declared (contract A, docs/CONTRACTS.md).
     """
     assign_db.py \\
         --reads ${reads} \\
+        --read-type ${meta.read_type ?: 'single_long_noisy'} \\
+        --protocol ${params.db_protocol} \\
         --database ${database} \\
         --index ${index} \\
         --primers ${primers} \\

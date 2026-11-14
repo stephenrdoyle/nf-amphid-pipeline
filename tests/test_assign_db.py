@@ -46,6 +46,7 @@ def _load(name: str, rel: str):
 
 adb = _load("assign_db", "bin/assign_db.py")
 import ampseqlib as al            # noqa: E402
+import protocols.vespa_v4 as v4  # noqa: E402
 import make_db_fixture as fx      # noqa: E402
 import simulate as sim            # noqa: E402
 
@@ -261,49 +262,49 @@ def test_lca_and_floors() -> None:
     print("\nLCA and identity floors")
     tax = _tax()
     R = al.RANKS
-    check("one record: LCA is its species", adb.lca_depth(["A1"], tax) == 8)
+    check("one record: LCA is its species", al.lca_depth(["A1"], tax) == 8)
     check("two species of one genus: genus",
-          adb.lca_depth(["A1", "A2"], tax) == R.index("genus"))
-    check("two genera: family", adb.lca_depth(["A1", "B1"], tax) == R.index("family"))
+          al.lca_depth(["A1", "A2"], tax) == R.index("genus"))
+    check("two genera: family", al.lca_depth(["A1", "B1"], tax) == R.index("family"))
     check("a blank rank breaks agreement",
-          adb.lca_depth(["A1", "P1"], tax) == R.index("order")
-          and adb.lca_depth(["P1"], tax) == R.index("order"))
-    floors = adb.DEFAULT_FLOORS
-    check("species kept at 0.996", adb.apply_floors(8, 0.996, floors) == 8)
+          al.lca_depth(["A1", "P1"], tax) == R.index("order")
+          and al.lca_depth(["P1"], tax) == R.index("order"))
+    floors = v4.DEFAULT_FLOORS
+    check("species kept at 0.996", al.apply_floors(8, 0.996, floors) == 8)
     check("species cut to genus at 0.994",
-          adb.apply_floors(8, 0.994, floors) == R.index("genus"))
+          al.apply_floors(8, 0.994, floors) == R.index("genus"))
     check("species cut to family at 0.97",
-          adb.apply_floors(8, 0.97, floors) == R.index("family"))
+          al.apply_floors(8, 0.97, floors) == R.index("family"))
     check("species cut above family at 0.90",
-          adb.apply_floors(8, 0.90, floors) == R.index("order"))
+          al.apply_floors(8, 0.90, floors) == R.index("order"))
     check("a genus LCA is not raised by a high identity",
-          adb.apply_floors(R.index("genus"), 1.0, floors) == R.index("genus"))
+          al.apply_floors(R.index("genus"), 1.0, floors) == R.index("genus"))
 
     # identity charges clipped ends
     h = hit("A1", 900, 450, 450, qlen=500, qs=20, qe=470)
     check("identity counts unaligned query ends as differences",
-          abs(adb.identity(h) - 450 / 500) < 1e-9, str(adb.identity(h)))
+          abs(al.hit_identity(h) - 450 / 500) < 1e-9, str(al.hit_identity(h)))
 
     # margin: hits within 0.5% of the best score take part
     hs = [hit("A1", 1000, 498, 500), hit("A2", 996, 497, 500),
           hit("B1", 980, 495, 500)]
-    c = adb.classify_hits(hs, tax, floors, 0.005)
+    c = v4.classify_hits(hs, tax, floors, 0.005)
     check("a near-tie between sisters stops at genus", c["rank"] == "genus"
           and c["near_hits"] == 2 and c["best_hit"] == "A1", str(c))
-    c = adb.classify_hits(hs[:1] + hs[2:], tax, floors, 0.005)
+    c = v4.classify_hits(hs[:1] + hs[2:], tax, floors, 0.005)
     check("a clear best hit at 99.6% is a species", c["rank"] == "species",
           str(c))
-    c = adb.classify_hits([hit("B1", 800, 440, 500)], tax, floors, 0.005)
+    c = v4.classify_hits([hit("B1", 800, 440, 500)], tax, floors, 0.005)
     taxon, label = adb.label_for(c, tax, R.index("family"))
     check("88% identity: unclassified, named for how far and to what",
           c["rank"] == "order" and label == "unclassified, 88% to G2"
           and taxon == "O", f"{c['rank']} {taxon!r} {label!r}")
-    c = adb.classify_hits([hit("A1", 950, 485, 500)], tax, floors, 0.005)
+    c = v4.classify_hits([hit("A1", 950, 485, 500)], tax, floors, 0.005)
     taxon, label = adb.label_for(c, tax, R.index("family"))
     check("97% identity: named at family, with the nearest genus",
           c["rank"] == "family" and taxon == "F1"
           and label == "F1 (97% to G1)", f"{c['rank']} {label}")
-    c = adb.classify_hits([], tax, floors, 0.005)
+    c = v4.classify_hits([], tax, floors, 0.005)
     check("no hit at all", adb.label_for(c, tax, 6)[1] ==
           "unclassified, no database hit")
 
@@ -337,10 +338,10 @@ def test_lca_and_floors() -> None:
 
 def test_floor_parsing() -> None:
     print("\nfloor parsing")
-    check("floors parse", adb.parse_floors("species=0.99,genus=0.97") ==
+    check("floors parse", al.parse_floors("species=0.99,genus=0.97") ==
           {"species": 0.99, "genus": 0.97})
     try:
-        adb.parse_floors("specie=0.9")
+        al.parse_floors("specie=0.9")
         check("a misspelt rank is refused", False)
     except SystemExit:
         check("a misspelt rank is refused", True)
@@ -358,7 +359,7 @@ def test_trim_reads() -> None:
                                     fx.amplicon(ins[:30])]):
                 fh.write(f"@r{i}\n{s}\n+\n{'5' * len(s)}\n")
         ps = al.PrimerSet(fwd=[fx.FWD], rev=[fx.REV])
-        reads, fate = adb.trim_reads(fq, ps)
+        reads, fate = al.trim_reads(fq, ps)
     check("both orientations trimmed to the insert, forward strand",
           reads.get("r0") == ins and reads.get("r1") == ins, str(reads)[:80])
     # three edits in the reverse primer: found at the database-mode
@@ -373,9 +374,9 @@ def test_trim_reads() -> None:
         with open(fq, "w") as fh:
             fh.write(f"@x\n{amp3}\n+\n{'5' * len(amp3)}\n")
         ps2 = al.PrimerSet(fwd=[fx.FWD], rev=[fx.REV])
-        r2, f2 = adb.trim_reads(fq, ps2)
+        r2, f2 = al.trim_reads(fq, ps2)
         ps3 = al.PrimerSet(fwd=[fx.FWD], rev=[fx.REV], max_edits=3)
-        r3, f3 = adb.trim_reads(fq, ps3)
+        r3, f3 = al.trim_reads(fq, ps3)
     check("a primer three edits off is found at max_edits 3, not at 2",
           f2["no_primer"] == 1 and r3.get("x") == ins, f"{f2} {f3}")
     check("reads without primers, or too short, are counted out",
@@ -625,13 +626,13 @@ def test_aligned_identity() -> None:
         w[i] = {"A": "C", "C": "G", "G": "T", "T": "A"}[w[i]]
     w = "".join(w)
     check("a window is aligned to the record's start, its tail free",
-          abs(adb.aligned_identity([(w, "start")], rec) - 0.96) < 1e-9)
+          abs(v4.aligned_identity([(w, "start")], rec) - 0.96) < 1e-9)
     check("and an R2 window to its end, its head free",
-          abs(adb.aligned_identity([(rec[-200:], "end")], rec) - 1.0) < 1e-9)
+          abs(v4.aligned_identity([(rec[-200:], "end")], rec) - 1.0) < 1e-9)
     check("a whole insert end to end",
-          adb.aligned_identity([(rec, "whole")], rec) == 1.0)
+          v4.aligned_identity([(rec, "whole")], rec) == 1.0)
     check("too far to clear any floor: None",
-          adb.aligned_identity([("".join(rng.choice("ACGT")
+          v4.aligned_identity([("".join(rng.choice("ACGT")
                                          for _ in range(250)), "start")],
                                rec) is None)
     tax = {"R": {r: f"{r}1" for r in al.RANKS}}
@@ -639,14 +640,14 @@ def test_aligned_identity() -> None:
     # minimap2 charged a clipped 100bp end: 150/250 -> no floor cleared.
     call = {"best_hit": "R", "identity": 0.60, "depth": 5, "lca_depth": 8,
             "rank": "order"}
-    r = adb.refine_identity(call, [(w, "start")], rec, floors)
+    r = v4.refine_identity(call, [(w, "start")], rec, floors)
     check("a clipped end no longer drags a call under the family floor",
           r["identity"] > 0.95 and r["rank"] == "family"
           and r["identity_minimap2"] == 0.60, str(r))
     hi = {"best_hit": "R", "identity": 0.999, "depth": 8, "lca_depth": 8,
           "rank": "species"}
     check("and never lowers an identity minimap2 gave",
-          adb.refine_identity(hi, [(w, "start")], rec, floors) == hi)
+          v4.refine_identity(hi, [(w, "start")], rec, floors) == hi)
     check("the nearest record is named past placeholders",
           adb.nearest_name({"domain": "Bacteria", "family": "Prevotellaceae",
                             "genus": "Prevotellaceae_X"}) == "Prevotellaceae")

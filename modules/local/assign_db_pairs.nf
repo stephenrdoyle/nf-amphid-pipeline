@@ -37,6 +37,7 @@ process ASSIGN_DB_PAIRS {
         --assay ${assay} \\
         --sample-id ${meta.id} \\
         --threads ${task.cpus} \\
+        --protocol ${params.db_protocol} \\
         ${w1} ${w2} \
         --read-length ${params.illumina_read_length} \\
         --max-ee ${params.max_ee} \\

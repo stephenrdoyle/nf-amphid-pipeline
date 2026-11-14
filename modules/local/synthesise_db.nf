@@ -9,8 +9,9 @@ process SYNTHESISE_DB {
     val  run_id
     path(clusters, stageAs: 'assign_db/*')
     path(summaries, stageAs: 'assign_db/*')
-    path demux_summary
-    path split_summary
+    // Contract A: the platform adapter's accounting of the run
+    // (DEMUX_ACCOUNTING, docs/CONTRACTS.md), whatever the platform.
+    path accounting
     path index_matrix
     path preflight_dir
     path database
@@ -27,8 +28,10 @@ process SYNTHESISE_DB {
     // call reached, judged against the run's blanks and a relative
     // abundance floor, with off-target fractions per well. No standards,
     // no plasmids - see bin/synthesise_db.py.
-    def demux_arg = !demux_summary.name.startsWith('NO_') ? "--demux-summary ${demux_summary}" : ''
-    def split_arg = !split_summary.name.startsWith('NO_') ? "--split-summary ${split_summary}" : ''
+    // The protocol's hooks give the defaults of these two; passed only
+    // when set.
+    def host_arg = params.db_host_clade != null ? "--host-clade '${params.db_host_clade}'" : ''
+    def rel_arg  = params.db_min_rel_abundance != null ? "--min-rel-abundance ${params.db_min_rel_abundance}" : ''
     // The demultiplexer's index matrix: unused index pairs measure
     // misassignment directly, a cross-check on the fitted rates.
     def matrix_arg = !index_matrix.name.startsWith('NO_') ? "--index-matrix ${index_matrix}" : ''
@@ -37,12 +40,13 @@ process SYNTHESISE_DB {
         --assign-dir assign_db \\
         --preflight-dir ${preflight_dir} \\
         --database ${database} \\
-        ${demux_arg} ${split_arg} ${matrix_arg} \\
+        --accounting ${accounting} ${matrix_arg} \\
+        --protocol ${params.db_protocol} \\
+        --calling-rule ${params.db_calling_rule} \\
         --run-id ${run_id} \\
         --min-depth ${params.min_depth} \\
         --absolute-floor ${params.absolute_floor} \\
-        --min-rel-abundance ${params.db_min_rel_abundance} \\
-        --host-clade '${params.db_host_clade}' \\
+        ${rel_arg} ${host_arg} \\
         --misassign-default-rate ${params.db_misassign_default_rate} \\
         --misassign-margin ${params.db_misassign_margin} \\
         --outdir synthesis

@@ -41,6 +41,7 @@ def _load(name: str, rel: str):
 
 syn = _load("synthesise_db", "bin/synthesise_db.py")
 rep = _load("report_db", "bin/report_db.py")
+import protocols  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -251,7 +252,7 @@ def test_no_blanks_and_cohort() -> None:
 
 def test_groups() -> None:
     print("\norganism groups, as VESPA reports them")
-    g = syn.organism_group
+    g = protocols.organism_group
     L = lambda x: x.split(";")
     cases = [
         ("Eukaryota;Obazoa;Opisthokonta;Metazoa;Nematoda;Chromadorea", "helminths"),

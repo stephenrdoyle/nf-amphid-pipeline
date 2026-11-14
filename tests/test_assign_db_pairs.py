@@ -44,6 +44,7 @@ def _load(name: str, rel: str):
 
 adp = _load("assign_db_pairs", "bin/assign_db_pairs.py")
 import ampseqlib as al          # noqa: E402
+import protocols.vespa_v4 as v4  # noqa: E402
 import make_db_fixture as fx    # noqa: E402
 
 PASS, FAIL = [], []
@@ -77,15 +78,15 @@ def test_orient() -> None:
     amp = fx.amplicon(ins)
     r1 = ("a", amp[:150], "I" * 150)
     r2 = ("a", al.revcomp(amp)[:150], "I" * 150)
-    o = adp.orient(r1, r2, ps)
+    o = al.orient_pair(r1, r2, ps)
     check("R1 from the forward primer: both primers trimmed",
           o is not None and o[0][0] == ins[:132]
           and o[1][0] == al.revcomp(ins)[:128], str(o)[:80])
-    o2 = adp.orient(r2, r1, ps)
+    o2 = al.orient_pair(r2, r1, ps)
     check("mates swapped (R1 from the reverse primer): put back",
           o2 is not None and o2[0][0] == o[0][0] and o2[1][0] == o[1][0])
     check("no primer pair: None",
-          adp.orient(("a", rand(rng, 150), "I" * 150), r2, ps) is None)
+          al.orient_pair(("a", rand(rng, 150), "I" * 150), r2, ps) is None)
 
 
 def test_denoiser() -> None:
@@ -195,7 +196,7 @@ def test_divergent_window() -> None:
                 f2.write(f"@{i} 2\n{al.revcomp(amp)[:150]}\n+\n{'I' * 150}\n")
 
         def run(clip):
-            old, adp.SR_CLIP = adp.SR_CLIP, clip
+            old, v4.SR_CLIP = v4.SR_CLIP, clip
             try:
                 out = os.path.join(tmp, f"out{clip}")
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -206,13 +207,13 @@ def test_divergent_window() -> None:
                               fx.ASSAY, "--sample-id", "X", "--outdir", out,
                               "--minimap2", mm2])
             finally:
-                adp.SR_CLIP = old
+                v4.SR_CLIP = old
             rows = list(csv.DictReader(open(os.path.join(out, "X.clusters.tsv")),
                                        delimiter="\t"))
             js = json.load(open(os.path.join(out, "X.assign_db.json")))
             return rows[0], js
         sr, _ = run(10.0)           # never re-mapped: -x sr alone
-        row, js = run(adp.SR_CLIP)
+        row, js = run(v4.SR_CLIP)
         # the expected identity: mismatches over the two windows
         w1, w2 = len(row["consensus"].split("N" * 10)[0]), 128
         diffs = sum(a != b for a, b in zip(q[:w1], ref[:w1]))

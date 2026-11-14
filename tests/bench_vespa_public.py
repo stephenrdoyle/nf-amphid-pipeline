@@ -63,7 +63,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 
 import assign_db_pairs as adp   # noqa: E402
-import synthesise_db as syn     # noqa: E402
+import protocols                # noqa: E402
 
 NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
       "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
@@ -179,8 +179,8 @@ def ours(outdir: str, sid: str, host_clade: str, min_rel: float) -> dict:
     groups, genera = Counter(), defaultdict(float)
     tot = sum(int(r["reads"]) for r in rows) or 1
     for r in rows:
-        g = syn.organism_group(r["lineage"].split(";") if r["lineage"] else [],
-                               host_clade)
+        g = protocols.organism_group(
+            r["lineage"].split(";") if r["lineage"] else [], host_clade)
         groups[CATEGORY.get(g, "unassigned")] += int(r["reads"])
         lin = r["lineage"].split(";")
         if len(lin) > 7 and lin[7] and int(r["reads"]) / tot >= min_rel:
