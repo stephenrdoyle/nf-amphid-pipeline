@@ -735,8 +735,14 @@ own rates and allows for them (docs/REFERENCE_DATABASE.md §11.9):
   combination, so they work on a full plate. Each comes with a 95%
   interval, and the run QC (`index_misassignment` in `db_run_qc.json`)
   keeps them run by run so drift shows.
-- **Blanks**: a blank's reads that misassignment explains are taken off
-  before it sets a limit - with a **measured** rate only.
+- **Grouped**: each organism group is also fitted alone, and where one
+  group's rate is significantly below the pooled one - taxa present in
+  most wells (diet plants, gut flora) lift a pooled fit - that group's
+  is used (`from_group`). `synthesise_db.py --misassign-taxa all`
+  pools only.
+- **Blanks** are held to the standard a sample is: reads a blank would
+  be called `misassigned` for do not count towards a limit, and above
+  that the expected reads come off - with a **measured** rate only.
 - **Calls**: a call no larger than misassignment could have made it
   (`--db_misassign_margin` times the fitted rate, or the top of its
   interval, plus Poisson noise) is `misassigned`, not `detected`.

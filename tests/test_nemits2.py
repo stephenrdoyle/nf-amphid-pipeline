@@ -568,6 +568,93 @@ def test_end_to_end() -> None:
         _ = man
 
 
+def test_plate_misassignment() -> None:
+    """Index misassignment on an ITS2 plate. The model works on calls,
+    not sequences, so an ITS2 release changes nothing in it: a simulated
+    combinatorial plate (simulate.simulate_plate_counts), every taxon a
+    nematode with an NCBI lineage, through synthesis against the
+    miniature release. Every taxon is one group, helminths, so the
+    grouped fit is the pooled one. The rates come back, and a blank next
+    to the heavy column is not read as contamination."""
+    print("\nindex misassignment on an ITS2 plate")
+    sim = _load("simulate", "bin/simulate.py")
+    p = sim.simulate_plate_counts(random.Random(11), 8, 12, rate_row=4e-4,
+                                  rate_col=7e-4)
+    names = sorted({k for cs in p["counts"].values() for k in cs})
+    lin = {k: ";".join(LINEAGE + ["Trichostrongylidae", f"Genus{i}",
+                                  f"Genus{i} species{i}"])
+           for i, k in enumerate(names)}
+    cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank",
+            "taxon", "label", "identity", "coverage", "lineage", "best_hit",
+            "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
+            "db_margin", "origin", "merged", "length", "database_version",
+            "consensus"]
+    with tempfile.TemporaryDirectory() as tmp:
+        rel = os.path.join(tmp, "rel")
+        write_release(rel, build_records(random.Random(1)))
+        ad, pfd = os.path.join(tmp, "assign_db"), os.path.join(tmp, "pf")
+        os.makedirs(ad)
+        os.makedirs(pfd)
+        for sid, cs in p["counts"].items():
+            with open(os.path.join(ad, f"{sid}.clusters.tsv"), "w") as fh:
+                w = csv.DictWriter(fh, cols, delimiter="\t",
+                                   lineterminator="\n")
+                w.writeheader()
+                for i, (k, n) in enumerate(sorted(cs.items())):
+                    sp = lin[k].split(";")[-1]
+                    w.writerow({"sample_id": sid, "cluster": f"{sid}_c{i}",
+                                "reads": n, "rank": "species", "taxon": sp,
+                                "label": sp, "identity": "1.0000",
+                                "coverage": "1.000", "lineage": lin[k],
+                                "best_hit": f"ITS2_{k}", "near_hits": 1,
+                                "lca_rank": "species", "origin": "group",
+                                "merged": 0, "length": 240,
+                                "database_version": "nemits2-test",
+                                "consensus": "ACGT"})
+            n = sum(cs.values())
+            json.dump({"sample_id": sid, "clusters": len(cs),
+                       "reads": {"reads_in": n, "clustered": n},
+                       "settings": {}},
+                      open(os.path.join(ad, f"{sid}.assign_db.json"), "w"))
+        with open(os.path.join(pfd, "file_resolution.tsv"), "w") as fh:
+            fh.write("run_id\tsample_id\tsanitised_id\tplate_row\t"
+                     "plate_col\tsample_type\n")
+            for sid, t in p["types"].items():
+                r, c = p["geom"][sid]
+                fh.write(f"R1\t{sid}\t{sid}\t{r}\t{c}\t{t}\n")
+        json.dump({}, open(os.path.join(pfd, "preflight_summary.json"), "w"))
+        out = os.path.join(tmp, "synthesis")
+        with contextlib.redirect_stdout(io.StringIO()):
+            sdb.main(["--assign-dir", ad, "--preflight-dir", pfd,
+                      "--database", rel, "--run-id", "R1", "--outdir", out,
+                      "--min-depth", "50", "--permutations", "100"])
+        qc = json.load(open(os.path.join(out, "db_run_qc.json")))
+        calls = list(csv.DictReader(open(os.path.join(out, "db_calls.tsv")),
+                                    delimiter="\t"))
+    mis = qc["index_misassignment"]
+    check("every taxon is a helminth over NCBI ranks",
+          {c["group"] for c in calls} == {"helminths"},
+          str({c["group"] for c in calls}))
+    for ax, truth in (("row", 4e-4), ("col", 7e-4)):
+        a = mis[ax]
+        check(f"the {ax} rate comes back within 20% on an ITS2 release",
+              a["basis"] == "fitted" and abs(a["rate"] / truth - 1) <= 0.2,
+              f"{a['basis']} {a['rate']} {a['reason']}")
+    blank = next(s for s, t in sorted(p["types"].items())
+                 if t != "unknown" and p["counts"][s].get("worm"))
+    worm = lin["worm"].split(";")[-1]
+    cb = next(c for c in calls if c["sample_id"] == blank
+              and c["taxon"] == worm)
+    check("a blank next to the heavy column is misassignment, not "
+          "contamination", cb["call"] in ("misassigned", "below_blanks")
+          and float(cb["misassign_expected"]) >= 0.5 * int(cb["reads"]),
+          str({k: cb[k] for k in ("reads", "call", "misassign_expected")}))
+    check("and the worm's limit stays at the floor in field wells",
+          all(int(c["limit_reads"]) <= 2 for c in calls
+              if c["taxon"] == worm and c["sample_type"] == "unknown"),
+          str(sorted({c["limit_reads"] for c in calls if c["taxon"] == worm})))
+
+
 def main() -> int:
     test_loading()
     test_span_distances()
@@ -576,6 +663,7 @@ def main() -> int:
     test_groups()
     test_preflight()
     test_end_to_end()
+    test_plate_misassignment()
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

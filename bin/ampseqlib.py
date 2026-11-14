@@ -1884,11 +1884,12 @@ class IndexSharing:
         xr, xc, _xn = self.sources(sid, key)
         return rate_row * xr + rate_col * xc
 
-    def pairs(self, min_source: int) -> list[tuple]:
+    def pairs(self, min_source: int, keys=None) -> list[tuple]:
         """(well, reads, row sources, column sources, taxon) for every
         placed well and every taxon with min_source reads on the run -
         zeros included, which are as much evidence as reads."""
-        keys = [k for k, t in self.tot.items() if t >= min_source]
+        keys = [k for k, t in self.tot.items() if t >= min_source
+                and (keys is None or k in keys)]
         out = []
         for sid in self.geom:
             cs = self.counts.get(sid) or {}
@@ -1998,7 +1999,8 @@ def fit_misassignment(
     max_rate: float = MISASSIGN_MAX_RATE,
     default_rate: float = MISASSIGN_DEFAULT_RATE,
     n_boot: int = 200, n_placebo: int = MISASSIGN_PLACEBOS,
-    placebo_p: float = MISASSIGN_PLACEBO_P,
+    placebo_p: float = MISASSIGN_PLACEBO_P, taxa=None,
+    groups: dict | None = None,
 ) -> dict:
     """The run's per-pair misassignment rate along rows and columns.
 
@@ -2026,6 +2028,14 @@ def fit_misassignment(
     either lost - a consensus needs 5 - or kept only when it happened to
     come out high, and either way it misstates the rate. The fit starts
     from the deepest pairs for the same reason.
+
+    With `groups` ({taxon: group}), each group with enough pairs is also
+    fitted on its own. Presence can only lift a group's ratios, so where
+    one group's whole 95% interval sits below the pooled rate, the pool
+    is being lifted by taxa really present next door - diet plants and
+    gut flora in most stool wells - and the lowest such group's rate is
+    used instead (`from_group`). Where the groups agree, as they do on
+    simulated plates, the pooled fit stands unchanged.
 
     The validity check is a placebo. The wells are dealt out again over
     the plate's positions at random: leakage that really follows index
@@ -2057,7 +2067,7 @@ def fit_misassignment(
                        "no well is known to share an index with another")
         return out
     out["applicable"] = True
-    pairs = IndexSharing(geom, counts).pairs(min_source)
+    pairs = IndexSharing(geom, counts).pairs(min_source, taxa)
 
     def other(ax):
         return "col" if ax == "row" else "row"
@@ -2173,7 +2183,7 @@ def fit_misassignment(
             beaten = 0
             for _ in range(n_placebo):
                 pp = IndexSharing(_placebo_layout(geom, rng), counts
-                                  ).pairs(min_source)
+                                  ).pairs(min_source, taxa)
                 if _low_tail_share(pp, ax, rate[ax], used[ax],
                                    dominance)[0] >= tight:
                     beaten += 1
@@ -2197,6 +2207,14 @@ def fit_misassignment(
 
     # A bound means the wells that should show a leak show nothing, so
     # there is nothing to check calls against: zero, as for the blanks.
+    if groups:
+        _lowest_group(out, geom, counts, rng, groups,
+                      dict(min_source=min_source, dominance=dominance,
+                           min_pairs=min_pairs, min_support=min_support,
+                           max_spread=max_spread, max_rate=max_rate,
+                           default_rate=default_rate, n_boot=n_boot,
+                           n_placebo=n_placebo, placebo_p=placebo_p))
+
     out["for_calls"] = {ax: (0.0 if out[ax]["basis"] == "upper_bound"
                              else out[ax]["rate"] if out[ax]["rate"] is not None
                              else default_rate) for ax in AXES}
@@ -2206,6 +2224,42 @@ def fit_misassignment(
     out["for_blanks"] = {ax: (out[ax]["rate"] if out[ax]["basis"] == "fitted"
                               else 0.0) for ax in AXES}
     return out
+
+
+def _lowest_group(out: dict, geom: dict, counts: dict, rng: random.Random,
+                  groups: dict, kw: dict) -> None:
+    """Fit each group alone; where a group's 95% interval lies wholly
+    below the pooled fitted rate, take the lowest such group's fit for
+    that axis. Each axis records every group's result."""
+    by: dict = defaultdict(set)
+    for k, g in groups.items():
+        by[g].add(k)
+    fits = {}
+    for g in sorted(by):
+        # Cheap screen before the full fit: enough source-rich taxa?
+        if len(IndexSharing(geom, counts).pairs(kw["min_source"], by[g])) \
+                < kw["min_pairs"]:
+            continue
+        fits[g] = fit_misassignment(geom, counts, rng, taxa=by[g], **kw)
+    for ax in AXES:
+        pooled = out[ax]
+        pooled["by_group"] = {
+            g: {"basis": f[ax]["basis"], "rate": f[ax]["rate"],
+                "ci95": f[ax]["ci95"], "pairs": f[ax]["pairs"]}
+            for g, f in fits.items()}
+        if pooled["basis"] != "fitted":
+            continue
+        lower = [(f[ax]["rate"], g) for g, f in fits.items()
+                 if f[ax]["basis"] == "fitted"
+                 and f[ax]["ci95"][1] < pooled["rate"]]
+        if lower:
+            _r, g = min(lower)
+            pooled["pooled"] = {k: pooled[k] for k in
+                                ("rate", "ci95", "pairs", "placebo_p")}
+            keep = pooled["by_group"]
+            pooled.update({k: v for k, v in fits[g][ax].items()})
+            pooled["by_group"] = keep
+            pooled["from_group"] = g
 
 
 def sentinel_rates(matrix: list[dict], fitted: dict | None = None,

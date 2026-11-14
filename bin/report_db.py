@@ -386,6 +386,10 @@ def misassignment_html(mis: dict) -> str:
             f"<td>{flag(lev, BASIS_WORDS.get(basis, basis))}"
             + (f"<br><span class='note'>{esc(a['reason'])}</span>"
                if a.get("reason") else "")
+            + (f"<br><span class='note'>from {esc(a['from_group'])} alone: "
+               f"all taxa pooled gave {rate_txt(a['pooled']['rate'])}, "
+               "lifted by taxa really present next door</span>"
+               if a.get("from_group") else "")
             + f"</td><td class='num'>{fmt(a.get('pairs'))}</td>"
             f"<td class='num'>{rate_txt(mis['for_calls'][ax])}</td>"
             f"<td class='num'>{rate_txt(direct['rate']) if direct else '—'}"
@@ -406,7 +410,11 @@ def misassignment_html(mis: dict) -> str:
         "door to show a leak; most hold the taxon for real, and sit above "
         "the rate. The rate is where the pairs without it pile up, and it "
         "is accepted only when that pile is tighter with each well's true "
-        "neighbours than with the wells shuffled over the plate.",
+        "neighbours than with the wells shuffled over the plate. Each "
+        "organism group is also fitted alone: where one group's interval "
+        "lies wholly below the pooled rate, taxa present in most wells "
+        "(diet plants, gut flora) are lifting the pool, and that group's "
+        "rate is used.",
         "<i>Calls checked at</i>: the rate each call is compared with. A "
         "rate that could not be measured is checked at the conservative "
         f"default ({rate_txt(mis['settings']['default_rate'])} per pair) "
@@ -437,8 +445,11 @@ def misassignment_html(mis: dict) -> str:
         out.append(
             "<h3>Blank reads explained by misassignment</h3><p>Reads in "
             "the blanks that misassignment from wells sharing an index "
-            "accounts for at least half of. Only a <i>measured</i> rate is "
-            "taken off a blank before it sets a limit.</p>"
+            "accounts for at least half of. A blank is held to the "
+            "standard a sample is: reads it would be called "
+            "<i>misassigned</i> for do not count towards a limit, and "
+            "above that the expected reads come off. Only a "
+            "<i>measured</i> rate is used for a blank.</p>"
             "<div class='scroll' style='max-height:240px'><table><thead><tr>"
             "<th>blank</th><th>taxon</th><th class='num'>reads</th>"
             "<th class='num'>expected from misassignment</th></tr></thead>"

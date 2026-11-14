@@ -350,6 +350,50 @@ def fragile_species(calls: list[dict]) -> list[dict]:
     return sorted(by.values(), key=lambda f: (-len(f["samples"]), f["taxon"]))
 
 
+def misassign_taxa(which: str, wells: dict, rows: dict, geom: dict,
+                   args) -> set | None:
+    """The taxa the misassignment rates are fitted on (None: all).
+
+    'rare': present - more reads than any blank and at least the relative
+    floor - in at most a quarter of the placed field wells. A taxon in
+    most wells (gut bacteria in stool) is present next door AND here, so
+    its ratios measure presence, not leakage. 'targets': the target
+    groups."""
+    if which in ("all", "grouped"):
+        return None
+    keys: set = set()
+    if which == "targets":
+        for rs in rows.values():
+            keys |= {(r["rank"], r["taxon"]) for r in rs
+                     if r["group"] in TARGET_GROUPS}
+        return keys
+    blank_max: Counter = Counter()
+    for w in wells.values():
+        if w.sample_type in NEGATIVE_TYPES:
+            for r in rows[w.sid]:
+                k = (r["rank"], r["taxon"])
+                blank_max[k] = max(blank_max[k], r["reads"])
+    field = [w for w in wells.values() if w.sid in geom
+             and w.sample_type not in NOT_FIELD and w.depth]
+    seen: Counter = Counter()
+    for w in field:
+        here = {(r["rank"], r["taxon"]) for r in rows[w.sid]
+                if r["group"] != "chimera" and r["reads"] > blank_max[
+                    (r["rank"], r["taxon"])]
+                and r["reads"] / w.depth >= args.min_rel_abundance}
+        seen.update(here)
+    every = {(r["rank"], r["taxon"]) for rs in rows.values() for r in rs
+             if r["group"] != "chimera"}
+    return {k for k in every if seen[k] <= 0.25 * len(field)}
+
+
+def explained(reads: int, reach: float) -> bool:
+    """No more reads than misassignment could plausibly have put there:
+    the reach, with Poisson noise on top. Under one read nothing could
+    have, so a rate of about zero explains nothing."""
+    return reach >= 1 and reads <= reach + 3 * math.sqrt(reach)
+
+
 def blank_limits(wells: dict, rows: dict, min_fraction_depth: int,
                  misassigned=None) -> dict:
     """Per (rank, taxon): the most reads, and the largest share, any blank
@@ -357,12 +401,16 @@ def blank_limits(wells: dict, rows: dict, min_fraction_depth: int,
     anything - an NTC of three reads with one stray is not a 33%
     carryover rate (the panel synthesis learnt that the hard way).
 
-    `misassigned(sid, row)` is what index misassignment is expected to
-    have put in a blank (the run's measured rate only). It comes off the
-    blank's reads first: a blank sharing an i7 with a column of heavy
-    wells holds their reads by misreading, not by contamination, and a
-    limit raised by them would suppress real calls in every deep well.
-    Rounded, so a rate of about zero leaves every limit as it was."""
+    `misassigned(sid, row)` gives (expected, reach): the reads index
+    misassignment is expected to have put in a blank, and the most it
+    plausibly could, both at the run's MEASURED rates only. A blank
+    sharing an i7 with a column of heavy wells holds their reads by
+    misreading, not by contamination, and a limit raised by them would
+    suppress real calls in every deep well. So the blank is held to the
+    standard a sample is: reads it would be called 'misassigned' for -
+    no more than the reach plus Poisson noise - do not count at all;
+    above that, the expectation comes off and the rest counts. Rounded,
+    so a rate of about zero leaves every limit as it was."""
     blanks = [w for w in wells.values() if w.sample_type in NEGATIVE_TYPES]
     out: dict = defaultdict(lambda: {"reads": 0, "fraction": 0.0,
                                      "net_of_misassignment": False})
@@ -371,10 +419,11 @@ def blank_limits(wells: dict, rows: dict, min_fraction_depth: int,
             k = (r["rank"], r["taxon"])
             n = r["reads"]
             if misassigned is not None:
-                e = int(round(misassigned(w.sid, r)))
+                exp, reach = misassigned(w.sid, r)
+                e = int(round(exp))
                 if e:
                     out[k]["net_of_misassignment"] = True
-                n = max(0, n - e)
+                n = 0 if explained(n, reach) else max(0, n - e)
             out[k]["reads"] = max(out[k]["reads"], n)
             if w.depth >= min_fraction_depth and w.depth:
                 out[k]["fraction"] = max(out[k]["fraction"], n / w.depth)
@@ -611,6 +660,14 @@ def main(argv=None) -> int:
                     "indexes may leak before a call is not misassignment: "
                     "a misread lands on the NEAREST index, so some pairs "
                     "leak more than others")
+    ap.add_argument("--misassign-taxa",
+                    choices=("grouped", "all", "rare", "targets"),
+                    default="grouped",
+                    help="taxa the misassignment rates are fitted on: all, "
+                    "with each organism group also fitted alone and the "
+                    "lowest used where it is significantly lower (grouped); "
+                    "all, pooled only; those present in at most a quarter "
+                    "of field wells; or the target groups")
     ap.add_argument("--permutations", type=int, default=2000,
                     help="for the plate-position tests")
     ap.add_argument("--seed", type=int, default=20260919)
@@ -700,7 +757,14 @@ def main(argv=None) -> int:
         by_key[sid] = dict(c)
     rng = random.Random(args.seed)
     mis = fit_misassignment(geom, by_key, rng,
-                            default_rate=args.misassign_default_rate)
+                            default_rate=args.misassign_default_rate,
+                            taxa=misassign_taxa(args.misassign_taxa, wells,
+                                                rows, geom, args),
+                            groups=({(r["rank"], r["taxon"]): r["group"]
+                                     for rs in rows.values() for r in rs
+                                     if r["group"] != "chimera"}
+                                    if args.misassign_taxa == "grouped"
+                                    else None))
     sharing = IndexSharing(geom, by_key)
     if mis.get("applicable"):
         # The most a pair of wells could plausibly leak, per axis: a
@@ -713,11 +777,15 @@ def main(argv=None) -> int:
                      mis["for_calls_upper"][ax])
                  if mis[ax]["basis"] == "fitted" else mis["for_calls"][ax])
             for ax in ("row", "col")}
+        # The same for the blanks, from measured rates only.
+        mis["for_blanks_reach"] = {
+            ax: (mis["for_calls_reach"][ax] if mis[ax]["basis"] == "fitted"
+                 else 0.0) for ax in ("row", "col")}
 
     def expected(sid: str, r: dict, which: str) -> float:
         """Reads misassignment is expected to have put in this row of a
         well, at the rates for `which` ('for_calls', 'for_calls_reach',
-        'for_blanks'). A (rank, taxon) can span rows with different
+        'for_blanks', 'for_blanks_reach'). A (rank, taxon) can span rows with different
         labels; each gets its share of the taxon's expectation."""
         if not mis.get("applicable") or sid not in geom or \
                 r["group"] == "chimera":
@@ -730,7 +798,8 @@ def main(argv=None) -> int:
 
     limits, n_blanks = blank_limits(
         wells, rows, args.min_depth,
-        (lambda sid, r: expected(sid, r, "for_blanks"))
+        (lambda sid, r: (expected(sid, r, "for_blanks"),
+                         expected(sid, r, "for_blanks_reach")))
         if mis.get("applicable") else None)
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -776,15 +845,14 @@ def main(argv=None) -> int:
             # have, so a rate of about zero changes no call.
             exp = expected(sid, r, "for_calls")
             reach = expected(sid, r, "for_calls_reach")
-            explained = mis.get("applicable") and reach >= 1 and \
-                r["reads"] <= reach + 3 * math.sqrt(reach)
+            is_mis = mis.get("applicable") and explained(r["reads"], reach)
             if r["group"] == "chimera":
                 call = "chimera"
             elif w.depth < args.min_depth:
                 call = "low_depth"
             elif r["reads"] < limit:
                 call = "below_blanks"
-            elif explained:
+            elif is_mis:
                 call = "misassigned"
             elif rel < args.min_rel_abundance:
                 call = "below_floor"

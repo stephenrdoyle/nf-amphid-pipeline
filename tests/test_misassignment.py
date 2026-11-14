@@ -44,10 +44,24 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print(f"  FAIL {name}" + (f" - {detail}" if detail else ""))
 
 
-def plate(n_rows, n_cols, rate_row, rate_col, seed=1, **kw):
+# The simulated taxa's organism groups, for the grouped fit synthesis
+# uses by default.
+SIM_GROUP = {"worm": "helminths", "rare": "helminths", "para": "protists",
+             "bact": "bacteria_archaea", "kitome": "bacteria_archaea",
+             "host": "host", "group": "invertebrates", "diet": "plants"}
+
+
+def sim_groups(counts: dict) -> dict:
+    return {k: next(g for pre, g in SIM_GROUP.items() if k.startswith(pre))
+            for cs in counts.values() for k in cs}
+
+
+def plate(n_rows, n_cols, rate_row, rate_col, seed=1, grouped=True, **kw):
     p = sim.simulate_plate_counts(random.Random(seed), n_rows, n_cols,
                                   rate_row=rate_row, rate_col=rate_col, **kw)
-    fit = L.fit_misassignment(p["geom"], p["counts"], random.Random(seed + 7))
+    fit = L.fit_misassignment(p["geom"], p["counts"], random.Random(seed + 7),
+                              groups=sim_groups(p["counts"]) if grouped
+                              else None)
     unused = L.sentinel_rates(p["matrix"], fit.get("for_calls"))
     return p, fit, unused
 
@@ -64,7 +78,8 @@ def rate_cell(fit, unused, ax, truth) -> str:
 
 
 def test_recovery() -> None:
-    """The fitted rates recover the truth within 20%, on combinatorial
+    """The fitted rates - grouped, as synthesis fits them - recover the
+    truth within 20%, on combinatorial
     plates of 42 (8 x 6), 96 and 384 wells, full and with unused
     combinations; and the unused combinations, where they exist and
     measure an axis, agree within 25%."""
@@ -99,6 +114,42 @@ def test_recovery() -> None:
                 f"| {n} | {unused} | {rr:.0e} / {rc:.0e} | "
                 + rate_cell(fit, su, "row", rr) + " | "
                 + rate_cell(fit, su, "col", rc) + " |")
+
+
+def test_presence_lift() -> None:
+    """Diet taxa in most wells with heavy-tailed shares - a few wells full
+    of one plant, the rest with traces - put traces next to big sources,
+    and the traces sit just above the rate: a pooled fit is lifted, as
+    the column rate was on vespa_run1 (helminths alone: 5.0e-4; pooled:
+    1.5e-3). The grouped fit, which synthesis uses, takes the lowest
+    group significantly below the pool, and comes back to the truth."""
+    print("\ntaxa present in most wells lift a pooled fit; groups do not")
+    TABLE.append("")
+    TABLE.append("| 96 wells, 40 diet taxa in 90% of wells, no heavy column "
+                 "| pooled row | pooled col | grouped row | grouped col |")
+    TABLE.append("|---|---|---|---|---|")
+    pooled_err, grouped_err = [], []
+    for seed in (1, 2, 3):
+        cells = []
+        for grouped in (False, True):
+            _p, fit, _su = plate(8, 12, 4e-4, 7e-4, seed=seed,
+                                 grouped=grouped, diet=40,
+                                 heavy_column=False, n_taxa=30)
+            for ax, truth in (("row", 4e-4), ("col", 7e-4)):
+                err = fit[ax]["rate"] / truth - 1
+                (grouped_err if grouped else pooled_err).append(err)
+                cells.append(f"{100 * err:+.0f}%"
+                             + (f" ({fit[ax]['from_group']})"
+                                if fit[ax].get("from_group") else ""))
+        TABLE.append(f"| seed {seed} | " + " | ".join(cells) + " |")
+    check("the pooled fit is lifted",
+          sum(pooled_err) / len(pooled_err) > 0.03,
+          str([round(e, 3) for e in pooled_err]))
+    check("the grouped fit is within 5% on every axis",
+          all(abs(e) <= 0.05 for e in grouped_err),
+          str([round(e, 3) for e in grouped_err]))
+    check("and closer than the pooled one overall",
+          sum(abs(e) for e in grouped_err) < sum(abs(e) for e in pooled_err))
 
 
 def test_no_misassignment() -> None:
@@ -281,6 +332,7 @@ def main() -> int:
     test_layout_needed()
     test_plate_effects()
     test_recovery()
+    test_presence_lift()
     test_no_misassignment()
     test_fallback()
     test_biology_down_the_columns()

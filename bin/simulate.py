@@ -668,7 +668,7 @@ def simulate_plate_counts(
     rate_col: float, unused: int = 0, depth: float = 200000,
     blanks: int = 4, heavy_column: bool = True, min_cluster: int = 5,
     n_taxa: int = 60, grouped_by_column: bool = False,
-    contaminate: dict | None = None,
+    contaminate: dict | None = None, diet: int = 0,
 ) -> dict:
     """Classified reads per well and taxon on a combinatorial plate, after
     index misassignment at known per-pair rates.
@@ -691,6 +691,9 @@ def simulate_plate_counts(
       with grouped_by_column, each column's samples share a taxon of
         their own - wells laid out by host or site - which is biology
         lined up with an axis, and must not be read as misassignment
+      `diet` taxa (plants) in 90% of wells with heavy-tailed shares - a
+        few wells full of one, the rest with traces - as diet shows in
+        stool; their traces sit near the rate, lifting a pooled fit
       `contaminate` {well: {taxon: reads}} added to wells' true content -
         real contamination of a blank, say, on top of what leaks in
 
@@ -731,6 +734,8 @@ def simulate_plate_counts(
     for i in range(max(1, int(n_taxa * 0.1))):
         taxa.append((f"rare{i}", rng.uniform(0.03, 0.08),
                      math.log(rng.uniform(0.1, 0.4)), 0.8))
+    for i in range(diet):
+        taxa.append((f"diet{i}", 0.9, math.log(0.0005), 2.5))
     true: dict = {}
     for rc in used:
         sid = names[rc]

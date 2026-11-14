@@ -704,6 +704,27 @@ Three details came from real data:
   drove the other axis to a fifth of its truth.
 - **Uncertainty**: a 95% interval from 200 bootstrap resamples of the
   destination wells.
+- **Taxa present in most wells lift a pooled fit.** On vespa_run1 the
+  pooled column rate was 1.5e-3 (0.98–1.75e-3). The extraction blank
+  bounds it at about 6.2e-4: its 2,348 *T. trichiura* reads, less the
+  ~370 expected from its row, over the 3.18M in its column. The pairs
+  at 1.5e-3 were mostly diet plants, protists, fungi and gut bacteria in
+  the STOP wells - traces of taxa that a few neighbours hold in bulk, so
+  their ratios sit just above the rate and outnumber the pairs where the
+  taxon is absent. Helminths alone gave 5.0e-4 (2.0e-4–1.07e-3).
+  So each organism group is also fitted alone (`--misassign-taxa
+  grouped`, the default). Presence only lifts a group's ratios, so where
+  one group's whole 95% interval lies below the pooled rate, the pool is
+  lifted, and the lowest such group's fit is used (`from_group` in the
+  run QC, with the pooled fit kept beside it). Where the groups agree the
+  pooled fit stands. Restricting the fit to rare taxa instead was tried
+  and rejected: on vespa_run1 the taxa informative for the rate are the
+  common ones - *T. trichiura* is in 26 of 40 field wells, and leakage
+  itself lifts a heavy taxon over the 0.1% presence floor in the wells
+  next to it - so a "rare" fit had too little left and became an upper
+  bound. Target groups alone (helminths, protists, microsporidia) gave
+  2.8e-4 / 4.3e-4, with wider intervals and one more fallback in
+  simulation.
 
 **Never fitting noise.** An axis is `fitted` only when all of these hold:
 at least 20 informative pairs; a mode exists; the interval spans at most
@@ -750,10 +771,17 @@ few reads.
 
 **How the rates are used.**
 
-- **Blanks.** Each blank's reads of a taxon, minus the reads expected at
-  the *fitted* rates (rounded), set the absolute and proportional
+- **Blanks** are held to the standard a sample is, at the *fitted*
+  rates only. A blank's reads of a taxon that it would be called
+  `misassigned` for (at most R + 3√R, as below) do not count towards a
+  limit at all. Above that, the reads expected at the fitted rates
+  (rounded) come off, and the rest sets the absolute and proportional
   limits. The limit's basis then says "net of index misassignment".
   Contamination well above the expectation still raises the limit.
+  (Netting off only the point expectation left the vespa_run1 extraction
+  blank with 385 of its 2,348 *T. trichiura* reads - inside the rate's
+  own uncertainty, and enough to suppress STOP2 - while a sample with the
+  same reads and expectation would have been called `misassigned`.)
 - **Calls.** Before the relative floor, a call is `misassigned` if its
   reads are at most R + 3√R. R is the expected reads at the per-axis
   "reach" rate: for a fitted rate, the larger of `--db_misassign_margin`
@@ -772,30 +800,38 @@ few reads.
 
 | | vespa_run1 (42 wells) | VONT01 (50 wells) |
 |---|---|---|
-| row (i7 misread) | fitted 5.0e-4 (2.5–7.0e-4) | default: interval 3.4e-3 to ∞ |
-| column (i5 misread) | fitted 1.5e-3 (0.98–1.75e-3) | default: 1.3e-1, samples grouped by column |
+| row (i7 misread) | fitted 5.0e-4 (2.5–7.0e-4), pooled | default: interval 3.4e-3 to ∞ |
+| column (i5 misread) | fitted 5.0e-4 (2.0e-4–8.9e-4), from helminths; pooled 1.5e-3 | default: 1.3e-1, samples grouped by column |
 | unused combinations, row | 3.0–6.5e-4 (6 cells: 740–1,979 reads, 0.030–0.065% of their rows) | 2.8e-4 (0.9–5.4e-4, 6 cells) |
-| extraction blank, *T. trichiura* | 2,348 reads, 5,122 expected: explained | — |
-| NTC1 / NTC2, *T. trichiura* | 180 / 106 reads, 614 / 389 expected | — |
-| *T. trichiura* in STOP wells | detected in 20 of 24 (was 6); STOP1 and STOP2 detected; 4 misassigned (699–1,314 reads, 440–790 expected) | — |
-| calls changed | 509 misassigned | 20 misassigned, all 6–45 reads; nothing else |
-
-The column rate on vespa_run1 is about twice what the extraction blank
-alone implies (2,348 / 3.18M = 7.4e-4). Most column pairs on that plate
-are STOP wells holding the gut bacteria they receive, so its estimate
-leans on fewer absent pairs. The error is on the side of calling
-misassignment.
+| extraction blank, *T. trichiura* | 2,348 reads, 1,963 expected, within reach: explained | — |
+| NTC1 / NTC2, *T. trichiura* | 180 / 106 reads, explained | — |
+| *T. trichiura* in STOP wells | detected in 22 of 24 (was 6); STOP1 and STOP2 detected; 2 misassigned (STOP10 766 and STOP17 699 reads) | — |
+| calls changed | 329 misassigned | 20 misassigned, all 6–45 reads; nothing else |
 
 **Simulated plates** (`simulate.simulate_plate_counts`; one heavy column
 of worm preparations, a host and a reagent taxon in every well, bacteria
 in 60-100% of wells, parasites in 10-40%, rare heavy taxa in 3-8%, four
 blanks, and a 5-read clustering minimum): the fitted rates are within 6%
 of the truth at 42, 48, 88, 96, 368 and 384 wells, at 4e-4/7e-4 and
-1e-4/2e-3. The one exception is 48 wells at 1e-4 along rows, which falls
-back with its reason. `tests/test_misassignment.py` prints the table. The
+1e-4/2e-3, grouped as synthesis fits them (the groups agree there, and
+the grouped and pooled fits match within a few percent). The one
+exception is 48 wells at 1e-4 along rows, which falls back with its
+reason. With 40 diet taxa in 90% of wells and heavy-tailed shares
+(`diet=`), the pooled fit is lifted 5–12% and the grouped fit is within
+±2%. `tests/test_misassignment.py` prints the tables. The
 read-level simulator gains `--misread-i5-rate` and `--misread-i7-rate`:
 one index rewritten to another of the plate's, unlike `--hop-rate`, which
 rewrites the pair.
+
+**ITS2 releases** (nemits2, §12) change nothing in the model, which
+works on calls rather than sequences. A simulated plate classified with
+NCBI lineages against the miniature ITS2 release recovers both rates
+within 20% and does not read a blank next to the heavy column as
+contamination (`tests/test_nemits2.py`). On a nemabiome plate every
+call is a nematode, so there is one group and the grouped fit is the
+pooled one; and where most wells carry the same few strongyles, as in
+livestock faecal cultures, few pairs lack the taxon and the fit is more
+likely to fall back - which it then says.
 
 **Plate position** in database mode is the panel's test
 (`ampseqlib.plate_effects`, moved there from `synthesise.py` with
