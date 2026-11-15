@@ -313,6 +313,10 @@ def test_homopolymer_merge() -> None:
     got = {x["consensus"]: (len(x["reads"]), x["merged"]) for x in m}
     check("corrected into a haplotype already there, it joins it",
           len(m) == 2 and got.get(sub) == (35, 1), str(got))
+    known = {**cl(hap2_hp, 20, "h"), "known": True}
+    m = adb.correct_homopolymer([cl(a, 200, "a"), known], 4, 4.0, 8)
+    check("a consensus that is its database record keeps its run lengths",
+          hap2_hp in {x["consensus"] for x in m})
     m = adb.correct_homopolymer(
         [cl(a, 60, "a"), cl(hap_hp, 20, "h")], 4, 4.0, 8)
     check("below the abundance ratio nothing is corrected",

@@ -522,7 +522,11 @@ def correct_homopolymer(clusters: list[dict], max_edits: int,
     it apart from the nearest much larger one (at least min_ratio times
     its reads, within reach edits), keeping its substitutions: a real
     haplotype whose group shared a CCS indel. At most max_edits bases are
-    changed. A consensus corrected into one already present joins it."""
+    changed. A consensus corrected into one already present joins it.
+    A "known" consensus - its group's database record, over the record's
+    span - is left as it is: a run length a record carries is not a read
+    error. (On S-BSST527 that kept a consensus identical to a DADA2 ASV
+    whose TTT a 6x larger neighbour had as TT.)"""
     out: list[dict] = []
     for c in sorted(clusters, key=lambda x: (-x["weight"], x["consensus"])):
         q = c["consensus"]
@@ -533,7 +537,7 @@ def correct_homopolymer(clusters: list[dict], max_edits: int,
             d = bounded_edit(q, m["consensus"], reach)
             if d <= reach and (near is None or d < near[0]):
                 near = (d, m)
-        if near:
+        if near and not c.get("known"):
             fixed, k = correct_runs(q, near[1]["consensus"], reach)
             if 0 < k <= max_edits:
                 c = {**c, "consensus": fixed,
@@ -1043,6 +1047,7 @@ def main(argv=None) -> int:
             for c in cb.resolve(qs, refseq[t]):
                 c["group"] = t
                 c["weight"] = len(c["reads"]) * scale[t]
+                c["known"] = refseq[t] in c["consensus"]
                 built.append(c)
         clusters = merge_close(built, st.merge_edits)
         if hp_edits > 0:

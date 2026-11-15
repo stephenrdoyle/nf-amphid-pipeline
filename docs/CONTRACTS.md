@@ -208,10 +208,13 @@ enabled on what was measured:
     (4x its reads, within 8 edits) when every indel between them is a
     run length - the base in a run of two or more in the sequence that
     has it - keeping its substitutions (`correct_homopolymer`; "+
-    correct" below, 301 consensus sequences corrected). Where any indel
+    correct" below, 294 consensus sequences corrected). Where any indel
     is not a run length nothing is corrected: allowing those moved as
     many reads' consensus away from the ASVs as towards them, and lost
-    304 sample-ASV pairs.
+    304 sample-ASV pairs. Nor is a consensus that is its group's
+    database record: a run length a record carries is not a read error
+    (without this, one consensus identical to an ASV, TTT where a 6x
+    larger neighbour had TT, was corrected away).
 
     | S-BSST527 | before | merge | + correct | DADA2 |
     |---|---|---|---|---|
@@ -219,8 +222,8 @@ enabled on what was measured:
     | *Haemonchus* at genus, study-wide (paper filter) | 4.09% | 3.75% | 2.26% | 0.03% |
     | *H. contortus*, study-wide | 60.81% | 61.15% | 62.63% | 64.49% |
     | reads naming another species than the nearest ASV | 5 | 5 | 5 | |
-    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | 92.06% | |
-    | sample-ASV pairs with an identical consensus | 1604 | 1604 | 1612 (9 gained, 1 lost) | |
+    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | 92.02% | |
+    | sample-ASV pairs with an identical consensus | 1604 | 1604 | 1611 (7 gained, none lost) | |
     | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | 0.014 / 0.078 | |
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
