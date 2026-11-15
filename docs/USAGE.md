@@ -561,6 +561,15 @@ reaches assignment and is counted there (`no_primer`). The read-back is
 tested on lima-shaped output; lima itself has not been run by these
 tests, which run on macOS.
 
+**What to expect.** On S-BSST527 (RSII CCS, 158 samples, nemabiome
+ITS2 v0.2.0) the calls agree with a DADA2 analysis of the same reads:
+per-sample compositions differ by a median Bray-Curtis of 0.024, and
+study-wide species shares are within 0.4 points but for *Haemonchus
+contortus*, of which 4.1% of reads stop at genus - consensus sequences
+of small groups of reads that share homopolymer indels, safe but less
+resolved. On simulated HiFi, vespa's floors make the same calls as on
+nanopore. docs/CONTRACTS.md (Read types) has the measurements.
+
 ---
 
 ## 3. Parameters

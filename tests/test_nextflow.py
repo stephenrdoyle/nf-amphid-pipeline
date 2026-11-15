@@ -435,10 +435,25 @@ def test_flags_exist() -> None:
             check(f"{name}: calls a tool that exists", False, tool)
             continue
         real = tool_flags(tool)
+        # The tool's own command lines: each call of it and the lines it
+        # continues onto. A process that also runs another program
+        # (LIMA_PACBIO runs lima) has that program's flags in its body
+        # too, and they are not the tool's.
+        lines = p["body"].splitlines()
+        cmd = []
+        for i, ln in enumerate(lines):
+            if re.match(rf"^\s*{re.escape(tool)}\b", ln):
+                j = i
+                cmd.append(lines[j])
+                while lines[j].rstrip().endswith("\\") and j + 1 < len(lines):
+                    j += 1
+                    cmd.append(lines[j])
+        # Flags built inside groovy string vars are referenced from those
+        # lines, so the variables' definitions count too.
+        defs = [ln for ln in lines if re.match(r"^\s*def \w+\s*=", ln)]
         # only the literal flags; interpolated ones are checked by eye
-        used = set(re.findall(r"(--[a-z0-9][a-z0-9-]*)", p["body"]))
-        # flags built inside groovy string vars are in the body too, which
-        # is what we want - they still have to be real
+        used = set(re.findall(r"(--[a-z0-9][a-z0-9-]*)",
+                              "\n".join(cmd + defs)))
         bogus = sorted(f for f in used - real
                        if not f.startswith("--version"))
         check(f"{name}: every flag exists in {tool}", not bogus,

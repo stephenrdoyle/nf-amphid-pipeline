@@ -147,7 +147,57 @@ not call by the calling rule asked for, or lacks a release file it reads
 `single_long_accurate` takes the consensus route unchanged. It was
 enabled on what was measured:
 
-MEASUREMENTS
+- **vespa_v4: the floors, on simulated HiFi reads.** The leave-out
+  benchmark the floors come from (`tests/bench_db_floors.py`, vespa
+  v0.9.0, 100 genera and 150 species held out, 150 samples) was run with
+  nanopore (`nanopore_hac`) and HiFi (`pacbio_hifi`: 0.1% error, mostly
+  homopolymer indels) reads. At the default floors:
+
+  | reads | in database: deepest rank, wrong | species held out: wrong | genus held out: wrong | consensus identical to its source |
+  |---|---|---|---|---|
+  | nanopore_hac | 96.1%, 0% | 16.6% | 35.2% | 90.9% |
+  | pacbio_hifi | 98.0%, 0% | 18.8% | 45.0% | 96.0% |
+
+  The two runs draw different samples (one random stream serves both);
+  over the source sequences both drew, their wrong-call rates are the
+  same to the read - 19.6% (46 held-out species), 43.1% (51 held-out
+  genera) - so the difference above is the draw, not the reads. A HiFi
+  consensus is more often exact, and the floors treat it as they treat
+  a nanopore one. (A held-out genus taking a confamilial's name is the
+  floors' known limit on any platform, REFERENCE_DATABASE.md §11.3.)
+- **nemits2: the gap rule, on S-BSST527** (Halvarsson & Höglund 2021:
+  158 sheep larval cultures, NC1/NC2, PacBio RSII CCS in four pools,
+  914,810 reads; nemabiome-its2-refdb v0.2.0). Compared with
+  nemabiome-its2-refdb's own analysis of the same reads (its
+  demultiplexer, DADA2 with PacBio settings, `classify_asvs.py`, gap
+  rule):
+  - 91.6% of clustered reads are in a consensus identical to one of
+    that sample's ASVs (over the record's span), and 99.3% of those
+    reads get the ASV's call (the 18 sequences that differ are ties a
+    gap of 2-3 edits separates: species there, genus here under
+    `--db_gap_edits 4`).
+  - The other 8.4% are small groups whose consensus carries 1-5
+    homopolymer indels: reads are grouped by their best database hit,
+    and RSII CCS reads sharing an indel group together. Their calls
+    are safe - 49.5% of those reads take the ASV's call, 50.1% stop at
+    a higher rank consistent with it, 5 reads (one consensus) name
+    another species - but they cost resolution: 94.6% of clustered
+    reads are named to species against DADA2's 99.3%, almost all of the
+    difference *Haemonchus contortus* left at genus. Filtering reads at
+    two expected errors (DADA2's filter) changed this little (13.7% to
+    12.0% of one sample's reads at genus).
+  - Per sample, the composition at the rank reached differs from
+    DADA2's by a median Bray-Curtis of 0.024 (154 samples with 200+
+    reads; 90th percentile 0.117), and study-wide, filtered as the
+    paper was (taxa >= 1% of a sample), every species' share is within
+    0.4 points of DADA2's and its prevalence within one sample, but for
+    *H. contortus* (60.8% against 64.5%; the rest is *Haemonchus* at
+    genus, 4.1%) and two cyathostomins the 4-edit gap holds at genus
+    (*Cyathostomum pateratum*, *Coronocyclus coronatus*: gap 2-3).
+
+  HiFi from Sequel II or Revio is more accurate than RSII CCS, so the
+  resolution cost should be smaller there; it has not been measured on
+  such a run.
 
 The routes that call a protocol are `bin/assign_db.py` (single reads:
 trim, map, build and split consensus sequences, then
