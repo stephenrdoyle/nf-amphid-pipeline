@@ -195,6 +195,30 @@ enabled on what was measured:
     genus, 4.1%) and two cyathostomins the 4-edit gap holds at genus
     (*Cyathostomum pateratum*, *Coronocyclus coronatus*: gap 2-3).
 
+  - Those figures are before `single_long_accurate` absorbed
+    homopolymer-length variants (`merge_homopolymer` in
+    bin/assign_db.py: a consensus whose bases equal a larger one's once
+    runs are collapsed, run lengths 4 or fewer bases apart in total, and
+    the larger standing for 4 or more times its reads). On the same
+    reads it absorbed 152 consensus sequences:
+
+    | S-BSST527 | before | after | DADA2 |
+    |---|---|---|---|
+    | clustered reads named to species | 94.55% | 94.90% | 99.28% |
+    | *Haemonchus* at genus, study-wide (paper filter) | 4.09% | 3.75% | 0.03% |
+    | *H. contortus*, study-wide | 60.81% | 61.15% | 64.49% |
+    | reads naming another species than the nearest ASV | 5 | 5 | |
+    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | |
+    | sample-ASV pairs with an identical consensus | 1604 | 1604 (none lost) | |
+    | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | |
+
+    Most of what still stops at genus is not a pure homopolymer copy: a
+    consensus differing from the sample's main *H. contortus* by one or
+    two substitutions (a real haplotype) and also by one or two
+    homopolymer indels, which a substitution rightly keeps apart. Of
+    the pure copies left (2,465 reads), most are under the 4x ratio.
+    `single_long_noisy` is unchanged, byte for byte, on every fixture.
+
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the
   resolution cost should be smaller there; it has not been measured on
   such a run.
