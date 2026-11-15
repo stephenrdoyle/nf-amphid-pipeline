@@ -844,7 +844,9 @@ def label_for(call: dict, tax: dict, label_depth: int,
 
     A species the tiered rule names but the gap rule does not is
     "<species> (tentative)", so it is never pooled with confident calls
-    of the same species.
+    of the same species; a species or genus call whose nearest records
+    all carry one of the release's lineages says it too ("Teladorsagia
+    circumcincta (goat line)", "Necator (Necator sp. type II)").
 
     And a call stopped above family by a TIE between records - the floors
     let it through, the LCA did not - is "X, unresolved below <rank>
@@ -876,11 +878,14 @@ def label_for(call: dict, tax: dict, label_depth: int,
         if not is_placeholder(taxon):
             if above_genus and near and near != taxon and not is_placeholder(near):
                 return taxon, f"{taxon} ({pct} to {near})"
-            if call.get("tentative"):
-                # Named by the tiered rule's lower floor only: its own row
-                # in every table, never pooled with confident calls.
-                return taxon, f"{taxon} (tentative)"
-            return taxon, taxon
+            # Named by the tiered rule's lower floor only, or nearest records
+            # of one line (the release's lineage: "goat line", "Necator sp.
+            # type II"): said in the label, so each is its own row in every
+            # table, never pooled with the species' or genus' other calls.
+            notes = (["tentative"] if call.get("tentative") else []) + (
+                [call["release_lineage"]] if call.get("release_lineage")
+                and not above_genus else [])
+            return taxon, f"{taxon} ({'; '.join(notes)})" if notes else taxon
         named = next((lin.get(ranks[k]) for k in range(d - 1, -1, -1)
                       if lin.get(ranks[k]) and not is_placeholder(lin.get(ranks[k]))),
                      "")

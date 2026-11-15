@@ -363,6 +363,7 @@ in its order. Only `nemits2` declares any:
 | `tentative` | `yes` when the species was named only by the tiered rule's lower floor (its label is "<species> (tentative)") |
 | `gap_rule_rank` | the gap rule's own call, beside a tiered one: its rank… |
 | `gap_rule_taxon` | …and taxon (the same as `rank` / `taxon` unless the call is tentative) |
+| `release_lineage` | the release's `lineage` that every tied best record carries - a line within a species ("goat line") or a genus-level record's informal name ("Necator sp. type II") - else blank; a species or genus call says it in its label too |
 
 ### `<sample>.taxa.tsv`
 
@@ -407,8 +408,8 @@ across runs: `run_id`, `sample_id`, `sample_type`, `rank`, `taxon`,
 `limit_basis`, `misassign_expected`, `misassign_excess`, `identity`,
 `clusters`, `lineage`, `group`, `group_reads`, `group_share`,
 `primer_fit`, `margin`, `rank_meaning`, `database_version`; then
-`nearest`, `next`, `grade`, `tentative`, `gap_rule_rank` and
-`gap_rule_taxon` where the clusters carry them (a span-scored
+`nearest`, `next`, `grade`, `tentative`, `gap_rule_rank`,
+`gap_rule_taxon` and `release_lineage` where the clusters carry them (a span-scored
 protocol), from each call's largest cluster.
 
 ---

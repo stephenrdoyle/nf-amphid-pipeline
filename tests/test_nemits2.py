@@ -166,13 +166,16 @@ def write_release(outdir: str, recs: list[dict]) -> dict:
     with open(os.path.join(outdir, "refdb.fasta"), "w", encoding="utf-8") as fh:
         for r in recs:
             fh.write(f">{r['id']}\n{r['seq']}\n")
+    # The release's lineage column: a line within a species.
+    lines = {"Ostertagia ostertagi": "goat line"}
     w("taxonomy.tsv", ["id"] + al.NCBI_RANKS + [
         "deepest_rank", "species_status", "members", "grade", "coverage",
-        "sources"],
+        "sources", "lineage"],
       [[r["id"]] + LINEAGE + [r["family"], r["genus"], r["species"],
                               "species" if r["species"] else "genus",
                               r["status"], len(r["members"]), "complete",
-                              "1.000", "fixture"] for r in recs])
+                              "1.000", "fixture", lines.get(r["species"], "")]
+       for r in recs])
     w("members.tsv", ["id", "source", "accession", "label", "role", "grade",
                       "coverage", "trimmed_start", "trimmed_end", "note"],
       [[r["id"], "fixture", f"FX{k:05d}.1",
@@ -591,6 +594,17 @@ def test_informal() -> None:
     c = its2.span_call([(1, 240, "n"), (0, 240, "i")], tax, "gap", g)
     check("... scored alongside, the informal record would take it to genus",
           c["rank"] == "genus" and c["best_hit"] == "i", str(c))
+    tax["n"]["release_lineage"] = "type I"
+    tax["i"]["release_lineage"] = "Necator sp. type II"
+    c = its2.span_call([(0, 240, "i")], tax, "gap", g)
+    check("a call carries the lineage its nearest records share",
+          c["release_lineage"] == "Necator sp. type II"
+          and adb.label_for(c, tax, al.NCBI_RANKS.index("family"))[1]
+          == "Necator (Necator sp. type II)", str(c["release_lineage"]))
+    c = its2.span_call([(0, 240, "i"), (0, 240, "n")], tax, "gap", g)
+    check("... and none when the tied records' lineages differ",
+          c["release_lineage"] == "", str(c["release_lineage"]))
+    del tax["n"]["release_lineage"], tax["i"]["release_lineage"]
     c = its2.named_first_call([(40, 240, "n"), (2, 240, "i")], tax, "gap", g)
     check("a read no named record reaches is placed by an informal record",
           c["rank"] == "genus" and c["best_hit"] == "i", str(c))
@@ -732,6 +746,13 @@ def test_end_to_end() -> None:
                   and ov.get("gap_rule_taxon") == "Oesophagostomum",
                   str({k: ov.get(k) for k in ("label", "identity", "tentative",
                                               "gap_rule_rank", "gap")}))
+            oo = got.get(("species", "Ostertagia ostertagi"), {})
+            check(f"2x{L}: the release's lineage of the nearest records is "
+                  "reported, and said in the label",
+                  oo.get("release_lineage") == "goat line"
+                  and oo.get("label") == "Ostertagia ostertagi (goat line)"
+                  and hc.get("release_lineage") == "",
+                  f"{oo.get('release_lineage')!r} {oo.get('label')!r}")
             check(f"2x{L}: confident calls are not flagged",
                   hc.get("tentative") == "" and hc.get("gap_rule_rank") == "species")
             gap_out = os.path.join(tmp, f"il{L}gap")

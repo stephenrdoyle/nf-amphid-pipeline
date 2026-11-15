@@ -1643,6 +1643,12 @@ def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
             rec = {k: (r.get(k) or "").strip() for k in ranks}
             for k in extra:
                 rec[k] = (r.get(k) or "").strip()
+            # The release's lineage column (nematode-its2-refdb v0.1.3 on):
+            # a line within a species ("goat line") or a genus-level
+            # record's informal name ("Necator sp. type II"). Kept apart
+            # from the ranks' path, which outputs call "lineage".
+            if (r.get("lineage") or "").strip():
+                rec["release_lineage"] = r["lineage"].strip()
             out[r["id"]] = rec
             near = [c for k in ("contained_in", "contains")
                     for c in (r.get(k) or "").split(";") if c.strip()]
@@ -2785,7 +2791,7 @@ DB_CALL_COLUMNS = [
     "lineage", "group", "group_reads", "group_share", "primer_fit",
     "margin", "rank_meaning", "database_version"]
 DB_CALL_OPTIONAL = ["nearest", "next", "grade", "tentative", "gap_rule_rank",
-                    "gap_rule_taxon"]
+                    "gap_rule_taxon", "release_lineage"]
 
 
 def write_assignment(outdir: str, sid: str, rows: list[dict],

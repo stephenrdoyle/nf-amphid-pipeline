@@ -861,23 +861,27 @@ def test_tentative_species() -> None:
     try:
         hc = cluster("S1", 1, "hc", 600, label="Haemonchus_contortus (tentative)")
         hc2 = cluster("S1", 2, "hc", 300)
-        args = write_case(tmp, {"S1": [hc, hc2]}, {"S1": "unknown"})
+        hc3 = cluster("S1", 3, "hc", 200, label="Haemonchus_contortus (goat line)")
+        args = write_case(tmp, {"S1": [hc, hc2, hc3]}, {"S1": "unknown"})
         # The span-scored protocol's own columns, after the required ones.
         path = os.path.join(tmp, "assign_db", "S1.clusters.tsv")
         with open(path) as fh:
             rows = list(csv.DictReader(fh, delimiter="\t"))
-        extra = {"S1_c1": ("yes", "genus", "Haemonchus"),
-                 "S1_c2": ("", "species", "Haemonchus_contortus")}
+        extra = {"S1_c1": ("yes", "genus", "Haemonchus", ""),
+                 "S1_c2": ("", "species", "Haemonchus_contortus", ""),
+                 "S1_c3": ("", "species", "Haemonchus_contortus", "goat line")}
         with open(path, "w") as fh:
             w = csv.DictWriter(fh, list(rows[0]) + [
                 "nearest", "next", "grade", "tentative", "gap_rule_rank",
-                "gap_rule_taxon"], delimiter="\t", lineterminator="\n")
+                "gap_rule_taxon", "release_lineage"], delimiter="\t",
+                lineterminator="\n")
             w.writeheader()
             for r in rows:
-                t, gr, gt = extra[r["cluster"]]
+                t, gr, gt, ln = extra[r["cluster"]]
                 w.writerow({**r, "nearest": "", "next": "none close",
                             "grade": "complete", "tentative": t,
-                            "gap_rule_rank": gr, "gap_rule_taxon": gt})
+                            "gap_rule_rank": gr, "gap_rule_taxon": gt,
+                            "release_lineage": ln})
         calls, _w, qc = run(args)
         lab = {c["label"]: c for c in calls}
         t = lab.get("Haemonchus_contortus (tentative)", {})
@@ -886,6 +890,12 @@ def test_tentative_species() -> None:
               t.get("reads") == "600"
               and lab.get("Haemonchus_contortus", {}).get("reads") == "300",
               str([(c["label"], c["reads"]) for c in calls]))
+        g = lab.get("Haemonchus_contortus (goat line)", {})
+        check("a call of one of the release's lineages is its own row too, "
+              "and carries it",
+              g.get("reads") == "200" and g.get("release_lineage") == "goat line"
+              and lab.get("Haemonchus_contortus", {}).get("release_lineage") == "",
+              str(g))
         check("and carries the flag and the gap rule's call",
               t.get("tentative") == "yes" and t.get("gap_rule_rank") == "genus"
               and t.get("gap_rule_taxon") == "Haemonchus", str(t))

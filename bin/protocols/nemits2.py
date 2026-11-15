@@ -338,7 +338,8 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     empty = {"rank": "", "depth": -1, "identity": 0.0, "coverage": 0.0,
              "best_hit": "", "near_hits": 0, "lca_depth": -1, "span": 0,
              "edits": None, "gap": None, "next": None, "ties": [],
-             "tentative": False, "gap_rule_depth": -1, "gap_rule_rank": ""}
+             "tentative": False, "gap_rule_depth": -1, "gap_rule_rank": "",
+             "release_lineage": ""}
     scores = [x for x in scores if x[1] >= MIN_SPAN]
     if not scores:
         return empty
@@ -370,6 +371,10 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
             gap, nxt = 0, (flagged[0], 0)
     tied = sorted(x[2] for x in ties)
     lca = lca_depth(tied, tax)
+    # The release's lineage of the nearest records, when every tied record
+    # carries the same one (its2_classify.py lineage()): it describes them
+    # whatever rank the call stops at.
+    lines = {tax.get(c, {}).get("release_lineage", "") for c in tied}
     ident = 1 - d0 / sp0
     depth = apply_floors(lca, ident, floors, ranks)
     k = ranks.index("species")
@@ -388,6 +393,7 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
             "best_hit": best, "near_hits": len(tied), "lca_depth": lca,
             "span": sp0, "edits": d0, "gap": gap, "next": nxt,
             "ties": tied, "tentative": tentative, "gap_rule_depth": gap_depth,
+            "release_lineage": lines.pop() if len(lines) == 1 else "",
             "gap_rule_rank": ranks[gap_depth] if gap_depth >= 0 else ""}
 
 
@@ -468,11 +474,13 @@ def span_columns(call: dict, tax) -> dict:
             "grade": lin.get("grade", ""),
             "tentative": "yes" if call.get("tentative") else "",
             "gap_rule_rank": call.get("gap_rule_rank", call.get("rank", "")),
-            "gap_rule_taxon": lin.get(ranks_of(tax)[gd], "") if gd >= 0 else ""}
+            "gap_rule_taxon": lin.get(ranks_of(tax)[gd], "") if gd >= 0 else "",
+            "release_lineage": call.get("release_lineage", "")}
 
 
 SPAN_COLUMNS = ["span", "edits", "gap", "nearest", "next", "grade",
-                "tentative", "gap_rule_rank", "gap_rule_taxon"]
+                "tentative", "gap_rule_rank", "gap_rule_taxon",
+                "release_lineage"]
 
 
 MERGE_MIN_OVERLAP = 20
