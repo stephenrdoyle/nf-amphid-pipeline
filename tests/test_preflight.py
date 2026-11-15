@@ -1219,6 +1219,13 @@ def test_resolved_paths_are_usable() -> None:
     It once held basenames. Every check passed, the table looked right,
     and the first step that tried to open a file from it failed - because
     a basename cannot be opened from anywhere but one directory.
+
+    The committed runs.tsv points at tests/data/sim/RUN01, which is
+    gitignored and exists only where someone has run simulate.py. The
+    reads are therefore stood in for here: placeholders for the committed
+    samplesheet in a temporary run directory, and a copy of the committed
+    manifest pointing at it. Pre-flight resolves paths, it does not read
+    reads, so this tests the same thing on any checkout.
     """
     print("\nresolved paths can actually be opened")
     data = os.path.join(ROOT, "tests", "data")
@@ -1227,18 +1234,32 @@ def test_resolved_paths_are_usable() -> None:
         return
     tmp = tempfile.mkdtemp()
     try:
+        with open(os.path.join(data, "samplesheet.tsv"), encoding="utf-8") as fh:
+            samples = list(csv.DictReader(fh, delimiter="\t"))
+        mf.write_fake_fastqs(samples, os.path.join(tmp, "RUN01"))
+        with open(os.path.join(data, "runs.tsv"), encoding="utf-8") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            fields, runs = reader.fieldnames, list(reader)
+        for r in runs:
+            r["path"] = os.path.join(tmp, r["run_id"])
+        runs_p = os.path.join(tmp, "runs.tsv")
+        with open(runs_p, "w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t")
+            w.writeheader()
+            w.writerows(runs)
+        out = os.path.join(tmp, "out")
         with contextlib.redirect_stdout(io.StringIO()):
             pf.main(["--reference", os.path.join(data, "reference.tsv"),
                      "--samplesheet", os.path.join(data, "samplesheet.tsv"),
-                     "--runs", os.path.join(data, "runs.tsv"),
+                     "--runs", runs_p,
                      "--primers", os.path.join(data, "primers.tsv"),
                      "--index-map", os.path.join(ROOT, "assets",
                                                  "index_map.tsv"),
                      "--assay", os.path.join(ROOT, "assets", "assay",
                                      "ampseq_helminth.json"),
-                     "--outdir", tmp])
+                     "--outdir", out])
         rows = list(csv.DictReader(
-            open(os.path.join(tmp, "file_resolution.tsv")), delimiter="\t"))
+            open(os.path.join(out, "file_resolution.tsv")), delimiter="\t"))
         check("the table has rows", bool(rows))
         paths = [f for r in rows for f in (r["files"] or "").split(";") if f]
         check("files were resolved at all", bool(paths))
