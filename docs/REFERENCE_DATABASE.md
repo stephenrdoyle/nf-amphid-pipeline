@@ -968,6 +968,44 @@ where the host's parasites are well sampled (livestock), as genus where
 they may not be (wildlife). `--db_calling_rule gap` gives the confident
 calls alone.
 
+**Repeat-aware scoring (2026-11-15).** As the release's own scorer
+(`its2_classify.py` `collapse()`; `--db_repeat_aware`, on by default): a
+simple repeat - a homopolymer of >= 4 bases, or >= 3 copies of a 2-3
+base unit - is written as two copies of its unit and a marker for its
+copy number, so a difference in copy number costs one edit, not one per
+base. Each candidate record the query does not match exactly is scored
+plain and collapsed, and the better identity (span counted back in
+record bases) is the call's; the margin to the next species is measured
+plain, so sister species that differ mainly in a repeat's length stay
+apart. A repeat cut off where a read window stops is not charged; R2's
+window is cut at the 28S anchor for its collapsed comparison only, so
+its repeats are phased from the ITS2's own end. `collapse()` gives the
+release's output on all 12,044 v0.2.4 records and 96,352 forms and cuts
+of them.
+
+On the release's leave-one-out (v0.2.4, 3,220 queries, named records
+only, so its second pass over informal records is left out of both
+scorers), amphid and the release's scorer give the same outcome on
+98.9% of queries (gap rule), 98.7% (tiered). Present species named
+right, read whole: gap rule 57.6% without repeats, 58.4% with (the
+release's scorer 58.6%); tiered 69.0%, 69.5% (69.7%). Missing species
+named as another: gap rule 2.9%, 3.1% (4.9%); tiered 5.9%, 6.4% (8.4%).
+amphid's lower over-classification is the release's contained flags
+(v0.2.2), which amphid scores as 0 edits and the release's scorer does
+not: with them emptied, amphid names a wrong species for exactly as many
+missing-species queries read whole as the release's scorer (157 of
+3,220), against 100 with them. On real data (2x250, v0.2.4), species share of pairs:
+
+| set | gap rule, no repeats | gap rule, repeats | tiered, no repeats | tiered, repeats | the release's own analysis (gap / tiered) |
+|---|---:|---:|---:|---:|---:|
+| Francis & Šlapeta, PRJNA936713 | 88.5% | 96.3% | 96.7% | 99.0% | 95.7% / 99.4% |
+| PRJNA1524548 | 93.4% | 93.4% | 97.6% | 97.6% | 94.3% / 98.3% |
+
+In PRJNA936713 the *Oesophagostomum* AT-repeat variants amphid keeps
+apart (DADA2 folds them into one ASV) are named: *Oe. venulosum* reads
+called tentatively fell from 5.9% to 0.3% of pairs, now called by the
+gap rule.
+
 ### 12.5 Checked against the database's own results (v0.1.0)
 
 **Agreement with the reference classifier.** On amphid's own sequences,

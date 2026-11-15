@@ -137,6 +137,9 @@ def build_records(rng) -> list[dict]:
     # Drawn last, so the records above are as they always were.
     recs.append(("Chabertiidae", "Oesophagostomum",
                  "Oesophagostomum venulosum", rand(rng, 240)))
+    # An (AT)6 inside R1's window, for reads that carry (AT)14.
+    recs.append(("Chabertiidae", "Oesophagostomum", "Oesophagostomum asperum",
+                 "G" + rand(rng, 39) + "AT" * 6 + "G" + rand(rng, 187)))
     out = []
     for k, (fam, gen, sp, seq) in enumerate(recs):
         status = "named" if sp else ("shared" if gen == "Trichostrongylus"
@@ -229,15 +232,26 @@ SOURCES = {
     # near: the gap rule stops at genus, the tiered rule names it,
     # flagged tentative.
     "Oesophagostomum venulosum": ("species", "Oesophagostomum venulosum"),
+    # Reads whose (AT)n is 8 units (16 bases) longer than the record's: 16
+    # edits base by base (93%), one by copy number - named, not held at
+    # family.
+    "Oesophagostomum asperum": ("species", "Oesophagostomum asperum"),
 }
 # The sources whose reads differ from their record, and by how much.
 VARIANT = {"Oesophagostomum venulosum": 3}
+EXPANDED = {"Oesophagostomum asperum": ("AT" * 6, "AT" * 14)}
 
 
 def source_seqs(recs) -> dict:
-    return {r["species"]: mutate(random.Random(11), r["seq"], VARIANT[r["species"]])
-            if r["species"] in VARIANT else r["seq"] for r in recs
-            if r["species"] in SOURCES and r["status"] != "unnamed"}
+    out = {}
+    for r in recs:
+        sp = r["species"]
+        if sp not in SOURCES or r["status"] == "unnamed":
+            continue
+        out[sp] = (mutate(random.Random(11), r["seq"], VARIANT[sp])
+                   if sp in VARIANT else r["seq"].replace(*EXPANDED[sp], 1)
+                   if sp in EXPANDED else r["seq"])
+    return out
 
 
 def write_pairs(path1, path2, seqs, L, rng, n=40):
@@ -506,6 +520,49 @@ def test_span_call() -> None:
           got == ["part", "full"], str(got))
 
 
+def test_repeats() -> None:
+    print("\nrepeat-aware scoring")
+    c, w = its2.collapse("GCATATATATGC")
+    check("a repeat is two copies of its unit and a marker for how many",
+          c == "GCATAT" + chr(0x104) + "GC" and w == [1] * 6 + [4, 1, 1],
+          repr((c, w)))
+    check("a homopolymer of >= 4 bases is a repeat, of 3 is not",
+          its2.collapse("GAAAAG")[0] == "GAA" + chr(0x104) + "G"
+          and its2.collapse("GAAAG")[0] == "GAAAG")
+    check("a repeat cut off at a window's end has no marker",
+          its2.collapse("GCATATAT", open_end="end")[0] == "GCATAT")
+    rng = random.Random(4)
+    head, tail_ = "G" + rand(rng, 59), "G" + rand(rng, 167)
+    rec = head + "AT" * 6 + tail_
+    longer = head + "AT" * 14 + tail_
+    sc = its2.span_scores([(longer + STRETCH, "whole")], ["r"], {"r": rec},
+                          repeats=True)
+    check("whole: an (AT)n 8 units longer costs one edit, not 16",
+          sc[0][:2] == (1, len(rec)) and sc[0][3] == 16, str(sc))
+    check("... and base by base without repeats",
+          its2.span_scores([(longer + STRETCH, "whole")], ["r"], {"r": rec})[0][:2]
+          == (16, len(rec)))
+    rec2 = rand(rng, 120) + "TA" * 6 + "C" + rand(rng, 60)
+    win = (rec2[-83:].replace("TA" * 6, "TA" * 12)) + STRETCH
+    sc = its2.span_scores([(rec2[:130], "start"), (win, "end")], ["r"],
+                          {"r": rec2}, tail=47, repeats=True)
+    check("a pair: an expansion in R2's window costs one edit, its 28S "
+          "stretch none, as in the release's scorer",
+          sc[0][0] == 1 and sc[0][3] > 10, str(sc))
+    tax = al.Taxonomy(al.NCBI_RANKS)
+    lin = LINEAGE + ["Trichuridae", "Trichuris"]
+    for rid, sp in (("a", "Trichuris trichiura"), ("b", "Trichuris incognita")):
+        tax[rid] = dict(zip(al.NCBI_RANKS, lin + [sp]),
+                        species_status="named", grade="complete")
+    recs = {"a": rec, "b": head + "AT" * 9 + tail_}
+    c = its2.span_call(its2.span_scores([(rec + STRETCH, "whole")], ["a", "b"],
+                                        recs, repeats=True),
+                       tax, "gap", its2.GAP_FLOORS)
+    check("sister species that differ only in a repeat's length keep their "
+          "margin: it is measured plain",
+          c["rank"] == "species" and c["gap"] == 6, str(c))
+
+
 def test_primers_and_merging() -> None:
     print("\nprimers behind a spacer, and merging mates")
     ps = al.PrimerSet(fwd=[("NC1", NC1)], rev=[("NC2", NC2)], max_edits=3)
@@ -605,11 +662,11 @@ def test_end_to_end() -> None:
             check(f"2x{L}: every source is called as the gap rule says",
                   set(got) == want, str(sorted(got)))
             check(f"2x{L}: every pair is used, whatever its spacer",
-                  js["reads"]["clustered"] == js["reads"]["reads_in"] == 200,
+                  js["reads"]["clustered"] == js["reads"]["reads_in"] == 240,
                   str(js["reads"]))
             if L == 250:
                 check("2x250: overlapping mates are merged and scored whole",
-                      js["reads"]["merged"] == 200, str(js["reads"]))
+                      js["reads"]["merged"] == 240, str(js["reads"]))
             else:
                 check("2x150: windows of 127 + 127 read bases (R2 with its "
                       "28S stretch, less the spacer allowance)",
@@ -649,6 +706,24 @@ def test_end_to_end() -> None:
                           "--minimap2", mm2, "--calling-rule", "gap"])
             gr = calls_by_source(list(csv.DictReader(open(os.path.join(
                 gap_out, "S.clusters.tsv")), delimiter="\t")))
+            oa = got.get(("species", "Oesophagostomum asperum"), {})
+            check(f"2x{L}: an (AT)n 16 bases longer than the record costs "
+                  "one edit, and the species is named",
+                  oa.get("edits") == "1" and oa.get("tentative") == "",
+                  str({k: oa.get(k) for k in ("identity", "edits", "span")}))
+            nr_out = os.path.join(tmp, f"il{L}norep")
+            with contextlib.redirect_stdout(io.StringIO()):
+                adp.main(["--r1", r1, "--r2", r2, "--database", rel,
+                          "--primers", prim, "--assay", ASSAY,
+                          "--sample-id", "S", "--read-length", str(L),
+                          "--primer-offset", "3", "--outdir", nr_out,
+                          "--minimap2", mm2, "--no-repeats"])
+            nr = calls_by_source(list(csv.DictReader(open(os.path.join(
+                nr_out, "S.clusters.tsv")), delimiter="\t")))
+            check(f"2x{L}: --no-repeats charges it base by base, and the "
+                  "species is not named",
+                  ("species", "Oesophagostomum asperum") not in nr,
+                  str(sorted(nr)))
             check(f"2x{L}: --calling-rule gap stops it at genus",
                   ("genus", "Oesophagostomum") in gr
                   and ("species", "Oesophagostomum venulosum") not in gr,
@@ -768,6 +843,7 @@ def main() -> int:
     test_loading()
     test_span_distances()
     test_span_call()
+    test_repeats()
     test_primers_and_merging()
     test_groups()
     test_preflight()

@@ -37,11 +37,13 @@ from __future__ import annotations
 import os
 import sys
 from collections import defaultdict
+from functools import lru_cache
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampseqlib import (  # noqa: E402
-    anchored_distance, apply_floors, consensus_hits, infix_distance,
-    lca_depth, pair_hits, parse_floors, ranks_of, read_fasta, revcomp,
+    anchored_distance, apply_floors, consensus_hits, find_anchor_cost,
+    infix_distance, lca_depth, pair_hits, parse_floors, ranks_of, read_fasta,
+    revcomp,
 )
 from protocols import Protocol, scores_over_reference  # noqa: E402
 
@@ -88,6 +90,98 @@ WINDOW_TRIM = 30
 SPAN_CANDIDATES = 100
 
 
+# Repeat-aware scoring, as the release's own scorer (its2_classify.py
+# collapse(), REPEATS): a simple repeat - a homopolymer of >= 4 bases, or
+# >= 3 copies of a 2-3 base unit - is written as two copies of its unit
+# and one marker for its copy number, so a query and a record that differ
+# only in how many units a repeat has differ by one edit, not one per
+# base. An expanded (AT)n in goat Oe. venulosum cost 13-21 edits and held
+# reads at family. Each record is scored plain and collapsed and the
+# better identity kept: a substitution inside a repeat, or a copy number
+# either side of the threshold, breaks a run in one sequence only and
+# costs more collapsed. Only the best match is scored so: the nearest
+# other species is measured plain, so sister species that differ mainly
+# in a repeat's length keep their margin (collapsed both ways, T.
+# trichiura, O. volvulus and two Baylisascaris fell to genus in the
+# release's leave-one-out). There it named 19 more present species for
+# 0.1 points of over-classification. --no-repeats turns it off.
+#
+# R2's window is cut at the 28S anchor for its collapsed comparison only,
+# so a repeat's units are phased from the ITS2's own end as the record's
+# are (plain scoring leaves the stretch free, as before): the anchor is
+# the conserved 28S motif, found within the last 90 bases at <= 12
+# edits and taken when it removes 35-60 bases, else the stretch the
+# geometry gives goes (the release's trim_28s.py).
+# The anchor stops at the conserved motif's end (...AAGCAT), 4 bases short
+# of the release's S28 (its2.py), as its trim_28s.py takes it.
+S28 = "AACCTGAGCTCAGTCGTGATTACCCGCCGAACTTAAGCATATCA"
+S28_ANCHOR = S28[:-4]
+S28_LOOK, S28_MAX_EDITS, S28_CUT = 90, 12, (35, 60)
+
+
+def collapse(s: str, before: bool = False, open_end: str | None = None):
+    """(collapsed string, raw bases per character), exactly as the
+    release's its2_classify.collapse(). open_end "start" or "end": a
+    repeat reaching that end of s is cut there, so it gets no marker (its
+    copy number is unknown) and is a repeat from one copy fewer (two of a
+    2-3 base unit, three bases of one), as the record's run beyond it may
+    be long. The before-form is read from the right, so a repeat's units
+    are phased from its right end, as an end window's are (it shares that
+    end with the record, not the left)."""
+    if before:
+        o, w = collapse(s[::-1], open_end={"start": "end",
+                                           "end": "start"}.get(open_end))
+        return o[::-1], w[::-1]
+    out, w, i, n = [], [], 0, len(s)
+    while i < n:
+        best = None
+        for p in (1, 2, 3):
+            u = s[i:i + p]
+            if len(u) < p or (p > 1 and len(set(u)) == 1) or "N" in u:
+                continue
+            k = 1
+            while s[i + k * p:i + (k + 1) * p] == u:
+                k += 1
+            # a partial unit after a run at the end is part of the cut
+            cut = open_end == "end" and n - (i + k * p) < p and \
+                u.startswith(s[i + k * p:])
+            if k >= (4 if p == 1 else 3) - cut and (
+                    best is None or k * p > best[0] * best[1]):
+                best = (k, p, u, cut)
+        if not best:
+            out.append(s[i])
+            w.append(1)
+            i += 1
+            continue
+        k, p, u, cut = best
+        run = n - i if cut else k * p
+        out.extend(u * 2 + ("" if cut else chr(0x100 + min(k, 255))))
+        w.extend([1] * (2 * p) + ([] if cut else [run - 2 * p]))
+        if cut:
+            w[-1] += run - 2 * p
+        i += run
+    return "".join(out), w
+
+
+@lru_cache(maxsize=None)
+def collapsed_record(r: str) -> tuple:
+    """A record's after-form and its weights, its before-form and its
+    weights (collapse), once per sequence."""
+    return collapse(r) + collapse(r, before=True)
+
+
+def cut_28s(part: str, tail: int) -> str:
+    """An insert-oriented R2 window without its 28S stretch: cut at the
+    anchor where it removes 35-60 bases, else `tail` bases off."""
+    hit = (find_anchor_cost(part[-S28_LOOK:], S28_ANCHOR, S28_MAX_EDITS)
+           if len(part) >= S28_LOOK else None)
+    if hit:
+        cut = len(part) - S28_LOOK + hit[0]
+        if S28_CUT[0] <= len(part) - cut <= S28_CUT[1]:
+            return part[:cut]
+    return part[:len(part) - tail] if tail else part
+
+
 # span scoring and the gap rule (releases scored over their records' span)
 # --------------------------------------------------------------------------
 
@@ -120,9 +214,10 @@ def span_candidates(hits: list[dict], n: int = SPAN_CANDIDATES) -> list[str]:
 
 
 def span_scores(parts: list[tuple[str, str]], cands, refs: dict,
-                tail: int = 0) -> list[tuple]:
-    """(edits, span, record) for each candidate record, scored over the
-    record's span (manifest score_over), each piece in full:
+                tail: int = 0, repeats: bool = False) -> list[tuple]:
+    """(edits, span, record, plain edits, plain span) for each candidate
+    record, scored over the record's span (manifest score_over), each
+    piece in full:
 
       "whole"  the record placed whole inside the query, the query's
                bases either side free (a consensus, or an insert read
@@ -136,7 +231,24 @@ def span_scores(parts: list[tuple[str, str]], cands, refs: dict,
     A window may also overhang a partial record's outer end by up to
     WINDOW_TRIM bases for free; beyond that the overhang is charged.
     Edits and spans add up over the pieces. A record no piece fits is
-    left out."""
+    left out.
+
+    With repeats, a record the query does not match exactly is scored
+    collapsed too (collapse), its span counted back in record bases, and
+    the better identity is the first pair; the plain score is kept as the
+    last pair, for the margin to other species (span_call)."""
+    cq = []
+    if repeats:
+        for seq, where in parts:
+            if not seq:
+                continue
+            if where == "whole":
+                cq.append((collapse(seq)[0], where))
+            elif where == "start":
+                cq.append((collapse(seq, open_end="end")[0], where))
+            else:
+                cq.append((collapse(cut_28s(seq, tail), before=True,
+                                    open_end="start")[0], where))
     out = []
     for c in cands:
         r = refs.get(c)
@@ -157,8 +269,30 @@ def span_scores(parts: list[tuple[str, str]], cands, refs: dict,
                     min(len(r), max(1, len(seq) - tail - WINDOW_TRIM)))
             d += e
             sp += k
-        if sp and d != float("inf"):
-            out.append((int(d), sp, c))
+        if not sp or d == float("inf"):
+            continue
+        best = (d, sp)
+        if repeats and d:
+            ra, wa, rb, wb = collapsed_record(r)
+            dr = spr = 0
+            for seq, where in cq:
+                if where == "whole":
+                    e, k = infix_distance(ra, seq), len(r)
+                elif where == "start":
+                    e, k = anchored_distance(
+                        ra, seq, min(len(ra), max(1, len(seq) - WINDOW_TRIM)))
+                    k = sum(wa[:k])
+                else:
+                    e, k = anchored_distance(
+                        rb[::-1], seq[::-1],
+                        min(len(rb), max(1, len(seq) - WINDOW_TRIM)))
+                    k = sum(wb[len(wb) - k:]) if k else 0
+                dr += e
+                spr += k
+            if (dr != float("inf") and spr >= min(sp, MIN_SPAN)
+                    and 1 - dr / spr > 1 - d / sp):
+                best = (dr, spr)
+        out.append((int(best[0]), best[1], c, int(d), sp))
     return out
 
 
@@ -208,14 +342,18 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     scores = [x for x in scores if x[1] >= MIN_SPAN]
     if not scores:
         return empty
-    top = max(1 - d / sp for d, sp, _c in scores)
+    top = max(1 - x[0] / x[1] for x in scores)
     ties = [x for x in scores if 1 - x[0] / x[1] >= top - 1e-9]
     longest = max(x[1] for x in ties)
     ties = [x for x in ties if x[1] >= longest - SPAN_SLACK]
-    d0, sp0, best = min(ties, key=lambda x: (x[0], -x[1], x[2]))
-    species = {tax.get(c, {}).get("species", "") for _d, _s, c in ties}
-    other = [(1 - d / sp, sp, c) for d, sp, c in scores
-             if tax.get(c, {}).get("species", "") not in species
+    d0, sp0, best = min(ties, key=lambda x: (x[0], -x[1], x[2]))[:3]
+    species = {tax.get(c, {}).get("species", "") for _d, _s, c, *_p in ties}
+    # Other species are measured plain (span_scores keeps both; a
+    # 3-tuple is its own plain score).
+    plain = [(x[3], x[4], x[2]) if len(x) > 3 else x[:3] for x in scores]
+    other = [(1 - d / sp, sp, c) for d, sp, c in plain
+             if sp >= MIN_SPAN
+             and tax.get(c, {}).get("species", "") not in species
              and tax.get(c, {}).get("species_status", "shared") != "unnamed"]
     nxt = None
     if other:
@@ -224,13 +362,13 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     gap = None
     if len(species) == 1 and "" not in species:
         gap = nxt[1] if nxt else sp0 - d0
-        flagged = sorted({c for _d, _s, t in ties
+        flagged = sorted({c for t in (x[2] for x in ties)
                           for c in getattr(tax, "contained", {}).get(t, ())
                           if c in tax and tax[c].get("species")
                           and tax[c]["species"] not in species})
         if flagged and gap > 0:
             gap, nxt = 0, (flagged[0], 0)
-    tied = sorted(c for _d, _s, c in ties)
+    tied = sorted(x[2] for x in ties)
     lca = lca_depth(tied, tax)
     ident = 1 - d0 / sp0
     depth = apply_floors(lca, ident, floors, ranks)
@@ -398,6 +536,7 @@ class Nemits2(Protocol):
                 "gap_exact": args.gap_exact if gapped else None,
                 "tentative_identity": args.tentative_identity
                 if rule == "tiered" else None,
+                "repeat_aware": not args.no_repeats,
                 "min_span": MIN_SPAN, "min_species_span": args.min_species_span,
                 "span_slack": SPAN_SLACK}
 
@@ -414,7 +553,8 @@ class Nemits2(Protocol):
         calls = {}
         for k, cons in seqs.items():
             calls[k] = span_call(
-                span_scores([(cons, "whole")], cands[k], recs),
+                span_scores([(cons, "whole")], cands[k], recs,
+                            repeats=not ctx.args.no_repeats),
                 ctx.tax, ctx.rule, ctx.floors, ctx.args.gap_edits,
                 len(cons), ctx.args.min_species_span, ctx.args.gap_exact,
                 ctx.args.tentative_identity)
@@ -490,7 +630,8 @@ class Nemits2(Protocol):
             scorable = len(x) + max(0, len(y) - tail) if y else \
                 len(x) - tail
             calls[k] = span_call(
-                span_scores(parts, cands[k], recs, tail), tax, rule,
+                span_scores(parts, cands[k], recs, tail,
+                            repeats=not args.no_repeats), tax, rule,
                 floors, args.gap_edits, scorable, args.min_species_span,
                 args.gap_exact, args.tentative_identity)
         return calls, 0
