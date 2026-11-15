@@ -398,8 +398,14 @@ recognised from its manifest (`score_over`): its records stop where the
 over its record's span with that stretch free; its windows count ITS2
 bases (130 + 83 at 2x150, 230 + 183 at 2x250) and R2 also reads the
 stretch; overlapping mates (most pairs at 2x250) are merged and scored
-whole; and species calls follow the gap rule (`--db_calling_rule`).
-Each call then carries `nearest`, `next`, `gap`, `grade` and `span`:
+whole; and species calls follow the tiered rule (`--db_calling_rule`):
+the gap rule's calls, plus a species at >= 98% with the same gap,
+labelled "<species> (tentative)" with the gap rule's own call beside it.
+Report the tiered call; read a tentative one as species where the host's
+parasites are well sampled (livestock) and as genus where sister species
+may be missing from the database (wildlife).
+Each call then carries `nearest`, `next`, `gap`, `grade`, `span`,
+`tentative`, `gap_rule_rank` and `gap_rule_taxon`:
 "Cooperia; nearest Cooperia oncophora 100%; next Cooperia surnabada +1"
 is a genus call because a sister is one edit away, not because nothing
 is close. Give the NC1/NC2 primers (`assets/primers_nemabiome_its2.tsv`)
@@ -676,9 +682,10 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
 | `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's windows for `--illumina_read_length` (`illumina_geometries`: 132 at 2x150 or 2x250, 250 at 2x300) |
 | `--db_window_r2` | `null` | the same for R2 (128 at 2x150, 200 at 2x300). For an ITS2 release both count ITS2 bases; R2 also reads the 28S stretch |
-| `--db_calling_rule` | `auto` | `floors` (the floors above) or `gap`: species only at >= 99% identity with the nearest other species `--db_gap_edits` further off over the same span. `auto` takes the release's: `gap` for a release scored over its records' span (ITS2), `floors` for V4. `vespa_v4` calls by floors only; `gap` on a V4 release with no declared protocol selects `nemits2`'s span scoring, as it always has |
+| `--db_calling_rule` | `auto` | `floors` (the floors above); `gap`: species only at >= 99% identity with the nearest other species `--db_gap_edits` further off over the same span; or `tiered`: the gap rule's calls, plus a species the gap rule stops at genus named at `--db_tentative_identity` with the same gap, flagged tentative. `auto` takes the release's: `tiered` for a release scored over its records' span (ITS2), `floors` for V4. `vespa_v4` calls by floors only; `gap` or `tiered` on a V4 release with no declared protocol selects `nemits2`'s span scoring, as `gap` always has |
 | `--db_gap_floors` | `species=0.99,genus=0.97,family=0.95` | identity floors under the gap rule |
 | `--db_gap_edits` | `4` | edits the nearest other species must be further off for a species call under the gap rule. A `shared` record counts as another species; an `unnamed` one does not. A record the release flags as contained exactly in another species' record, or containing one (`contained_in` / `contains`, nemits2 v0.2.2 on), is 0 edits from it |
+| `--db_tentative_identity` | `0.98` | under the tiered rule, the identity at which a species the gap rule stops at genus is named, labelled "<species> (tentative)" with the gap rule's own call beside it (`gap_rule_rank`, `gap_rule_taxon`). A read 1-2% from its own species looks the same as one 1-2% from an unsampled sister: in the release's leave-one-out the tier raised right species calls from 56% to 68% where the species is present, and wrong ones from 5.4% to 9.0% where it is missing |
 | `--db_gap_exact` | `2` | the same, for an exact match to its record (0 edits over the record's span), as the release's own classifier (`its2_classify.py`) calls: in its leave-one-out an exact match with another species 2-3 edits off was right 91% of the time, 1 edit off 60%. `0`: exact matches need `--db_gap_edits` too |
 | `--db_min_species_span` | `100` | record bases a span-scored species call must rest on |
 | `--db_primer_offset` | `0` | spacer bases a protocol puts before each primer: both Illumina windows are this much shorter, so every pair fills them (nemabiome NC1/NC2: `3`) |

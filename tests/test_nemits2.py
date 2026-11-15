@@ -134,6 +134,9 @@ def build_records(rng) -> list[dict]:
         ("Trichostrongylidae", "Ostertagia", "Ostertagia ostertagi", oo),
         ("Trichostrongylidae", "Ostertagia", "", mutate(rng, oo, 1)),
     ]
+    # Drawn last, so the records above are as they always were.
+    recs.append(("Chabertiidae", "Oesophagostomum",
+                 "Oesophagostomum venulosum", rand(rng, 240)))
     out = []
     for k, (fam, gen, sp, seq) in enumerate(recs):
         status = "named" if sp else ("shared" if gen == "Trichostrongylus"
@@ -222,11 +225,18 @@ SOURCES = {
     "Cooperia oncophora": ("genus", "Cooperia"),
     "": ("genus", "Trichostrongylus"),        # the shared record
     "Ostertagia ostertagi": ("species", "Ostertagia ostertagi"),
+    # Reads 3 edits (98.75%) from their species' one record, no sister
+    # near: the gap rule stops at genus, the tiered rule names it,
+    # flagged tentative.
+    "Oesophagostomum venulosum": ("species", "Oesophagostomum venulosum"),
 }
+# The sources whose reads differ from their record, and by how much.
+VARIANT = {"Oesophagostomum venulosum": 3}
 
 
 def source_seqs(recs) -> dict:
-    return {r["species"]: r["seq"] for r in recs
+    return {r["species"]: mutate(random.Random(11), r["seq"], VARIANT[r["species"]])
+            if r["species"] in VARIANT else r["seq"] for r in recs
             if r["species"] in SOURCES and r["status"] != "unnamed"}
 
 
@@ -294,10 +304,16 @@ def test_loading() -> None:
         check("the release is scored over its records' span; V4 is not",
               protocols.scores_over_reference(man) and not protocols.scores_over_reference(
                   {"insert": "between the primers"}))
-        check("the calling rule: gap for ITS2, floors for V4, explicit wins",
-              protocols.calling_rule(man) == "gap" and protocols.calling_rule({}) == "floors"
+        check("the calling rule: tiered for ITS2, floors for V4, explicit wins",
+              protocols.calling_rule(man) == "tiered"
+              and protocols.calling_rule({}) == "floors"
               and protocols.calling_rule(man, "floors") == "floors"
-              and protocols.calling_rule({"calling_rule": "gap"}) == "gap")
+              and protocols.calling_rule(man, "gap") == "gap"
+              and protocols.calling_rule({"calling_rule": "gap"}) == "gap"
+              and protocols.calling_rule({"calling_rule": "tiered"}) == "tiered")
+        check("a tiered calling rule, like gap, means span scoring",
+              protocols.protocol_for({}, None, "tiered") == "nemits2"
+              and protocols.protocol_for({"calling_rule": "tiered"}) == "nemits2")
         check("R2's 28S stretch is taken from the geometries (150-20-83 = 47)",
               its2.PROTOCOL.tail(man, 150) == 47 and its2.PROTOCOL.tail(man, 251) == 47
               and its2.PROTOCOL.tail({}, 150) == 0, str(its2.PROTOCOL.tail(man, 150)))
@@ -437,6 +453,34 @@ def test_span_call() -> None:
     c = its2.span_call([(3, 240, "full"), (20, 240, "sis")], tax, "gap", g)
     check("species needs 99% identity too (3 edits in 240 is 98.75%)",
           c["rank"] == "genus", str(c["rank"]))
+    c = its2.span_call([(3, 240, "full"), (20, 240, "sis")], tax, "tiered", g)
+    cols = its2.span_columns(c, tax)
+    check("tiered: the same read is a tentative species at >= 98%, the gap "
+          "rule's genus call beside it",
+          c["rank"] == "species" and c["tentative"]
+          and cols["tentative"] == "yes" and cols["gap_rule_rank"] == "genus"
+          and cols["gap_rule_taxon"] == "Haemonchus", str(cols))
+    check("tiered: a tentative species is labelled so, never pooled with "
+          "confident calls",
+          adb.label_for(c, tax, al.NCBI_RANKS.index("family"))[1]
+          == "Haemonchus contortus (tentative)")
+    c = its2.span_call([(3, 240, "full"), (5, 240, "sis")], tax, "tiered", g)
+    check("tiered: not when the next species is closer than the gap",
+          c["rank"] == "genus" and not c["tentative"], str(c))
+    c = its2.span_call([(5, 240, "full"), (30, 240, "sis")], tax, "tiered", g)
+    check("tiered: not under 98% (5 edits in 240 is 97.9%)",
+          c["rank"] == "genus" and not c["tentative"], str(c))
+    c = its2.span_call([(0, 240, "full"), (6, 240, "sis")], tax, "tiered", g)
+    cols = its2.span_columns(c, tax)
+    check("tiered: a call the gap rule makes is not tentative, and the "
+          "gap rule's call is the same",
+          c["rank"] == "species" and not c["tentative"]
+          and cols["tentative"] == "" and cols["gap_rule_rank"] == "species"
+          and cols["gap_rule_taxon"] == "Haemonchus contortus", str(cols))
+    c = its2.span_call([(3, 240, "full"), (20, 240, "sis")], tax, "tiered",
+                       g, tentative_identity=0.99)
+    check("tiered: --tentative-identity 0.99 is the gap rule",
+          c["rank"] == "genus" and not c["tentative"])
     c = its2.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "floors",
                       {"species": 0.995})
     check("the floors rule ignores the gap", c["rank"] == "species")
@@ -561,11 +605,11 @@ def test_end_to_end() -> None:
             check(f"2x{L}: every source is called as the gap rule says",
                   set(got) == want, str(sorted(got)))
             check(f"2x{L}: every pair is used, whatever its spacer",
-                  js["reads"]["clustered"] == js["reads"]["reads_in"] == 160,
+                  js["reads"]["clustered"] == js["reads"]["reads_in"] == 200,
                   str(js["reads"]))
             if L == 250:
                 check("2x250: overlapping mates are merged and scored whole",
-                      js["reads"]["merged"] == 160, str(js["reads"]))
+                      js["reads"]["merged"] == 200, str(js["reads"]))
             else:
                 check("2x150: windows of 127 + 127 read bases (R2 with its "
                       "28S stretch, less the spacer allowance)",
@@ -585,6 +629,30 @@ def test_end_to_end() -> None:
             check(f"2x{L}: grade and gap are reported with the call",
                   hc.get("grade") == "complete" and hc.get("gap") == "6",
                   f"{hc.get('grade')} {hc.get('gap')}")
+            ov = got.get(("species", "Oesophagostomum venulosum"), {})
+            check(f"2x{L}: a species 98.75% from its one record is named, "
+                  "flagged tentative, the gap rule's genus call beside it",
+                  ov.get("tentative") == "yes"
+                  and ov.get("label") == "Oesophagostomum venulosum (tentative)"
+                  and ov.get("gap_rule_rank") == "genus"
+                  and ov.get("gap_rule_taxon") == "Oesophagostomum",
+                  str({k: ov.get(k) for k in ("label", "identity", "tentative",
+                                              "gap_rule_rank", "gap")}))
+            check(f"2x{L}: confident calls are not flagged",
+                  hc.get("tentative") == "" and hc.get("gap_rule_rank") == "species")
+            gap_out = os.path.join(tmp, f"il{L}gap")
+            with contextlib.redirect_stdout(io.StringIO()):
+                adp.main(["--r1", r1, "--r2", r2, "--database", rel,
+                          "--primers", prim, "--assay", ASSAY,
+                          "--sample-id", "S", "--read-length", str(L),
+                          "--primer-offset", "3", "--outdir", gap_out,
+                          "--minimap2", mm2, "--calling-rule", "gap"])
+            gr = calls_by_source(list(csv.DictReader(open(os.path.join(
+                gap_out, "S.clusters.tsv")), delimiter="\t")))
+            check(f"2x{L}: --calling-rule gap stops it at genus",
+                  ("genus", "Oesophagostomum") in gr
+                  and ("species", "Oesophagostomum venulosum") not in gr,
+                  str(sorted(gr)))
             check(f"2x{L}: lineages run over NCBI's ranks",
                   hc.get("lineage", "").split(";") ==
                   LINEAGE + ["Trichostrongylidae", "Haemonchus",
@@ -603,7 +671,7 @@ def test_end_to_end() -> None:
               set(calls_by_source(rows)) == want,
               str(sorted(calls_by_source(rows))))
         check("nanopore: the summary records the rule and the span scoring",
-              js["settings"].get("calling_rule") == "gap"
+              js["settings"].get("calling_rule") == "tiered"
               and js["settings"].get("score_over") == "reference span",
               str(js["settings"]))
         _ = man

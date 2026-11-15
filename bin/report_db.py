@@ -674,6 +674,22 @@ def build(args) -> str:
                 f"{'' if f['margin'] == 1 else 's'}, {len(f['samples'])} "
                 f"sample{'' if len(f['samples']) == 1 else 's'})"
                 for f in tf[:20])) + (" …" if len(tf) > 20 else "") + ".")
+    tent = [f for f in qc.get("tentative_species_calls") or []
+            if f["group"] in TARGET]
+    if tent:
+        items.append(
+            flag("warn", "tentative species") + " These species are named "
+            "by the tiered rule only: the reads are 98-99% to the species and "
+            "no other species is near, but the gap rule's 99% is not met. A "
+            "read 1-2% from its own species looks the same as one from a "
+            "sister the database lacks. Read them as species where the "
+            "host's parasites are well sampled (livestock), as the genus "
+            "where they may not be (wildlife); the gap rule's own call is "
+            "given: " + esc("; ".join(
+                f"{f['taxon']} ({f['reads']:,} reads, {len(f['samples'])} "
+                f"sample{'' if len(f['samples']) == 1 else 's'}; gap rule: "
+                f"{f['gap_rule'] or 'none'})"
+                for f in tent[:20])) + (" …" if len(tent) > 20 else "") + ".")
     mis = qc.get("index_misassignment") or {}
     if mis.get("applicable"):
         fitted = [ax for ax in ("row", "col")
@@ -937,7 +953,10 @@ def build(args) -> str:
                         else "",
                         f"by {c['margin']} edit"
                         f"{'' if c['margin'] == '1' else 's'}"
-                        if c.get("margin") in ("1", "2") else "") if x)
+                        if c.get("margin") in ("1", "2") else "",
+                        f"tentative (gap rule: {c.get('gap_rule_rank', '')} "
+                        f"{c.get('gap_rule_taxon', '')})".replace(" )", ")")
+                        if c.get("tentative") == "yes" else "") if x)
         cr.append(
             f"<tr><td>{esc(c['sample_id'])}</td>"
             f"<td><span class='sw' style='display:inline-block;background:"
@@ -967,6 +986,9 @@ def build(args) -> str:
         "nearest record of another species is that close, so 1-2 edits "
         "is a fragile name (the <code>margin</code> column of "
         "<code>db_calls.tsv</code>; blank before release v0.8.0). "
+        "<i>Tentative</i>: a species the tiered rule names at 98-99% "
+        "with no other species near, where the gap rule stops at the call "
+        "given (ITS2 releases). "
         "<i>Limit</i> is the fewest reads that beat the blanks "
         "(hover for how it was set). <i>Misassigned</i> is the reads index "
         "misassignment from wells sharing an i5 or i7 is expected to have "

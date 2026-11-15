@@ -43,6 +43,7 @@ process ASSIGN_DB {
         --gap-floors '${params.db_gap_floors}' \\
         --gap-edits ${params.db_gap_edits} \\
         --gap-exact ${params.db_gap_exact} \\
+        --tentative-identity ${params.db_tentative_identity} \\
         --min-species-span ${params.db_min_species_span} \\
         --outdir assign_db
 

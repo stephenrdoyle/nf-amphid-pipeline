@@ -855,6 +855,57 @@ def test_misassignment_none() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_tentative_species() -> None:
+    print("\nnemits2: tentative species under the tiered rule")
+    tmp = tempfile.mkdtemp()
+    try:
+        hc = cluster("S1", 1, "hc", 600, label="Haemonchus_contortus (tentative)")
+        hc2 = cluster("S1", 2, "hc", 300)
+        args = write_case(tmp, {"S1": [hc, hc2]}, {"S1": "unknown"})
+        # The span-scored protocol's own columns, after the required ones.
+        path = os.path.join(tmp, "assign_db", "S1.clusters.tsv")
+        with open(path) as fh:
+            rows = list(csv.DictReader(fh, delimiter="\t"))
+        extra = {"S1_c1": ("yes", "genus", "Haemonchus"),
+                 "S1_c2": ("", "species", "Haemonchus_contortus")}
+        with open(path, "w") as fh:
+            w = csv.DictWriter(fh, list(rows[0]) + [
+                "nearest", "next", "grade", "tentative", "gap_rule_rank",
+                "gap_rule_taxon"], delimiter="\t", lineterminator="\n")
+            w.writeheader()
+            for r in rows:
+                t, gr, gt = extra[r["cluster"]]
+                w.writerow({**r, "nearest": "", "next": "none close",
+                            "grade": "complete", "tentative": t,
+                            "gap_rule_rank": gr, "gap_rule_taxon": gt})
+        calls, _w, qc = run(args)
+        lab = {c["label"]: c for c in calls}
+        t = lab.get("Haemonchus_contortus (tentative)", {})
+        check("a tentative call is its own row, never pooled with the "
+              "confident one",
+              t.get("reads") == "600"
+              and lab.get("Haemonchus_contortus", {}).get("reads") == "300",
+              str([(c["label"], c["reads"]) for c in calls]))
+        check("and carries the flag and the gap rule's call",
+              t.get("tentative") == "yes" and t.get("gap_rule_rank") == "genus"
+              and t.get("gap_rule_taxon") == "Haemonchus", str(t))
+        check("it is listed among the tentative species calls",
+              [(f["taxon"], f["gap_rule"], f["reads"])
+               for f in qc["tentative_species_calls"]]
+              == [("Haemonchus_contortus", "genus Haemonchus", 600)],
+              str(qc["tentative_species_calls"]))
+        out = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", os.path.join(tmp, "synthesis"),
+                      "--out", out])
+        html = open(out).read()
+        check("and the report says so before the results",
+              "tentative species" in html
+              and "gap rule: genus Haemonchus" in html)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
@@ -863,6 +914,7 @@ def main() -> int:
     test_chimera_rows()
     test_read_funnel()
     test_v080_margin_and_ranks()
+    test_tentative_species()
     test_family_labels_pool()
     test_misassignment_blank()
     test_misassignment_real_contamination()

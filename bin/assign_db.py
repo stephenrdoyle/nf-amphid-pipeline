@@ -106,7 +106,7 @@ from ampseqlib import (  # noqa: E402
 )
 import protocols  # noqa: E402
 from protocols.nemits2 import (  # noqa: E402
-    GAP_EDITS, GAP_EXACT, GAP_FLOORS, MIN_SPAN)
+    GAP_EDITS, GAP_EXACT, GAP_FLOORS, MIN_SPAN, TENTATIVE_IDENTITY)
 from protocols.vespa_v4 import DEFAULT_FLOORS  # noqa: E402
 
 CS = re.compile(r"(:\d+|\*[a-z][a-z]|\+[a-z]+|-[a-z]+)")
@@ -842,6 +842,10 @@ def label_for(call: dict, tax: dict, label_depth: int,
     (nearest Haemonchus)". The taxon column keeps PR2's name, so tables
     still join on it.
 
+    A species the tiered rule names but the gap rule does not is
+    "<species> (tentative)", so it is never pooled with confident calls
+    of the same species.
+
     And a call stopped above family by a TIE between records - the floors
     let it through, the LCA did not - is "X, unresolved below <rank>
     (NN% to Y)", not "unclassified": the database holds the sequence and
@@ -872,6 +876,10 @@ def label_for(call: dict, tax: dict, label_depth: int,
         if not is_placeholder(taxon):
             if above_genus and near and near != taxon and not is_placeholder(near):
                 return taxon, f"{taxon} ({pct} to {near})"
+            if call.get("tentative"):
+                # Named by the tiered rule's lower floor only: its own row
+                # in every table, never pooled with confident calls.
+                return taxon, f"{taxon} (tentative)"
             return taxon, taxon
         named = next((lin.get(ranks[k]) for k in range(d - 1, -1, -1)
                       if lin.get(ranks[k]) and not is_placeholder(lin.get(ranks[k]))),
@@ -905,15 +913,18 @@ def add_calling_args(ap) -> None:
                     help="the database protocol (bin/protocols/): "
                     f"{', '.join(protocols.PROTOCOLS)}. auto: the release's "
                     "manifest 'protocol', else nemits2 for a release scored "
-                    "over its records' span or called by the gap rule, else "
-                    "vespa_v4")
-    ap.add_argument("--calling-rule", choices=("auto", "floors", "gap"),
+                    "over its records' span or called by the gap or tiered "
+                    "rule, else vespa_v4")
+    ap.add_argument("--calling-rule",
+                    choices=("auto", "floors", "gap", "tiered"),
                     default="auto",
                     help="floors: an identity floor per rank (--floors); gap: "
                     "species only when the next species is --gap-edits "
-                    "further off (--gap-floors). auto: the release's "
-                    "calling_rule, else gap for a release scored over its "
-                    "records' span (ITS2), else floors (V4)")
+                    "further off (--gap-floors); tiered: the gap rule's "
+                    "calls plus a species at --tentative-identity with the "
+                    "same gap, flagged tentative. auto: the release's "
+                    "calling_rule, else tiered for a release scored over "
+                    "its records' span (ITS2), else floors (V4)")
     ap.add_argument("--gap-floors", default=",".join(
         f"{k}={v}" for k, v in GAP_FLOORS.items()),
         help="identity floor per rank under the gap rule")
@@ -924,6 +935,11 @@ def add_calling_args(ap) -> None:
                     help="under the gap rule, the edits the nearest other "
                     "species must be further off for a species call on an "
                     "exact match (0: exact matches need --gap-edits too)")
+    ap.add_argument("--tentative-identity", type=float,
+                    default=TENTATIVE_IDENTITY,
+                    help="under the tiered rule, the identity at which a "
+                    "species the gap rule stops at genus is named, flagged "
+                    "tentative (the gap must be as clear)")
     ap.add_argument("--min-species-span", type=int, default=MIN_SPAN,
                     help="record bases a span-scored species call must rest "
                     f"on (default {MIN_SPAN}, the least any record must "
