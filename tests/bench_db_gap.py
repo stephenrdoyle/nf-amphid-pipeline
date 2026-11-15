@@ -24,7 +24,12 @@ protocol's own call is scored:
   genus_out    its genus held out             family (a confamilial is in)
 
 A call deeper than that, or naming anything wrong at any rank down to it,
-is WRONG.
+is WRONG - unless its best hit is identical to the source wherever both
+have sequence (one record contained exactly in the other: 147 record
+pairs of 54 species pairs in v0.2.0, none in livestock strongylids),
+which is INDISTINGUISHABLE: no classifier can tell that held-out species
+from the one named, and with both in the database the gap rule stops at
+genus.
 
   python3 tests/bench_db_gap.py --release <nemits2 release> \\
       --workdir /tmp/gap --samples 150 [--families Strongylidae,...]
@@ -178,7 +183,12 @@ def one_sample(job: dict) -> list[dict]:
     return rows
 
 
-def outcome(r: dict, tax, ranks: list[str]) -> str:
+def contained(a: str, b: str) -> bool:
+    """One sequence is the other with bases missing from an end."""
+    return bool(a and b) and (a in b or b in a)
+
+
+def outcome(r: dict, tax, ranks: list[str], seqs: dict) -> str:
     if r["category"] == "spurious":
         return "spurious"
     if r["origin"] == "none":
@@ -192,6 +202,9 @@ def outcome(r: dict, tax, ranks: list[str]) -> str:
     if depth > lim or any(call[k] != t[ranks[k]]
                           for k in range(min(depth, lim) + 1)
                           if k < len(call)):
+        if r["category"] != "in_db" and contained(
+                seqs.get(r["source"], ""), seqs.get(r["best_hit"], "")):
+            return "indistinguishable"
         return "wrong"
     return "deepest" if depth == lim else "higher"
 
@@ -210,20 +223,23 @@ def per_source(rows: list[dict]) -> dict:
     return out
 
 
-def report(rows: list[dict], tax, ranks: list[str], args) -> None:
+def report(rows: list[dict], tax, ranks: list[str], seqs: dict,
+           args) -> None:
     src = per_source(rows)
     by = defaultdict(Counter)
     for d in src.values():
         for ge, r in d.items():
-            by[(ge, r["category"])][outcome(r, tax, ranks)] += 1
+            by[(ge, r["category"])][outcome(r, tax, ranks, seqs)] += 1
     print(f"\n{args.error_model}, {args.samples} samples"
           + (f", families {args.families}" if args.families else "")
           + "\nper source, its largest consensus:"
-          + "\ngap_exact  category        n  deepest   wrong  higher  no consensus")
+          + "\ngap_exact  category        n  deepest   wrong  indist.  higher"
+          "  no consensus")
     for (ge, cat), c in sorted(by.items()):
         n = sum(c.values())
         print(f"{ge:>9}  {cat:12s} {n:4d}  {c['deepest'] / n:7.1%} "
-              f"{c['wrong'] / n:6.1%} {c['higher'] / n:7.1%} {c['none'] / n:8.1%}")
+              f"{c['wrong'] / n:6.1%} {c['indistinguishable'] / n:7.1%} "
+              f"{c['higher'] / n:7.1%} {c['none'] / n:8.1%}")
     print("\ncalls the clause changes (gap_exact 0 -> 2):")
     changed = Counter()
     for (_s, s_), d in sorted(src.items()):
@@ -232,7 +248,7 @@ def report(rows: list[dict], tax, ranks: list[str], args) -> None:
         a, b = (d[k] for k in sorted(d))
         src_ = s_
         if (a["rank"], a["taxon"]) != (b["rank"], b["taxon"]):
-            oa, ob = outcome(a, tax, ranks), outcome(b, tax, ranks)
+            oa, ob = outcome(a, tax, ranks, seqs), outcome(b, tax, ranks, seqs)
             changed[(a["category"], oa, ob)] += 1
             print(f"  {a['category']:12s} {tax[src_]['species']:34s} "
                   f"{a['rank']} {a['taxon']} -> {b['rank']} {b['taxon']} "
@@ -265,9 +281,10 @@ def main(argv=None) -> int:
     tax = al.load_taxonomy(os.path.join(args.release, "taxonomy.tsv"), man)
     ranks = al.ranks_of(tax)
     path = os.path.join(args.workdir, "calls.json")
+    seqs = dict(al.read_fasta(os.path.join(args.release, "refdb.fasta")))
     if args.report_only:
         with open(path) as fh:
-            report(json.load(fh), tax, ranks, args)
+            report(json.load(fh), tax, ranks, seqs, args)
         return 0
     rng = random.Random(args.seed)
     fams = {f for f in args.families.split(",") if f}
@@ -278,7 +295,6 @@ def main(argv=None) -> int:
     primers = os.path.join(args.workdir, "primers.tsv")
     with open(primers, "w") as fh:
         fh.write(f"name\tdirection\tsequence\nNC1\tfwd\t{NC1}\nNC2\trev\t{NC2}\n")
-    seqs = dict(al.read_fasta(os.path.join(args.release, "refdb.fasta")))
     jobs = []
     for k in range(args.samples):
         taxa = [(i, "in_db") for i in rng.sample(P["pools"]["in_db"], 2)]
@@ -302,7 +318,7 @@ def main(argv=None) -> int:
                 print(f"  {n}/{args.samples} samples", file=sys.stderr)
     with open(path, "w") as fh:
         json.dump(rows, fh)
-    report(rows, tax, ranks, args)
+    report(rows, tax, ranks, seqs, args)
     return 0
 
 

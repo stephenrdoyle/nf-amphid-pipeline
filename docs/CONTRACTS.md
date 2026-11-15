@@ -269,11 +269,15 @@ to 1 of 602. It was enabled on what was measured:
     `--gap-exact` 0 and 2 on the same reads). Every call it changed was a
     species in the database named to species instead of genus; no
     held-out species or genus was called differently, so wrong calls did
-    not move:
+    not move. A held-out species named a sister whose record it contains
+    exactly (identical wherever both have sequence: 54 species pairs in
+    v0.2.0, mostly plant parasites and ascaridoids, none in livestock
+    strongylids) is counted apart, as indistinguishable - with both in
+    the database the gap rule stops such a pair at genus:
 
-    | sources | in database: species, 0 -> 2 | species held out: wrong | genus held out: wrong |
+    | sources | in database: species, 0 -> 2 | species held out: wrong (+ indistinguishable) | genus held out: wrong |
     |---|---|---|---|
-    | whole release, nanopore_hac | 82.0% -> 90.8% | 5.0% -> 5.0% | 0.3% -> 0.3% |
+    | whole release, nanopore_hac | 82.0% -> 90.8% | 3.7% (+1.3%), unchanged | 0.3% -> 0.3% |
     | strongylids, nanopore_hac | 93.3% -> 97.2% | 5.7% -> 5.7% | 2.3% -> 2.3% |
     | strongylids, nanopore_sup | 93.5% -> 97.3% | 5.7% -> 5.7% | 2.3% -> 2.3% |
 
