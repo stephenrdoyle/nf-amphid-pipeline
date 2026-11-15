@@ -1591,15 +1591,36 @@ RECORD_FIELDS = ("species_status", "grade", "coverage")
 class Taxonomy(dict):
     """id -> {rank: name}, which is what every caller indexes, plus the
     release's rank columns as `ranks`, for shared records the species
-    their members name (`shared`), and for a record contained exactly in
+    their members name (`shared`), for a record contained exactly in
     a record of another species, or containing one, those records
-    (`contained`)."""
+    (`contained`), and the records known only by informal "Genus sp. X"
+    names (`informal`)."""
 
     def __init__(self, ranks: list[str]):
         super().__init__()
         self.ranks = ranks
         self.shared: dict[str, list[str]] = {}
         self.contained: dict[str, list[str]] = {}
+        self.informal: set[str] = set()
+
+
+# A source label naming only a genus: "Necator sp. type II",
+# "Cloacina spp. 1" (nematode-its2-refdb build.py GENUS_SP); hybrids,
+# cf./aff. and environmental samples are not informal names but no names.
+INFORMAL_NAME = re.compile(r"^\S+ spp?\. ")
+NOT_INFORMAL = re.compile(r" x | (cf|aff)\.? |environmental")
+
+
+def informal_label(lineage: list[str], ranks: list[str]) -> bool:
+    """Whether a member's lineage ends in an informal "Genus sp. X" name:
+    a genus, and a species field that names only the genus (as
+    nematode-its2-refdb build.informal)."""
+    if "genus" not in ranks or "species" not in ranks or \
+            len(lineage) <= ranks.index("species"):
+        return False
+    sp = lineage[ranks.index("species")] + " "
+    return bool(lineage[ranks.index("genus")]) and bool(
+        INFORMAL_NAME.match(sp)) and not NOT_INFORMAL.search(sp)
 
 
 def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
@@ -1609,7 +1630,10 @@ def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
     members.tsv beside the table gives what each shared record's members
     name. contained_in and contains (nemabiome-its2-refdb v0.2.2 on: the
     records of another species identical to this one wherever both have
-    sequence) go to `contained`, both directions together."""
+    sequence) go to `contained`, both directions together. An unnamed
+    record all of whose kept members carry an informal "Genus sp. X"
+    name goes to `informal` (v0.2.0 on: 737 records, scored only after
+    the named ones; protocols/nemits2.py)."""
     with open_text(path) as fh:
         rdr = csv.DictReader(fh, delimiter="\t")
         ranks = ranks_in(rdr.fieldnames or [], manifest) or RANKS
@@ -1626,16 +1650,25 @@ def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
                 out.contained[r["id"]] = sorted({c.strip() for c in near})
     members = os.path.join(os.path.dirname(path), "members.tsv")
     shared = {i for i, r in out.items() if r.get("species_status") == "shared"}
-    if shared and os.path.exists(members):
+    unnamed = {i for i, r in out.items() if r.get("species_status") == "unnamed"}
+    if (shared or unnamed) and os.path.exists(members):
+        loose: dict[str, bool] = {}
         with open_text(members) as fh:
             for r in csv.DictReader(fh, delimiter="\t"):
-                if r.get("id") in shared and r.get("role") == "kept":
-                    sp = (r.get("label") or "").split(";")[-1].strip()
+                if r.get("role") != "kept":
+                    continue
+                lab = [x.strip() for x in (r.get("label") or "").split(";")]
+                if r.get("id") in shared:
+                    sp = lab[-1]
                     names = out.shared.setdefault(r["id"], [])
                     if sp and sp not in names:
                         names.append(sp)
+                elif r.get("id") in unnamed:
+                    loose[r["id"]] = loose.get(r["id"], True) and \
+                        informal_label(lab, ranks)
         for names in out.shared.values():
             names.sort()
+        out.informal = {i for i, ok in loose.items() if ok}
     return out
 
 

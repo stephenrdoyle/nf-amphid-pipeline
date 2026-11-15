@@ -391,6 +391,28 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
             "gap_rule_rank": ranks[gap_depth] if gap_depth >= 0 else ""}
 
 
+def named_first_call(scores: list[tuple], tax, rule: str, floors: dict,
+                     *args, **kw) -> dict:
+    """span_call against the named records first, and against the
+    informal "Genus sp. X" records (tax.informal) only where that call
+    stops above genus, keeping the deeper call - as the release's own
+    scorer (its2_classify.py score_named_first). Informal records add
+    calls and never change one the named records make: they are there to
+    place reads no named record reaches (the gorilla "Necator sp.", 45
+    edits from N. americanus), and scored alongside the named ones a
+    larva's "Genus sp." record could take a named species' variants. Both
+    steps judge depth by the gap rule's call."""
+    loose = getattr(tax, "informal", set())
+    named = [x for x in scores if x[2] not in loose]
+    call = span_call(named, tax, rule, floors, *args, **kw)
+    genus = ranks_of(tax).index("genus")
+    if len(named) == len(scores) or call["gap_rule_depth"] >= genus:
+        return call
+    wider = span_call(scores, tax, rule, floors, *args, **kw)
+    return wider if wider["gap_rule_depth"] > call["gap_rule_depth"] \
+        else call
+
+
 def record_label(rid: str, tax) -> str:
     """A record's species; for a shared record the species its members
     name ("Cooperia shared: punctata / spatulata"); else its deepest
@@ -537,6 +559,7 @@ class Nemits2(Protocol):
                 "tentative_identity": args.tentative_identity
                 if rule == "tiered" else None,
                 "repeat_aware": not args.no_repeats,
+                "informal_records": "after named records",
                 "min_span": MIN_SPAN, "min_species_span": args.min_species_span,
                 "span_slack": SPAN_SLACK}
 
@@ -552,7 +575,7 @@ class Nemits2(Protocol):
         recs = {i: s for i, s in read_fasta(ctx.db_fasta) if i in need}
         calls = {}
         for k, cons in seqs.items():
-            calls[k] = span_call(
+            calls[k] = named_first_call(
                 span_scores([(cons, "whole")], cands[k], recs,
                             repeats=not ctx.args.no_repeats),
                 ctx.tax, ctx.rule, ctx.floors, ctx.args.gap_edits,
@@ -629,7 +652,7 @@ class Nemits2(Protocol):
                 [(x, "whole")]
             scorable = len(x) + max(0, len(y) - tail) if y else \
                 len(x) - tail
-            calls[k] = span_call(
+            calls[k] = named_first_call(
                 span_scores(parts, cands[k], recs, tail,
                             repeats=not args.no_repeats), tax, rule,
                 floors, args.gap_edits, scorable, args.min_species_span,
