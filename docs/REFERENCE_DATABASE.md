@@ -960,6 +960,29 @@ on PRJNA936713. Per sample, compositions at the tiered call differ by a
 median Bray-Curtis of 0.009 (maximum 0.056) on PRJNA1524548 and 0.007
 (0.056) on PRJNA936713.
 
+**Indel variants folded (2026-11-15).** Counted as sequences rather
+than reads, the denoisers did differ: amphid kept a median 144
+sequences per PRJNA1524548 sample against DADA2's 29, and 75-84% of
+amphid's sequences had no DADA2 counterpart in their sample - a median
+7-8 reads each, mostly 1-3 edits, often one indel, from a more abundant
+sequence. The pair denoiser compares base for base within one length, so
+it never folded an indel error. A second pass now does
+(`fold_indel_variants`, as the release's own denoiser): in decreasing
+abundance, a sequence within 2 edits of a more abundant one with 8x its
+reads at one edit, 32x at two, is folded into it; whole inserts compared
+end to end, window pairs window by window with the cut end free
+(`--no-indel-fold` to keep them; `indel_folded` counts the reads). On
+PRJNA1524548 2x250 it folded 91,664 reads: sequences per sample 144 ->
+52 (DADA2 29), amphid reads in a sequence DADA2 also found 93.7% ->
+96.2%; species share 94.0% / 98.0% (gap / tiered; DADA2 94.3 / 98.3%),
+per-sample Bray-Curtis median 0.009. On PRJNA936713, 50 -> 37 (DADA2
+20), shares and composition unchanged. Repeat-length variants are kept:
+most of what remains in PRJNA936713 is *Oesophagostomum* AT-repeat
+lengths at 0.8% of a sample each, which DADA2 folds; they may be PCR
+stutter or real variation among ITS2 copies, and folding them would hide
+the latter. The rest are sequences more than 3 edits from any more
+abundant one, and 1-3 substitution variants the abundance rule keeps.
+
 ### 12.4 Calling: the gap rule
 
 Under the gap rule (`--db_calling_rule gap`; the tiered rule below,

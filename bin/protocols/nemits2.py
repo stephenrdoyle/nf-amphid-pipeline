@@ -41,7 +41,8 @@ from functools import lru_cache
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ampseqlib import (  # noqa: E402
-    anchored_distance, apply_floors, consensus_hits, find_anchor_cost,
+    anchored_distance, apply_floors, bounded_edit, consensus_hits,
+    find_anchor_cost,
     infix_distance, lca_depth, pair_hits, parse_floors, ranks_of, read_fasta,
     revcomp,
 )
@@ -511,6 +512,70 @@ def motif_at(s: str, lo: int, hi: int) -> int | None:
     return best[0] if best else None
 
 
+# Indel variants. The pair denoiser (assign_db_pairs.Denoiser) compares
+# sequences base for base within one length, so it folds substitution
+# errors and never an indel: a read one base longer than its source is
+# another length and stands on its own once seen twice. Against the
+# release's DADA2 ASVs of the same reads (2x250, v0.2.4), 75-84% of
+# amphid's sequences had no counterpart in their sample - a median 7-8
+# reads each, 0.02-0.04% of the sample, mostly 1-3 edits, often one indel,
+# from a more abundant sequence - 144 sequences per PRJNA1524548 sample
+# against 29 ASVs. So a second pass, as the release's own denoiser does
+# (its2_classify.py denoise(), UNOISE with an indel-aware distance): in
+# decreasing abundance, a sequence within FOLD_EDITS edits of a more
+# abundant one with at least 2^(alpha * d + 1) times its reads (8x at one
+# edit, 32x at two) is that one's error copy and is folded into it. Merged
+# inserts and whole inserts are compared end to end; a window pair window
+# by window, its cut end free (an indel there shifts the last base).
+FOLD_EDITS = 2
+
+
+def variant_distance(a: tuple, b: tuple, cap: int = FOLD_EDITS) -> int:
+    """Edits between two denoised pairs (R1 part, R2 part), capped at
+    cap + 1: a whole insert end to end, a pair window by window with each
+    window's far end free."""
+    if bool(a[1]) != bool(b[1]):
+        return cap + 1
+    if not a[1]:
+        return bounded_edit(a[0], b[0], cap) if abs(len(a[0]) - len(b[0])) <= cap \
+            else cap + 1
+    d = 0
+    for x, y in ((a[0], b[0]), (a[1], b[1])):
+        d += min(bounded_edit(x, y, cap, free_b_suffix=True),
+                 bounded_edit(y, x, cap, free_b_suffix=True))
+        if d > cap:
+            return cap + 1
+    return d
+
+
+def fold_indel_variants(centroids: list, alpha: float,
+                        cap: int = FOLD_EDITS) -> tuple[list, int]:
+    """(centroids, reads folded): each centroid, in decreasing abundance,
+    folded into the most abundant kept one within cap edits that has at
+    least 2^(alpha * d + 1) times its reads."""
+    order = sorted(range(len(centroids)), key=lambda k: (-centroids[k][2], k))
+    kept: list[int] = []
+    size = {k: centroids[k][2] for k in order}
+    folded = 0
+    for k in order:
+        n = centroids[k][2]
+        into = None
+        for p in kept:
+            if size[p] < n * 2 ** (alpha + 1):
+                continue        # not abundant enough to have made it
+            d = variant_distance(centroids[k][:2], centroids[p][:2], cap)
+            if d <= cap and size[p] >= n * 2 ** (alpha * d + 1):
+                into = p
+                break
+        if into is None:
+            kept.append(k)
+        else:
+            size[into] += n
+            folded += n
+    kept.sort(key=lambda k: (-size[k], k))
+    return [(centroids[k][0], centroids[k][1], size[k]) for k in kept], folded
+
+
 MERGE_MIN_OVERLAP = 20
 MERGE_MAX_MISMATCH = 0.05
 
@@ -565,11 +630,14 @@ class Nemits2(Protocol):
     required_files = ("refdb.fasta", "taxonomy.tsv",
                       "resolution_nanopore.tsv")
     extra_columns = tuple(SPAN_COLUMNS)
-    pair_fates = ("merged", "read2_in_28s")
+    pair_fates = ("merged", "read2_in_28s", "indel_folded")
     pair_note = (" merged counts the pairs (within clustered or "
                  "unclustered) whose mates overlapped and were merged "
                  "into the insert; read2_in_28s those whose read 2 "
-                 "started inside the 28S stretch, without NC2.")
+                 "started inside the 28S stretch, without NC2; "
+                 "indel_folded those of sequences an indel or two from a "
+                 "much more abundant one, folded into it (within "
+                 "clustered).")
 
     def release_problems(self, release, manifest, read_types=()):
         out = super().release_problems(release, manifest, read_types)
@@ -673,7 +741,12 @@ class Nemits2(Protocol):
 
     def window_settings(self, rw1, rw2, args):
         return {"read_windows": [rw1, rw2],
-                "primer_offset": args.primer_offset}
+                "primer_offset": args.primer_offset,
+                "indel_fold": None if args.no_indel_fold else FOLD_EDITS}
+
+    def fold_variants(self, centroids, args):
+        return (centroids, 0) if args.no_indel_fold else \
+            fold_indel_variants(centroids, args.alpha)
 
     def merge_mates(self, s1, q1, s2, q2, args):
         return None if args.no_merge else merge_pair(s1, q1, s2, q2)

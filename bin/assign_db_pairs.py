@@ -338,6 +338,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-merge", action="store_true",
                     help="span-scored releases: keep overlapping mates as two "
                     "windows instead of merging them into the insert")
+    ap.add_argument("--no-indel-fold", action="store_true",
+                    help="span-scored releases: keep sequences an indel or two "
+                    "from a much more abundant one as their own, as the pair "
+                    "denoiser alone does")
     ap.add_argument("--max-secondary", type=int, default=5000,
                     help="hits reported per window; the first window of V4 "
                     "is conserved enough to tie with thousands of records")
@@ -437,6 +441,11 @@ def main(argv=None) -> int:
         for c, s in enumerate(dn.centroids):
             x, _, y = s.partition("|")
             centroids.append((x, y, size[c]))
+    # The protocol's own second pass (nemits2: variants an indel apart,
+    # which the denoiser above, comparing within one length, never sees).
+    centroids, folded = proto.fold_variants(centroids, args)
+    if folded:
+        fate["indel_folded"] = folded
     fate["unclustered"] = unclustered
     fate["clustered"] = sum(n for _x, _y, n in centroids)
 

@@ -620,6 +620,29 @@ def test_informal() -> None:
           str(c))
 
 
+def test_indel_fold() -> None:
+    print("\nfolding indel variants")
+    rng = random.Random(12)
+    a = rand(rng, 280)
+    ins = a[:100] + "T" + a[100:]
+    dl2 = a[:50] + a[51:150] + a[151:]
+    other = mutate(rng, a, 6)
+    cents = [(a, "", 1000), (ins, "", 50), (ins + "G", "", 200), (dl2, "", 20),
+             (other, "", 30)]
+    out, n = its2.fold_indel_variants(cents, 2.0)
+    got = {x: c for x, _y, c in out}
+    check("a whole insert one indel from a sequence 8x as abundant is "
+          "folded into it, two indels at 32x",
+          got.get(a) == 1070 and n == 70, str(sorted(got.values())))
+    check("... one not that much rarer stays, as does a sequence 6 edits off",
+          got.get(ins + "G") == 200 and got.get(other) == 30, str(got.values()))
+    w1, w2 = a[:120], a[-120:]
+    i1 = (w1[:40] + "A" + w1[40:])[:120]
+    out, n = its2.fold_indel_variants([(w1, w2, 400), (i1, w2, 40)], 2.0)
+    check("a window pair whose R1 window carries an indel (its last base "
+          "pushed out) is folded too", n == 40 and len(out) == 1, str(out))
+
+
 def test_primers_and_merging() -> None:
     print("\nprimers behind a spacer, and merging mates")
     ps = al.PrimerSet(fwd=[("NC1", NC1)], rev=[("NC2", NC2)], max_edits=3)
@@ -934,6 +957,7 @@ def main() -> int:
     test_span_call()
     test_repeats()
     test_informal()
+    test_indel_fold()
     test_primers_and_merging()
     test_groups()
     test_preflight()
