@@ -391,7 +391,7 @@ and `unclustered`, and they balance:
 
 (`low_quality` is 0 where a route does not filter on quality). Other
 fates are breakdowns within these and say so in `reads_note`
-(`unmapped`, `whole_insert`, `merged`). `clustered` is the sum of
+(`unmapped`, `whole_insert`, `merged`, `read2_in_28s`). `clustered` is the sum of
 clusters.tsv's `reads`.
 
 `settings` records what the protocol was run with; a protocol adds its

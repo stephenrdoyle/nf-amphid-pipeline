@@ -45,6 +45,7 @@ import random
 import shutil
 import sys
 import tempfile
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -257,10 +258,11 @@ def source_seqs(recs) -> dict:
     return out
 
 
-def write_pairs(path1, path2, seqs, L, rng, n=40):
+def write_pairs(path1, path2, seqs, L, rng, n=40, in_28s=False):
     """2xL pairs of each source, behind a 0-3 base spacer, as the
     nemabiome protocol builds them; a read past its insert runs into the
-    adapter."""
+    adapter. in_28s: every other read 2 starts inside the 28S stretch,
+    0-7 bases before the motif, with no NC2 (half of PRJNA1524548)."""
     with gzip.open(path1, "wt") as f1, gzip.open(path2, "wt") as f2:
         k = 0
         for its2 in seqs.values():
@@ -270,6 +272,9 @@ def write_pairs(path1, path2, seqs, L, rng, n=40):
                     al.revcomp(NC2) + ADAPTER_R1
                 s2 = rand(rng, rng.randint(0, 3)) + NC2 + al.revcomp(insert) + \
                     al.revcomp(NC1) + ADAPTER_R2
+                if in_28s and k % 2:
+                    s2 = (al.revcomp(insert) + al.revcomp(NC1) + ADAPTER_R2)[
+                        rng.randint(0, 7):]
                 for fh, s in ((f1, s1), (f2, s2)):
                     s = (s + "A" * L)[:L]
                     fh.write(f"@p{k}\n{s}\n+\n{'I' * L}\n")
@@ -331,8 +336,9 @@ def test_loading() -> None:
         check("a tiered calling rule, like gap, means span scoring",
               protocols.protocol_for({}, None, "tiered") == "nemits2"
               and protocols.protocol_for({"calling_rule": "tiered"}) == "nemits2")
-        check("R2's 28S stretch is taken from the geometries (150-20-83 = 47)",
-              its2.PROTOCOL.tail(man, 150) == 47 and its2.PROTOCOL.tail(man, 251) == 47
+        check("R2's 28S stretch is taken from the geometries (150-20-83 = 47), "
+              "less the 7 bases before the 28S motif it is cut at",
+              its2.PROTOCOL.tail(man, 150) == 40 and its2.PROTOCOL.tail(man, 251) == 40
               and its2.PROTOCOL.tail({}, 150) == 0, str(its2.PROTOCOL.tail(man, 150)))
     vespa = os.path.join(HERE, "data", "db", "release", "taxonomy.tsv")
     tv = al.load_taxonomy(vespa)
@@ -617,6 +623,26 @@ def test_informal() -> None:
 def test_primers_and_merging() -> None:
     print("\nprimers behind a spacer, and merging mates")
     ps = al.PrimerSet(fwd=[("NC1", NC1)], rev=[("NC2", NC2)], max_edits=3)
+    rng = random.Random(8)
+    insert = rand(rng, 240) + STRETCH
+    r1 = ("x", NC1 + insert[:200], "I" * 220)
+    at_nc2 = ("x", "GA" + NC2 + al.revcomp(insert)[:200], "I" * 222)
+    in_28s = ("x", al.revcomp(insert)[3:203], "I" * 200)
+    f = Counter()
+    a = its2.PROTOCOL.orient(r1, at_nc2, ps, f)
+    b = its2.PROTOCOL.orient(r1, in_28s, ps, f)
+    check("read 2 at NC2 and read 2 inside 28S are both cut at the 28S "
+          "motif, so they start on the same base",
+          a and b and a[1][0][:60] == b[1][0][:60]
+          and a[1][0].startswith(its2.R2_MOTIF) and f["read2_in_28s"] == 1,
+          f"{a and a[1][0][:25]} {b and b[1][0][:25]}")
+    check("... and read 1 runs through what read 2 began with",
+          a[3] == NC2 and b[3] == al.revcomp(insert)[3:7 + len(its2.R2_MOTIF)],
+          f"{a[3]} {b[3]}")
+    check("a read 2 with neither NC2 nor the motif is not placed",
+          its2.PROTOCOL.orient(r1, ("x", rand(rng, 200), "I" * 200), ps, f)
+          is None)
+    ps = al.PrimerSet(fwd=[("NC1", NC1)], rev=[("NC2", NC2)], max_edits=3)
     rng = random.Random(3)
     body = rand(rng, 100)
     ends = [ps.match(rand(rng, k) + NC1 + body, "fwd") for k in range(4)]
@@ -698,7 +724,7 @@ def test_end_to_end() -> None:
         want = set(SOURCES.values())
         for L in (150, 250):
             r1, r2 = (os.path.join(tmp, f"S{L}_R{k}.fastq.gz") for k in (1, 2))
-            write_pairs(r1, r2, seqs, L, random.Random(L))
+            write_pairs(r1, r2, seqs, L, random.Random(L), in_28s=True)
             out = os.path.join(tmp, f"il{L}")
             with contextlib.redirect_stdout(io.StringIO()):
                 adp.main(["--r1", r1, "--r2", r2, "--database", rel,
@@ -712,6 +738,11 @@ def test_end_to_end() -> None:
             got = calls_by_source(rows)
             check(f"2x{L}: every source is called as the gap rule says",
                   set(got) == want, str(sorted(got)))
+            check(f"2x{L}: read 2 inside 28S (half the pairs) is used, and "
+                  "both layouts denoise into one sequence per source",
+                  js["reads"].get("read2_in_28s") == 120
+                  and len(rows) == len(SOURCES),
+                  f"{js['reads'].get('read2_in_28s')} {len(rows)}")
             check(f"2x{L}: every pair is used, whatever its spacer",
                   js["reads"]["clustered"] == js["reads"]["reads_in"] == 240,
                   str(js["reads"]))
@@ -719,9 +750,9 @@ def test_end_to_end() -> None:
                 check("2x250: overlapping mates are merged and scored whole",
                       js["reads"]["merged"] == 240, str(js["reads"]))
             else:
-                check("2x150: windows of 127 + 127 read bases (R2 with its "
-                      "28S stretch, less the spacer allowance)",
-                      js["settings"]["read_windows"] == [127, 127],
+                check("2x150: windows of 127 + 120 read bases (R2 from the "
+                      "28S motif, less the spacer allowance)",
+                      js["settings"]["read_windows"] == [127, 120],
                       str(js["settings"].get("read_windows")))
             co = got.get(("genus", "Cooperia"), {})
             check(f"2x{L}: a genus call says how close it came",

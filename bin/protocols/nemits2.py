@@ -483,6 +483,34 @@ SPAN_COLUMNS = ["span", "edits", "gap", "nearest", "next", "grade",
                 "release_lineage"]
 
 
+# Read 2, as the release's trim_primers.py takes it: it starts either with
+# NC2 and then 7 bases of 28S, or directly inside the 28S stretch, with
+# no NC2 - half the runs of PRJNA1524548, whose 1.78 million pairs a trim
+# requiring NC2 threw away (41 of 82 samples kept under 1%). Either way
+# it is cut at the conserved 28S motif (<= 2 mismatches, within 12 bases
+# of NC2's end or of the read's start), so every read 2 starts on the
+# same base and both layouts denoise together; the 7 bases dropped are
+# 28S, which no record holds. NC2 without the motif: cut 7 bases past
+# NC2. Neither: the pair is dropped.
+R2_MOTIF = "ATGCTTAAGTTCAGCGGG"
+R2_MOTIF_MISMATCHES, R2_MOTIF_SLACK, NC2_TAIL = 2, 12, 7
+
+
+def motif_at(s: str, lo: int, hi: int) -> int | None:
+    """Where the read-2 28S motif best fits (Hamming, <= 2 mismatches)
+    starting in s[lo:hi + 1], the earliest of the best; None if nowhere."""
+    best = None
+    m = len(R2_MOTIF)
+    for off in range(lo, hi + 1):
+        w = s[off:off + m]
+        if len(w) < m:
+            break
+        d = sum(a != b for a, b in zip(w, R2_MOTIF))
+        if d <= R2_MOTIF_MISMATCHES and (best is None or d < best[1]):
+            best = (off, d)
+    return best[0] if best else None
+
+
 MERGE_MIN_OVERLAP = 20
 MERGE_MAX_MISMATCH = 0.05
 
@@ -537,10 +565,11 @@ class Nemits2(Protocol):
     required_files = ("refdb.fasta", "taxonomy.tsv",
                       "resolution_nanopore.tsv")
     extra_columns = tuple(SPAN_COLUMNS)
-    pair_fates = ("merged",)
+    pair_fates = ("merged", "read2_in_28s")
     pair_note = (" merged counts the pairs (within clustered or "
                  "unclustered) whose mates overlapped and were merged "
-                 "into the insert.")
+                 "into the insert; read2_in_28s those whose read 2 "
+                 "started inside the 28S stretch, without NC2.")
 
     def release_problems(self, release, manifest, read_types=()):
         out = super().release_problems(release, manifest, read_types)
@@ -591,14 +620,41 @@ class Nemits2(Protocol):
                 ctx.args.tentative_identity)
         return calls
 
+    def orient(self, r1, r2, ps, fate):
+        """As Protocol.orient, with read 2 found and cut as the release's
+        trim_primers.py does (R2_MOTIF): at NC2 or directly in 28S, cut at
+        the 28S motif. R1 runs, past the insert, into what read 2 began
+        with: NC2, or read 2's own first bases up to the motif's end."""
+        for a, b in ((r1, r2), (r2, r1)):
+            f = ps.match(a[1].upper(), "fwd")
+            if f is None:
+                continue
+            s2 = b[1].upper()
+            r = ps.match(s2, "rev")
+            if r is not None:
+                m = motif_at(s2, r[1], r[1] + R2_MOTIF_SLACK)
+                cut = m if m is not None else r[1] + NC2_TAIL
+                opposite = dict(ps.rev).get(r[0], "")
+            else:
+                cut = motif_at(s2, 0, R2_MOTIF_SLACK)
+                if cut is None:
+                    continue
+                opposite = s2[:cut + len(R2_MOTIF)]
+                fate["read2_in_28s"] += 1
+            return ((a[1][f[1]:].upper(), a[2][f[1]:]),
+                    (s2[cut:], b[2][cut:]), f[0], opposite)
+        return None
+
     def tail(self, manifest, read_length=None):
-        """Bases a primer-trimmed R2 reads before its record's span starts.
+        """Bases a trimmed R2 reads before its record's span starts.
 
         0 for a release scored over whole inserts. For one scored over its
         records' span (ITS2), R2 opens with the 28S stretch the records stop
         short of, and the release's windows count record bases only (130 +
         83 at 2x150): a geometry's read length, less its reverse primer and
-        its R2 window, is that stretch (150 - 20 - 83 = 47)."""
+        its R2 window, is that stretch from NC2 (150 - 20 - 83 = 47), and
+        read 2 is cut NC2_TAIL bases into it, at the 28S motif (orient):
+        40."""
         if not scores_over_reference(manifest):
             return 0
         rev = len(((manifest.get("primers") or {}).get("reverse") or {})
@@ -612,7 +668,8 @@ class Nemits2(Protocol):
                 if read_length and int(g["read_length"]) <= read_length]
         g = max(fits, key=lambda g: int(g["read_length"])) if fits else \
             min(geoms, key=lambda g: int(g["read_length"]))
-        return max(0, int(g["read_length"]) - rev - int(g["windows"][1]))
+        return max(0, int(g["read_length"]) - rev - int(g["windows"][1])
+                   - NC2_TAIL)
 
     def window_settings(self, rw1, rw2, args):
         return {"read_windows": [rw1, rw2],

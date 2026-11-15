@@ -920,7 +920,7 @@ thirds are partial at one end or both. The manifest says so
 The geometries give windows in ITS2 bases (130 + 83 at 2x150, 230 + 183
 at 2x250). R2 reads the 28S stretch first, so its window takes that too
 (`illumina_tail`: geometry read length - reverse primer - R2 window =
-47). `--db_primer_offset` shortens both windows by the protocol's spacer
+47, less the 7 bases before the 28S motif read 2 is cut at, below). `--db_primer_offset` shortens both windows by the protocol's spacer
 (NC1/NC2: 0-3 bases, so 3); without it every pair with a spacer was too
 short. The primer search already allowed a start up to 4 bases in.
 
@@ -929,6 +929,36 @@ Mates that overlap are merged into the insert and scored whole
 overlapping windows, every difference in the overlap was counted twice:
 the two-base AT-repeat stutter of an *Oesophagostomum* ITS2 then fell
 under 99%.
+
+**Read 2 inside 28S (2026-11-15).** As the release's `trim_primers.py`:
+read 2 starts either with NC2 and then 7 bases of 28S, or directly
+inside the 28S stretch with no NC2, as in half the runs of PRJNA1524548.
+Either way it is cut at the conserved 28S motif `ATGCTTAAGTTCAGCGGG`
+(<= 2 mismatches, within 12 bases of NC2's end or of the read's start),
+so every read 2 starts on the same base and both layouts denoise
+together; NC2 without the motif is cut 7 bases past NC2, and neither
+drops the pair (`Nemits2.orient`; `read2_in_28s` counts them). R2's
+window then takes 40 bases of 28S, not 47 (120 read bases at 2x150, 220
+at 2x250). Before, every pair without NC2 was dropped as `no_primer`: on
+PRJNA1524548 2x250 (v0.2.4) 54.5% of pairs, 41 of 82 samples keeping
+under 1% and 16 none, whose compositions then differed from DADA2's by a
+median Bray-Curtis of 0.44. Now 4.0% are dropped, 92.4% of pairs are
+clustered (1.41 to 3.01 million), no sample is empty, and the species
+share is 93.8% (gap rule) and 97.9% (tiered). PRJNA936713, all NC2, is
+unchanged (96.4%, 99.0%).
+
+With the release's own trimming and DADA2 (hybrid joining) on the same
+reads, and the release's classifier on both sets of sequences, what is
+left is the denoiser, and it changes little. amphid keeps more variants
+(a median 144 sequences per PRJNA1524548 sample against 29 ASVs; 54
+against 20 in PRJNA936713) - repeat-length, 1-3-edit and concatenated
+variants of DADA2's ASVs - but 93.7% of amphid's reads are in a
+sequence DADA2 also found in that sample, and 96.9% of DADA2's in one
+amphid found. Species share: amphid 93.8% / DADA2 94.3% (gap rule),
+97.9% / 98.3% (tiered) on PRJNA1524548; 96.2% / 95.7% and 98.9% / 99.4%
+on PRJNA936713. Per sample, compositions at the tiered call differ by a
+median Bray-Curtis of 0.009 (maximum 0.056) on PRJNA1524548 and 0.007
+(0.056) on PRJNA936713.
 
 ### 12.4 Calling: the gap rule
 

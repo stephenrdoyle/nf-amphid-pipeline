@@ -35,7 +35,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ampseqlib import RANKS, parse_floors, ranks_of  # noqa: E402
+from ampseqlib import RANKS, orient_pair, parse_floors, ranks_of  # noqa: E402
 
 # The read types a platform adapter can hand on (contract A).
 READ_TYPES = {
@@ -273,6 +273,17 @@ class Protocol:
             f"protocol {self.name} does not classify single reads")
 
     # -- pairs ----------------------------------------------------------
+    def orient(self, r1, r2, ps, fate) -> tuple | None:
+        """((R1 seq, qual), (R2 seq, qual), fwd primer name, the sequence
+        R1 runs into past the insert) with primers trimmed, R1 the
+        forward-primer mate; None when the pair cannot be placed. By
+        default a primer at the start of each mate (ampseqlib.orient_pair),
+        and the opposite primer is what R1 runs through."""
+        o = orient_pair(r1, r2, ps)
+        if o is None:
+            return None
+        return o[0], o[1], o[2], dict(ps.rev).get(o[3], "")
+
     def tail(self, manifest: dict, read_length: int | None = None) -> int:
         """Bases a primer-trimmed R2 reads before its record's span
         starts: 0 for records that are whole inserts."""

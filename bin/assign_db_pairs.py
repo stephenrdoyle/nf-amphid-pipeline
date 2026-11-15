@@ -90,7 +90,7 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
     Minimap2, illumina_windows, load_assay, load_primers, load_rank_names,
-    load_release_manifest, load_taxonomy, orient_pair, ranks_of, read_table,
+    load_release_manifest, load_taxonomy, ranks_of, read_table,
     release_version, revcomp, write_assignment,
 )
 import assign_db as adb  # noqa: E402
@@ -379,12 +379,12 @@ def main(argv=None) -> int:
         fate["reads_in"] += 1
         if len(qual_values) < 4:
             qual_values.update(a[2], b[2])
-        o = orient_pair(a, b, ps)
+        o = proto.orient(a, b, ps, fate)
         if o is None:
             fate["no_primer"] += 1
             continue
-        (s1, q1), (s2, q2), fn, rn = o
-        t1, q1t = trim_readthrough(s1, q1, ad1, rev_seq.get(rn, ""))
+        (s1, q1), (s2, q2), fn, opposite = o
+        t1, q1t = trim_readthrough(s1, q1, ad1, opposite)
         if len(t1) < len(s1):
             # The insert ended inside R1: R1 holds all of it.
             if len(t1) < 50:
