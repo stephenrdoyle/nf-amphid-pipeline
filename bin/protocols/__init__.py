@@ -302,6 +302,12 @@ class Protocol:
                  "primer_offset": args.primer_offset}
                 if args.primer_offset else {})
 
+    def fold_variants(self, centroids: list, args) -> tuple[list, int]:
+        """(centroids, reads folded): a second denoising pass over the
+        denoised pairs, centroids[k] = (R1 part, R2 part or "", reads).
+        None by default."""
+        return centroids, 0
+
     def merge_mates(self, s1: str, q1: str, s2: str, q2: str, args):
         """(insert, quality) for mates to be scored as one merged insert,
         or None to keep them as two windows."""
