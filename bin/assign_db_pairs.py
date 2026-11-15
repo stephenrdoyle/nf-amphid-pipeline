@@ -565,7 +565,8 @@ def main(argv=None) -> int:
             **proto.column_values(call, tax),
         })
     summary = {
-        "sample_id": sid, "mode": "database", "platform": "illumina",
+        "sample_id": sid, "mode": "database", "protocol": proto.name,
+        "platform": "illumina",
         "database": {"version": version, "name": man.get("name", ""),
                      "path": os.path.abspath(args.database)},
         "minimap2": mm_version,

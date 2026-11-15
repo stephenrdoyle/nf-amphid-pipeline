@@ -938,6 +938,9 @@ def main(argv=None) -> int:
     summary = {
         "sample_id": sid,
         "mode": "database",
+        # The protocol that made these calls (bin/protocols/), so a result
+        # says how it was reached without the run's logs.
+        "protocol": proto.name,
         "database": {"version": version, "name": man.get("name", ""),
                      "path": os.path.abspath(args.database)},
         "minimap2": mm_version,
