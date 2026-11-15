@@ -141,11 +141,18 @@ not call by the calling rule asked for, or lacks a release file it reads
 
 | | `paired_short` | `single_long_noisy` | `single_long_accurate` |
 |---|---|---|---|
-| `vespa_v4` | two fixed windows, denoised, pair floors | reference-guided consensus, nanopore floors | the same consensus route and floors |
-| `nemits2` | overlapping mates merged, else two windows (R2 with its 28S stretch), span-scored | consensus carrying the 28S stretch, span-scored | the same consensus route, span-scored, gap rule |
+| `vespa_v4` | two fixed windows, denoised, pair floors | reference-guided consensus, nanopore floors | the consensus route plus three steps (below), same floors |
+| `nemits2` | overlapping mates merged, else two windows (R2 with its 28S stretch), span-scored | consensus carrying the 28S stretch, span-scored | the consensus route plus three steps (below), span-scored, gap rule |
 
-`single_long_accurate` takes the consensus route unchanged. It was
-enabled on what was measured:
+`single_long_accurate` takes the consensus route with three steps of its
+own, none of which runs for `single_long_noisy`: homopolymer-length
+copies of a larger consensus are absorbed (`merge_homopolymer`), a
+smaller consensus takes a larger one's run lengths and keeps its
+substitutions (`correct_homopolymer`), and a consensus no read supports
+exactly is dropped (`unsupported`). All three were added after S-BSST527
+(below); on the simulated HiFi benchmark they change no call - every row
+of the floors grid is the same, and spurious clusters fall from 3 of 604
+to 1 of 602. It was enabled on what was measured:
 
 - **vespa_v4: the floors, on simulated HiFi reads.** The leave-out
   benchmark the floors come from (`tests/bench_db_floors.py`, vespa

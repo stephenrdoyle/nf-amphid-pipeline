@@ -24,8 +24,8 @@ AT-repeat stutter of an Oesophagostomum ITS2 (two bases) fell under the
 
 Read types: single_long_noisy (nanopore consensus, carrying the 28S
 stretch), paired_short, and single_long_accurate (PacBio HiFi or CCS:
-the same consensus route, checked on S-BSST527 against DADA2 ASVs of the
-same reads before it was taken; docs/CONTRACTS.md).
+the consensus route with its PacBio steps, checked on S-BSST527 against
+DADA2 ASVs of the same reads; docs/CONTRACTS.md).
 
 Standard-library Python plus minimap2.
 """

@@ -16,11 +16,12 @@ nanopore's penalties (SR_DIVERGENT), and a pair whose windows point at
 different records is called at what the two agree on.
 
 Read types: single_long_noisy (nanopore consensus), paired_short
-(Illumina windows) and single_long_accurate (PacBio HiFi: the same
-consensus route and floors). The floors were calibrated on nanopore
-consensus sequences; a leave-out benchmark on simulated HiFi reads
-(tests/bench_db_floors.py --error-model pacbio_hifi, docs/CONTRACTS.md)
-measured them before HiFi reads were taken.
+(Illumina windows) and single_long_accurate (PacBio HiFi: the consensus
+route with its PacBio steps, and the same floors). The floors were
+calibrated on nanopore consensus sequences; a leave-out benchmark on
+simulated HiFi reads (tests/bench_db_floors.py --error-model
+pacbio_hifi, docs/CONTRACTS.md) measured them before HiFi reads were
+taken, and again with the PacBio steps: the same calls.
 
 Standard-library Python plus minimap2.
 """

@@ -445,7 +445,8 @@ then taken as `single_long_noisy`.
 
 **Read types.** Both protocols take all three: `single_long_noisy`
 (nanopore), `paired_short` (Illumina) and `single_long_accurate` (PacBio
-HiFi, through the same consensus route as nanopore's; §2.11 says what
+HiFi, through the consensus route nanopore's takes, with three steps of
+its own for CCS errors; §2.11 says what
 was measured before it was enabled). A PacBio library that is not yet
 demultiplexed is a `pacbio` run (§2.11).
 
