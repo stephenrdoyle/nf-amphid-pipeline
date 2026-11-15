@@ -261,6 +261,22 @@ to 1 of 602. It was enabled on what was measured:
     -> 2 (26 reads), per-sample Bray-Curtis median 0.010 -> 0.0098 and
     worst sample 0.317 -> 0.100, wrong-species reads 5.
 
+    No nanopore NC1/NC2 run was at hand (nor, as far as a search of ENA
+    and the literature found, is one public), so the clause was measured
+    on nanopore consensus sequences by a leave-out simulation instead
+    (`tests/bench_db_gap.py`: v0.2.0 with 100 species and 30 genera held
+    out, or, for the strongylid families, 60 and 8; 300 samples each;
+    `--gap-exact` 0 and 2 on the same reads). Every call it changed was a
+    species in the database named to species instead of genus; no
+    held-out species or genus was called differently, so wrong calls did
+    not move:
+
+    | sources | in database: species, 0 -> 2 | species held out: wrong | genus held out: wrong |
+    |---|---|---|---|
+    | whole release, nanopore_hac | 82.0% -> 90.8% | 5.0% -> 5.0% | 0.3% -> 0.3% |
+    | strongylids, nanopore_hac | 93.3% -> 97.2% | 5.7% -> 5.7% | 2.3% -> 2.3% |
+    | strongylids, nanopore_sup | 93.5% -> 97.3% | 5.7% -> 5.7% | 2.3% -> 2.3% |
+
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the
