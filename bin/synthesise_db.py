@@ -91,6 +91,12 @@ ORGANISM GROUPS
     the protocol is for; the rest are off-target, reported as fractions
     of each well, as VESPA does.
 
+    The grouping is the protocol's (Protocol.organism_group,
+    bin/protocols/), as are the defaults of --host-clade and
+    --min-rel-abundance; both protocols take the defaults described here.
+    Everything else in this file is shared by every protocol and reads
+    only contracts A and B (docs/CONTRACTS.md).
+
 PREDICTED AMPLIFICATION
     The release's primer_fit.tsv says how well the primers fit each
     record. A call whose best hit is classed near_3prime - a mismatch in
@@ -114,11 +120,14 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    MISASSIGN_DEFAULT_RATE, RANKS, IndexSharing, fit_misassignment,
+    DB_CALL_COLUMNS, DB_CALL_OPTIONAL, MISASSIGN_DEFAULT_RATE, RANKS,
+    IndexSharing, fit_misassignment,
     load_rank_names, load_release_manifest, plate_effects, rank_meaning,
     ranks_in, read_table, release_version, restore_declared_ids,
     sentinel_rates, writer,
 )
+import protocols  # noqa: E402
+from protocols import HELMINTH_CLASSES  # noqa: E402
 
 NEGATIVE_TYPES = {"neg_extraction", "neg_ntc"}
 # Kept out of the plate-position tests, as in the panel synthesis: a
@@ -161,71 +170,10 @@ GROUPS = ("helminths", "protists", "microsporidia", "host", "fungi",
 TARGET_GROUPS = ("helminths", "protists", "microsporidia")
 OFFTARGET = tuple(g for g in GROUPS if g not in TARGET_GROUPS
                   and g not in ("unassigned", "chimera"))
-HELMINTH_CLASSES = {"Nematoda", "Platyhelminthes", "Acanthocephala"}
 # Groups the report shows taxon by taxon: the targets, and fungi, which
 # are off-target but can dominate a sample (half of every primate sample
 # in VESPA's public data) and say something about diet and collection.
 DETAIL_GROUPS = TARGET_GROUPS + ("fungi",)
-
-
-def organism_group(lineage: list[str], host_clade: str,
-                   ranks: list[str] = RANKS) -> str:
-    """The reporting group of a call, from its lineage down to the rank
-    it reached (module docstring). 'unassigned' when that lineage stops
-    too high to tell."""
-    if ranks != RANKS:
-        return organism_group_named(dict(zip(ranks, lineage)), host_clade)
-    lin = lineage + [""] * (len(RANKS) - len(lineage))
-    dom, sup, sub, cls, order = lin[0], lin[1], lin[3], lin[4], lin[5]
-    if dom in ("Bacteria", "Archaea"):
-        return "bacteria_archaea"
-    if dom.startswith("Eukaryota:"):
-        return "organelle"
-    if dom != "Eukaryota":
-        return "unassigned"
-    if host_clade and host_clade in lin:
-        return "host"
-    if cls in HELMINTH_CLASSES:
-        return "helminths"
-    if order == "Microsporida":
-        return "microsporidia"
-    if sub == "Fungi":
-        return "fungi"
-    if sub == "Metazoa":
-        # a Metazoa call that stopped above class could still be a
-        # helminth: not placed
-        return "invertebrates" if cls else "unassigned"
-    if sup == "Archaeplastida":
-        return "plants"
-    if sup == "Obazoa":
-        # Choanoflagellates, apusomonads and the like are protists; an
-        # Obazoa call that stopped above subdivision could be an animal.
-        return "protists" if sub else "unassigned"
-    return "protists" if sup else "unassigned"
-
-
-def organism_group_named(lin: dict, host_clade: str) -> str:
-    """organism_group() for a release whose ranks are real ones (NCBI's
-    superkingdom ... species): the same groups, read by rank name."""
-    top = lin.get("superkingdom") or lin.get("domain") or ""
-    phylum, kingdom = lin.get("phylum", ""), lin.get("kingdom", "")
-    if top in ("Bacteria", "Archaea"):
-        return "bacteria_archaea"
-    if top != "Eukaryota":
-        return "unassigned"
-    if host_clade and host_clade in lin.values():
-        return "host"
-    if phylum in HELMINTH_CLASSES:
-        return "helminths"
-    if phylum == "Microsporidia":
-        return "microsporidia"
-    if kingdom == "Fungi":
-        return "fungi"
-    if kingdom == "Metazoa":
-        return "invertebrates" if phylum else "unassigned"
-    if kingdom == "Viridiplantae":
-        return "plants"
-    return "protists" if kingdom or phylum else "unassigned"
 
 
 def release_ranks(release: str) -> list[str]:
@@ -266,8 +214,10 @@ def load_wells(assign_dir: str) -> dict[str, Well]:
 
 
 def taxon_rows(w: Well, host_clade: str, primer_fit: dict,
-               ranks: list[str] = RANKS) -> list[dict]:
-    """One row per (rank, taxon, label) in a well, clusters pooled."""
+               ranks: list[str] = RANKS, group=protocols.organism_group
+               ) -> list[dict]:
+    """One row per (rank, taxon, label) in a well, clusters pooled;
+    `group` is the protocol's organism grouping (Protocol.organism_group)."""
     agg: dict = {}
     for c in w.clusters:
         if c.get("origin") == "chimera":
@@ -297,7 +247,7 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict,
         out.append({"rank": rank, "taxon": taxon, "label": label,
                     "reads": a["reads"], "clusters": a["clusters"],
                     "identity": a["identity"], "lineage": a["lineage"],
-                    "group": "chimera" if label == "chimera" else organism_group(
+                    "group": "chimera" if label == "chimera" else group(
                         [x for x in a["lineage"].split(";")] if a["lineage"]
                         else [], host_clade, ranks),
                     "primer_fit": ",".join(fits),
@@ -309,7 +259,8 @@ def taxon_rows(w: Well, host_clade: str, primer_fit: dict,
 # What a span-scored call (nemabiome ITS2) says of how close it came, from
 # its largest cluster: the tied species and their identity, the nearest
 # other species and how many edits further, and the best record's grade.
-SPAN_FIELDS = ("nearest", "next", "grade")
+# db_calls.tsv's optional columns (contract B).
+SPAN_FIELDS = tuple(DB_CALL_OPTIONAL)
 
 
 def weakest_margin(margins: list[str]) -> str:
@@ -669,19 +620,33 @@ def main(argv=None) -> int:
     ap.add_argument("--preflight-dir", required=True)
     ap.add_argument("--database", required=True,
                     help="the release directory (for primer_fit.tsv)")
+    ap.add_argument("--accounting",
+                    help="the platform adapter's demux_accounting.json "
+                    "(contract A, docs/CONTRACTS.md); in place of "
+                    "--demux-summary and --split-summary")
     ap.add_argument("--demux-summary")
     ap.add_argument("--split-summary")
+    ap.add_argument("--protocol", default="auto",
+                    help="the database protocol (bin/protocols/), resolved "
+                    "as assignment resolves it; its hooks give the organism "
+                    "groups and the defaults of --host-clade and "
+                    "--min-rel-abundance")
+    ap.add_argument("--calling-rule", default="auto",
+                    help="as given to assignment, so the protocol resolves "
+                    "the same way")
     ap.add_argument("--run-id", default="")
     ap.add_argument("--min-depth", type=int, default=100,
                     help="clustered reads a well needs before anything in "
                     "it is called")
     ap.add_argument("--absolute-floor", type=int, default=2,
                     help="reads a call needs whatever the blanks show")
-    ap.add_argument("--min-rel-abundance", type=float, default=0.001,
-                    help="share of a well's clustered reads a call needs")
-    ap.add_argument("--host-clade", default="Craniata",
+    ap.add_argument("--min-rel-abundance", type=float, default=None,
+                    help="share of a well's clustered reads a call needs "
+                    "(default: the protocol's, 0.001 for both)")
+    ap.add_argument("--host-clade", default=None,
                     help="a name anywhere in the lineage that marks host "
-                    "reads (PR2: Craniata = vertebrates)")
+                    "reads (default: the protocol's; PR2: Craniata = "
+                    "vertebrates)")
     ap.add_argument("--index-matrix",
                     help="the demultiplexer's index_matrix.tsv: reads on "
                     "unused index combinations, a direct measure of "
@@ -709,6 +674,22 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument("--outdir", default="synthesis")
     args = ap.parse_args(argv)
+    man = load_release_manifest(args.database)
+    try:
+        proto = protocols.resolve(man, args.protocol, args.calling_rule)
+    except ValueError as exc:
+        raise SystemExit(f"--protocol: {exc}") from None
+    if args.host_clade is None:
+        args.host_clade = proto.host_clade
+    if args.min_rel_abundance is None:
+        args.min_rel_abundance = proto.min_rel_abundance
+    # Contract A: the platform's accounting carries its own summaries
+    # verbatim (native) and the plate positions, so a run read through it
+    # is synthesised exactly as one read from the summaries themselves.
+    acc: dict = {}
+    if args.accounting and os.path.exists(args.accounting):
+        with open(args.accounting, encoding="utf-8") as fh:
+            acc = json.load(fh)
 
     wells = load_wells(args.assign_dir)
     restore_declared_ids(wells, args.preflight_dir, args.run_id)
@@ -732,6 +713,9 @@ def main(argv=None) -> int:
             col = 0
         if r.get("plate_row") and col:
             geom[r["sample_id"]] = (r["plate_row"], col)
+    if acc:
+        geom = {sid: (p["row"], int(p["col"]))
+                for sid, p in (acc.get("plate") or {}).items()}
 
     # Every declared sample must arrive, or the blanks this synthesis
     # leans on might be the ones that went missing. A well the
@@ -739,7 +723,10 @@ def main(argv=None) -> int:
     # reported as empty rather than lost.
     per_sample: dict = {}
     demux: dict = {}
-    if args.demux_summary and os.path.exists(args.demux_summary):
+    if acc:
+        demux = (acc.get("native") or {}).get("demux") or {}
+        per_sample = demux.get("per_sample") or {}
+    elif args.demux_summary and os.path.exists(args.demux_summary):
         with open(args.demux_summary, encoding="utf-8") as fh:
             demux = json.load(fh)
         per_sample = demux.get("per_sample") or {}
@@ -756,7 +743,6 @@ def main(argv=None) -> int:
         w = wells[sid] = Well(sid)
         w.sample_type = types.get(sid, "")
 
-    man = load_release_manifest(args.database)
     version = release_version(man)
     pf_path = os.path.join(args.database, "primer_fit.tsv")
     primer_fit = ({r["id"]: r.get("fit", "") for r in read_table(pf_path)}
@@ -766,7 +752,8 @@ def main(argv=None) -> int:
         pf_summary = json.load(fh)
 
     tax_ranks = release_ranks(args.database)
-    rows = {sid: taxon_rows(w, args.host_clade, primer_fit, tax_ranks)
+    rows = {sid: taxon_rows(w, args.host_clade, primer_fit, tax_ranks,
+                            proto.organism_group)
             for sid, w in wells.items()}
     # What the rank reached actually is, where PR2's column is not that
     # rank (rank_names.tsv, v0.8.0 on): "order" for a nematode's family
@@ -847,12 +834,7 @@ def main(argv=None) -> int:
         if mis.get("applicable") else None)
 
     os.makedirs(args.outdir, exist_ok=True)
-    call_cols = ["run_id", "sample_id", "sample_type", "rank", "taxon",
-                 "label", "reads", "rel_abundance", "call", "limit_reads",
-                 "limit_basis", "misassign_expected", "misassign_excess",
-                 "identity", "clusters", "lineage",
-                 "group", "group_reads", "group_share", "primer_fit",
-                 "margin", "rank_meaning", "database_version"]
+    call_cols = list(DB_CALL_COLUMNS)
     calls = []
     for sid in sorted(wells):
         w = wells[sid]
@@ -1083,8 +1065,8 @@ def main(argv=None) -> int:
              and c["reads"] >= args.absolute_floor),
             key=lambda b: -b["reads"])[:30]
 
-    split = {}
-    if args.split_summary and os.path.exists(args.split_summary):
+    split = (acc.get("native") or {}).get("split") or {} if acc else {}
+    if not acc and args.split_summary and os.path.exists(args.split_summary):
         with open(args.split_summary, encoding="utf-8") as fh:
             split = json.load(fh)
     blanks = [w for w in wells.values() if w.sample_type in NEGATIVE_TYPES]

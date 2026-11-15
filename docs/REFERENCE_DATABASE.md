@@ -108,6 +108,11 @@ A release is one directory, named for its build version, holding:
 
 The pipeline records `manifest.json`'s build version in every result.
 
+A manifest may also name the protocol its release is run with
+(`"protocol": "vespa_v4"` or `"nemits2"`; [CONTRACTS.md](CONTRACTS.md)).
+Releases without the field are recognised as before: one scored over its
+records' span (`score_over`) is `nemits2`, any other `vespa_v4`.
+
 ### 4.2 Gaps must be visible, not hidden
 
 Some of what the primers amplify will not be in any database. So:
@@ -974,3 +979,31 @@ DADA2 ASV exactly; on those, amphid's species is that of assignTaxonomy
 and IdTaxa (against this database with the 28S stretch cut, and against
 nemabiome's) wherever they name a species, on all four sets: 0 reads
 disagree.
+
+## 13. Layers and contracts (2026-11-14)
+
+Database mode was restructured into three layers with fixed contracts
+between them, so that one pipeline can run each database's protocol in
+full from the same inputs and write the same outputs:
+
+- **platform** - Illumina (pre-split), nanopore (split and demultiplexed
+  here) and predemultiplexed (any platform's per-sample FASTQs) - hands
+  on contract A: per-sample reads, their read type, one demux accounting
+  per run in fates every platform shares, and plate positions;
+- **protocol** - `bin/protocols/vespa_v4.py` (sections 5 and 11) and
+  `bin/protocols/nemits2.py` (section 12), chosen by the release - runs
+  everything from primer trimming to a call and writes contract B
+  (clusters.tsv, taxa.tsv, assign_db.json);
+- **shared** - synthesis and the report, with what they need of a
+  protocol (organism groups, host clade, relative-abundance floor) as
+  hooks with defaults.
+
+The code that was branches in assign_db.py, assign_db_pairs.py and
+synthesise_db.py (span scoring, the gap rule, ITS2 windows and the primer
+offset, merging overlapping mates, the divergent remap of V4 pairs) now
+lives in the protocol modules. Nothing it calls changed: on every fixture
+- VESPA nanopore (DB01), VESPA Illumina 2x150 and 2x300, the nemits2
+fixture and the panel fixtures - the outputs are byte for byte those of
+the code before. The contracts are written down, and checked by
+tests/test_contracts.py, in [CONTRACTS.md](CONTRACTS.md).
+

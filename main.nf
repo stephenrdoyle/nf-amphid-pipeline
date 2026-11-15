@@ -20,6 +20,7 @@ include { ASSIGN         } from './modules/local/assign'
 include { DB_INDEX       } from './modules/local/db_index'
 include { ASSIGN_DB      } from './modules/local/assign_db'
 include { ASSIGN_DB_PAIRS} from './modules/local/assign_db_pairs'
+include { DEMUX_ACCOUNTING } from './modules/local/demux_accounting'
 include { SYNTHESISE_DB  } from './modules/local/synthesise_db'
 include { REPORT_DB      } from './modules/local/report_db'
 include { SYNTHESISE     } from './modules/local/synthesise'
@@ -42,9 +43,9 @@ def helpMessage() {
                          sequence)
         or
       --reference_database
-                         A vespa-18s-refdb release directory: classify
-                         against a taxonomic database instead of a panel
-                         (nanopore or Illumina; needs minimap2)
+                         A vespa-18s-refdb or nemabiome-its2-refdb release
+                         directory: classify against a taxonomic database
+                         instead of a panel (needs minimap2)
       --samplesheet      Samplesheet CSV (run_id, platform, sample_id,
                          index_i7, index_i5, sample_type [, file_prefix])
       --primers          PCR1 primers TSV (name, direction, sequence)
@@ -52,6 +53,8 @@ def helpMessage() {
     One of:
       --runs             Run manifest TSV (run_id, platform, path, ...)
       --input_dir        Single-run shortcut; requires --platform
+                         (illumina, nanopore, or predemultiplexed in
+                         database mode)
 
     Options:
       --assay            Assay definition JSON
@@ -63,6 +66,8 @@ def helpMessage() {
                          wells missing them (default: unspiked)
       --tag_max_edits    Override the assay's tag matching tolerance
       --expected_tag     Override the assay's control tag sequence
+      --db_protocol      Database mode: the protocol to run (vespa_v4,
+                         nemits2; default: the release's)
       --outdir           Results directory (default: ./results)
     """.stripIndent()
 }
@@ -97,10 +102,13 @@ workflow {
         problems << "one of --runs or --input_dir is required"
     }
     if (params.input_dir && !params.platform) {
-        problems << "--input_dir requires --platform (illumina or nanopore)"
+        problems << "--input_dir requires --platform (illumina, nanopore or predemultiplexed)"
     }
-    if (params.platform && !(params.platform in ['illumina', 'nanopore'])) {
-        problems << "--platform must be illumina or nanopore"
+    if (params.platform && !(params.platform in ['illumina', 'nanopore', 'predemultiplexed'])) {
+        problems << "--platform must be illumina, nanopore or predemultiplexed"
+    }
+    if (params.platform == 'predemultiplexed' && !params.reference_database) {
+        problems << "--platform predemultiplexed is database mode only (--reference_database)"
     }
     // A flag. Compared as text, never by truthiness: from Nextflow 26.04
     // every command-line parameter arrives as a string, so a bare
@@ -259,6 +267,25 @@ workflow {
               file(row.path, checkIfExists: true) ]
         }
 
+    // -- the platform adapters (database mode: docs/CONTRACTS.md) -------
+    // Each hands the protocol layer contract A: per-sample reads and
+    // their read type (preflight/read_types.tsv), the run's demux
+    // accounting (DEMUX_ACCOUNTING below) and plate positions.
+    //   illumina          pre-split by the sequencer -> ASSIGN_DB_PAIRS
+    //   nanopore          split and demultiplexed here -> ASSIGN_DB
+    //   predemultiplexed  per-sample FASTQs from upstream -> ASSIGN_DB,
+    //                     resolved by pre-flight like Illumina's
+    // A predemultiplexed sample carries its run's read type to ASSIGN_DB;
+    // pre-flight refuses the route in panel mode, so there it is empty.
+    ch_read_types = PREFLIGHT.out.read_types
+        .splitCsv(header: true, sep: '\t')
+        .map { row -> [ row.run_id, row.read_type ] }
+    ch_predemux_db = ch_resolved
+        .filter { meta, files -> meta.platform == 'predemultiplexed' }
+        .map { meta, files -> [ meta.run_id, meta, files ] }
+        .combine(ch_read_types, by: 0)
+        .map { rid, meta, files, rt -> [ meta + [ read_type: rt ], files ] }
+
     // -- the two read paths ----------------------------------------------
     // In database mode Illumina pairs are not merged and prepped for a
     // panel: they go straight to ASSIGN_DB_PAIRS below, so the panel
@@ -287,7 +314,7 @@ workflow {
     ch_seqs = ILLUMINA_PATH.out.seqs
         .mix(NANOPORE_PATH.out.seqs)
     PREFLIGHT.out.summary
-        .combine(ch_seqs.mix(ch_illumina_db).count())
+        .combine(ch_seqs.mix(ch_illumina_db, ch_predemux_db).count())
         .subscribe { _summary, n ->
             if (n == 0 && !workflow.session.isAborted()) {
                 error(
@@ -312,7 +339,7 @@ workflow {
         // note above).
         DB_INDEX(ch_database)
         ASSIGN_DB(
-            ch_seqs,
+            ch_seqs.mix(ch_predemux_db),
             ch_database,
             DB_INDEX.out.index,
             ch_primers,
@@ -329,14 +356,21 @@ workflow {
         // abundance at the rank each call reached, judged against the
         // blanks, with off-target fractions per well.
         ch_run_id_db = ch_resolved.map { meta, files -> meta.run_id }.first()
+        // Contract A's accounting, one per run whatever the platform.
+        // Nanopore's own summaries are folded in; absent on any other
+        // run, each has its own placeholder (see the NO_ placeholders
+        // above).
+        DEMUX_ACCOUNTING(
+            ch_run_id_db,
+            NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
+            NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT_DB")),
+            PREFLIGHT.out.dir,
+        )
         SYNTHESISE_DB(
             ch_run_id_db,
             ASSIGN_DB.out.clusters.mix(ASSIGN_DB_PAIRS.out.clusters).collect(),
             ASSIGN_DB.out.summary.mix(ASSIGN_DB_PAIRS.out.summary).collect(),
-            // Absent on an Illumina run; each has its own placeholder
-            // (see the NO_ placeholders above).
-            NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
-            NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT_DB")),
+            DEMUX_ACCOUNTING.out.json,
             NANOPORE_PATH.out.matrix.ifEmpty(file("${projectDir}/assets/NO_MATRIX_DB")),
             PREFLIGHT.out.dir,
             ch_database,

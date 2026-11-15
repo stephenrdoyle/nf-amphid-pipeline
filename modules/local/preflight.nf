@@ -44,6 +44,9 @@ process PREFLIGHT {
     path "preflight/tag_report.txt"           , emit: tag_report_txt
     path "preflight/runs_resolved.tsv" , emit: runs_resolved
     path "preflight/file_resolution.tsv"      , emit: file_resolution
+    // Each run's read type (contract A, docs/CONTRACTS.md). Database mode
+    // only, so optional for the same reason as the panel outputs above.
+    path "preflight/read_types.tsv"           , emit: read_types, optional: params.reference_database == null
     // The grouping join, resolved to one row per library. Written even
     // with no --metadata, because subject_id is a grouping field the
     // samplesheet already declares. Optional only because a
@@ -85,8 +88,11 @@ process PREFLIGHT {
     def prim      = !primers.name.startsWith('NO_') ? "--primers ${primers}" : ''
     def ref_arg   = !reference.name.startsWith('NO_')
         ? "--reference ${reference}" : ''
+    // The protocol is resolved in pre-flight as assignment will resolve
+    // it, so a protocol that cannot run this release fails here.
     def db_arg    = !database.name.startsWith('NO_')
-        ? "--reference-database ${database}" : ''
+        ? "--reference-database ${database} --db-protocol ${params.db_protocol} " +
+          "--db-calling-rule ${params.db_calling_rule}" : ''
     def mock_arg  = !mocks.name.startsWith('NO_') ? "--mocks ${mocks}" : ''
     def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null
@@ -156,8 +162,11 @@ process PREFLIGHT {
     def prim      = !primers.name.startsWith('NO_') ? "--primers ${primers}" : ''
     def ref_arg   = !reference.name.startsWith('NO_')
         ? "--reference ${reference}" : ''
+    // The protocol is resolved in pre-flight as assignment will resolve
+    // it, so a protocol that cannot run this release fails here.
     def db_arg    = !database.name.startsWith('NO_')
-        ? "--reference-database ${database}" : ''
+        ? "--reference-database ${database} --db-protocol ${params.db_protocol} " +
+          "--db-calling-rule ${params.db_calling_rule}" : ''
     def mock_arg  = !mocks.name.startsWith('NO_') ? "--mocks ${mocks}" : ''
     def meta_arg  = !metadata.name.startsWith('NO_') ? "--metadata ${metadata}" : ''
     def read_len  = params.illumina_read_length != null

@@ -29,12 +29,13 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    LOOKALIKE_COLUMNS, LOOKALIKE_MAX_EDITS, RANKS, REFDB_EXPECTED,
-    REFDB_REQUIRED, delimiter_for, find_anchor_cost, find_anchor_lookalikes,
-    illumina_tail, illumina_windows, load_release_manifest, ranks_in,
+    FASTQ_SUFFIXES, LOOKALIKE_COLUMNS, LOOKALIKE_MAX_EDITS, RANKS,
+    REFDB_EXPECTED, REFDB_REQUIRED, delimiter_for, find_anchor_cost, find_anchor_lookalikes,
+    illumina_windows, load_release_manifest, ranks_in,
     release_version, sanitise_id,
 )
 from ampseqlib import load_assay as library_config  # noqa: E402
+import protocols  # noqa: E402
 from itertools import product
 from math import comb
 
@@ -65,7 +66,20 @@ SEQ_TYPES = {"target", "control", "quant", "vector"}
 # wrong.
 PURPOSES = {"speciation", "variants"}
 SAMPLE_TYPES = {"unknown", "neg_extraction", "neg_ntc", "mock", "pos_control"}
-PLATFORMS = {"illumina", "nanopore"}
+# Where a run's per-sample reads come from (docs/CONTRACTS.md, layer 1).
+# predemultiplexed: any platform whose per-sample FASTQs already exist
+# (lima, Dorado, a sequencing centre), resolved like Illumina but one
+# read per molecule; database mode only. pacbio, with a demultiplexer of
+# its own, is the next adapter.
+PLATFORMS = {"illumina", "nanopore", "predemultiplexed"}
+# The read type each platform delivers (contract A). A predemultiplexed
+# run says which in runs.tsv's read_type column; single_long_noisy when
+# it does not.
+PLATFORM_READ_TYPES = {
+    "illumina": ("paired_short",),
+    "nanopore": ("single_long_noisy",),
+    "predemultiplexed": ("single_long_noisy", "single_long_accurate"),
+}
 
 IUPAC = set("ACGTRYSWKMBDHVN")
 
@@ -2052,13 +2066,20 @@ def check_reference_database(release: str, primers: dict,
     return info
 
 
-def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
-    """What database mode cannot do yet, or cannot do at all.
+def check_database_run(args, runs: dict, diag: Diagnostics) -> str:
+    """What database mode cannot do yet, or cannot do at all; returns the
+    release's protocol ('' when it has none).
 
     The VESPA protocol it exists for has no control plasmids and no
     quantification standards (docs/REFERENCE_DATABASE.md, section 6), so
     the parts of a panel run built on them are refused by name rather
-    than left to fail later on an empty table."""
+    than left to fail later on an empty table.
+
+    The protocol (bin/protocols/) is resolved here as assignment will
+    resolve it - --db-protocol, else the manifest's "protocol", else
+    inferred - and must exist, take every read type the runs deliver,
+    call by the calling rule asked for, and find the release files it
+    reads."""
     if args.spiked:
         diag.error(
             "--spiked with --reference_database: database mode has no "
@@ -2069,16 +2090,34 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
             "--mocks with --reference_database: mock compositions are "
             "declared in panel targets, and database mode has no panel. "
             "Not supported yet")
-    ill = sorted(r.run_id for r in runs.values() if r.platform == "illumina")
-    if not ill:
-        return
-    # Illumina pairs are cut to a fixed window of insert from each mate
-    # (assign_db_pairs.py); a read too short to hold primer plus window
-    # would be dropped whole, every one of them.
     try:
         man = load_release_manifest(args.reference_database)
     except ValueError:
-        return          # reported by check_reference_database
+        return ""       # reported by check_reference_database
+    try:
+        proto = protocols.resolve(man, args.db_protocol, args.db_calling_rule)
+    except ValueError as exc:
+        diag.error(f"--db_protocol: {exc}")
+        return ""
+    how = ("as --db_protocol asked" if args.db_protocol not in (None, "auto")
+           else "as the release's manifest declares" if man.get("protocol")
+           else "inferred from the release's manifest")
+    diag.info(f"database protocol {proto.name} ({proto.title}), {how}")
+    rule = protocols.calling_rule(man, args.db_calling_rule)
+    if rule not in proto.calling_rules:
+        diag.error(
+            f"--db_calling_rule {rule}: protocol {proto.name} calls by "
+            f"{' or '.join(proto.calling_rules)}")
+    for level, msg in proto.release_problems(
+            args.reference_database, man,
+            sorted({r.read_type for r in runs.values() if r.read_type})):
+        (diag.error if level == "error" else diag.warn)(msg)
+    ill = sorted(r.run_id for r in runs.values() if r.platform == "illumina")
+    if not ill:
+        return proto.name
+    # Illumina pairs are cut to a fixed window of insert from each mate
+    # (assign_db_pairs.py); a read too short to hold primer plus window
+    # would be dropped whole, every one of them.
     win = man.get("illumina_windows")
     geoms = [g for g in man.get("illumina_geometries") or []
              if isinstance(g, dict) and len(g.get("windows") or []) == 2]
@@ -2088,7 +2127,7 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
             "the release's manifest.json has neither illumina_windows nor "
             "illumina_geometries, so the insert windows read from each mate "
             "are not defined")
-        return
+        return proto.name
     prim = man.get("primers") or {}
     lf = len((prim.get("forward") or {}).get("sequence", ""))
     lr = len((prim.get("reverse") or {}).get("sequence", ""))
@@ -2096,8 +2135,8 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
     # The windows assign_db_pairs.py will take at this read length.
     w1, w2, table = illumina_windows(man, L)
     # Windows of a release scored over its records' span count record
-    # bases; R2 reads its 28S stretch first (illumina_tail).
-    w2 += illumina_tail(man, L)
+    # bases; R2 reads its 28S stretch first (the protocol's tail).
+    w2 += proto.tail(man, L)
     for mate, w, lp in (("R1", w1, lf), ("R2", w2, lr)):
         if L and w + lp > L:
             diag.warn(
@@ -2114,6 +2153,7 @@ def check_database_run(args, runs: dict, diag: Diagnostics) -> None:
             f"{w1}/{w2} windows ({L}bp reads), so the report cannot say how "
             "far the pairs resolve each record. Calls are still made; their "
             "resolution column is left blank")
+    return proto.name
 
 
 def check_database_samples(samples: list, diag: Diagnostics) -> None:
@@ -2537,6 +2577,7 @@ class Run:
     barcode_repeats: int = 2
     dna_input_ng: str = ""
     lots: dict[str, str] = field(default_factory=dict)
+    read_type: str = ""
 
 
 def resolve_against(manifest: str, value: str, base: str = "") -> str:
@@ -2602,9 +2643,35 @@ def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
             if reps_i < 1:
                 diag.error(f"run manifest '{rid}': barcode_repeats must be >= 1")
 
+        # What the platform delivers (contract A). Illumina and nanopore
+        # have one each; a predemultiplexed run may be either long type.
+        read_type = (row.get("read_type") or "").strip().lower()
+        allowed = PLATFORM_READ_TYPES.get(platform, ())
+        if read_type and read_type not in protocols.READ_TYPES:
+            diag.error(
+                f"run manifest '{rid}': read_type '{read_type}' not in "
+                f"{sorted(protocols.READ_TYPES)}")
+        elif read_type and allowed and read_type not in allowed:
+            diag.error(
+                f"run manifest '{rid}': a {platform} run delivers "
+                f"{' or '.join(allowed)} reads, not {read_type}"
+                + (". Pairs already split per sample are an Illumina run"
+                   if read_type == "paired_short" else ""))
+        elif not read_type and platform == "predemultiplexed":
+            diag.warn(
+                f"run manifest '{rid}': predemultiplexed with no read_type; "
+                "taken as single_long_noisy (nanopore reads). Set read_type "
+                "to say otherwise")
+        read_type = read_type or (allowed[0] if allowed else "")
+
         row["path"] = resolve_against(path, row["path"], PATH_BASE)
         if not os.path.exists(row["path"]):
             diag.error(f"run manifest '{rid}': path does not exist: {row['path']}")
+        elif platform == "predemultiplexed" and not os.path.isdir(row["path"]):
+            diag.error(
+                f"run manifest '{rid}': path is a file, not a directory: "
+                f"{row['path']}. A predemultiplexed run's path is the "
+                "directory holding its per-sample FASTQ files")
         elif platform == "illumina" and not os.path.isdir(row["path"]):
             # An Illumina run is a directory of per-sample FASTQs; file
             # resolution globs inside it. Pointed at a file - one FASTQ,
@@ -2646,6 +2713,7 @@ def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
             barcode_repeats=reps_i,
             dna_input_ng=dna,
             lots=lots,
+            read_type=read_type,
         )
     return runs
 
@@ -2887,6 +2955,14 @@ def parse_samplesheet(
                         "nanopore - the index pair is the demultiplexing key, "
                         "not metadata"
                     )
+                elif s.platform == "predemultiplexed":
+                    diag.warn(
+                        f"samplesheet '{s.sample_id}': {label} is not recorded. "
+                        "The reads arrive demultiplexed, so the run will "
+                        "proceed, but without the index pair the well has no "
+                        "plate position and the misassignment model cannot "
+                        "place it"
+                    )
                 else:
                     diag.warn(
                         f"samplesheet '{s.sample_id}': {label} is not recorded. "
@@ -3119,6 +3195,76 @@ def resolve_illumina_files(
             )
 
 
+def resolve_predemultiplexed_files(
+    samples: list[Sample], runs: dict[str, Run], diag: Diagnostics
+) -> None:
+    """Resolve each sample of a predemultiplexed run to its FASTQ files.
+
+    As for Illumina, every file is named before any compute starts, and
+    no match fails. One read per molecule, so there is no R1/R2. A
+    sample's files, by its prefix (file_prefix, else sample_id):
+
+      <prefix>.fastq.gz (or .fq.gz, .fastq, .fq)        one file;
+      <prefix>.<anything>, <prefix>_<anything>,         chunks of one
+        <prefix>-<anything>, ending in a FASTQ suffix   sample;
+      <prefix>/ holding FASTQ files                     a folder per
+                                                        sample (Dorado,
+                                                        MinKNOW barcodeNN).
+
+    lima names its output <movie>.<bc>--<bc>, so a lima run sets
+    file_prefix to that. A file a LONGER declared prefix also owns
+    belongs to that prefix, as for Illumina (S1 never takes S10's)."""
+    prefixes: dict[str, set[str]] = defaultdict(set)
+    for s in samples:
+        prefixes[s.run_id].add(s.file_prefix or s.sample_id)
+
+    def is_fastq(name: str) -> bool:
+        return name.lower().endswith(FASTQ_SUFFIXES)
+
+    def owns(base: str, prefix: str) -> bool:
+        return base.startswith(prefix) and is_fastq(base) and (
+            base[len(prefix):].lower() in FASTQ_SUFFIXES
+            or base[len(prefix):len(prefix) + 1] in (".", "_", "-"))
+
+    for s in samples:
+        run = runs.get(s.run_id)
+        if not run or run.platform != "predemultiplexed":
+            continue
+        if not os.path.isdir(run.path):
+            continue  # reported by parse_runs: missing, or a file
+        prefix = s.file_prefix or s.sample_id
+        folder = os.path.join(run.path, prefix)
+        if os.path.isdir(folder):
+            hits = sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                          if is_fastq(f))
+        else:
+            hits = sorted(
+                os.path.join(run.path, f) for f in os.listdir(run.path)
+                if owns(f, prefix) and not any(
+                    len(o) > len(prefix) and owns(f, o)
+                    for o in prefixes[s.run_id]))
+        if not hits:
+            diag.error(
+                f"samplesheet '{s.sample_id}': no FASTQ matched under "
+                f"{run.path} (looked for {prefix}.fastq.gz, "
+                f"{prefix}_*.fastq.gz and the like, or a folder {prefix}/). "
+                "If the demultiplexer named it differently, set file_prefix")
+        else:
+            s.files.extend(hits)
+
+
+def write_read_types(runs: dict, outdir: str) -> None:
+    """Each run's read type (contract A, docs/CONTRACTS.md), for the
+    workflow to route its samples and the protocol to check. Database
+    mode only: the panel routes by platform."""
+    with open(os.path.join(outdir, "read_types.tsv"), "w", encoding="utf-8",
+              newline="") as fh:
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(["run_id", "platform", "read_type"])
+        for rid in sorted(runs):
+            w.writerow([rid, runs[rid].platform, runs[rid].read_type])
+
+
 def run_index_lengths(samples: list, diag: "Diagnostics") -> dict[str, int]:
     """The one index length each run uses, for the concatemer splitter.
 
@@ -3323,6 +3469,14 @@ def main(argv: list[str] | None = None) -> int:
              "travels to the sequencing centre, metadata keeps changing "
              "and should not. The join is validated here, not assumed",
     )
+    ap.add_argument(
+        "--db-protocol", default="auto",
+        help="database mode: the protocol to run (bin/protocols/); auto "
+             "takes the release's manifest 'protocol', else infers it")
+    ap.add_argument(
+        "--db-calling-rule", default="auto",
+        help="database mode: the calling rule assignment will be given, so "
+             "the protocol resolves as it will there")
     ap.add_argument("--outdir", default="preflight")
     args = ap.parse_args(argv)
     global PATH_BASE
@@ -3413,6 +3567,14 @@ def main(argv: list[str] | None = None) -> int:
             "result named after the first. Split the manifest and run each "
             "separately; compare them afterwards with --comparison"
         )
+    # Reads that arrive demultiplexed have no panel route yet: the panel's
+    # Illumina branch merges pairs and its nanopore branch demultiplexes.
+    if not database:
+        for r in runs.values():
+            if r.platform == "predemultiplexed":
+                diag.error(
+                    f"run manifest '{r.run_id}': predemultiplexed runs are "
+                    "database mode only (--reference_database) for now")
 
     # -- reference panel --------------------------------------------------
     # In database mode there is no panel, and everything below that is
@@ -3441,7 +3603,8 @@ def main(argv: list[str] | None = None) -> int:
         db_info = check_reference_database(database, primers, args.assay,
                                            args.outdir, diag)
         db_info["minimap2"] = minimap2_version(diag)
-        check_database_run(args, runs, diag)
+        db_info["protocol"] = check_database_run(args, runs, diag)
+        write_read_types(runs, args.outdir)
     else:
         check_anchor_lookalikes(entries, args.assay, args.outdir, diag)
     extent = check_reference_extent(entries, primers, diag) \
@@ -3499,6 +3662,7 @@ def main(argv: list[str] | None = None) -> int:
                 samples, runs, diag, args.min_index_edit)
         plates = plate_report(samples, im, diag)
         resolve_illumina_files(samples, runs, diag)
+        resolve_predemultiplexed_files(samples, runs, diag)
         write_file_resolution(samples, args.outdir)
     write_runs_resolved(runs, args.outdir,
                         run_index_lengths(samples, diag) if samples else {})

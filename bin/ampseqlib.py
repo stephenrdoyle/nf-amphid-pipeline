@@ -21,7 +21,10 @@ import math
 import os
 import random
 import re
-from collections import defaultdict
+import shutil
+import subprocess
+import tempfile
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from itertools import compress
 from operator import sub
@@ -2382,54 +2385,6 @@ def sentinel_rates(matrix: list[dict], fitted: dict | None = None,
                                   in known else "fitted together")}
     return out
 
-def scores_over_reference(manifest: dict) -> bool:
-    """Whether a release's records are scored over their own span, the
-    query's overhang free (manifest `score_over`; nemabiome ITS2).
-
-    ITS2 records stop where the ~47-base 28S stretch before NC2 starts,
-    and many are partial, so a read runs past its record. vespa's V4
-    records are whole primer-to-primer inserts with no `score_over`, and
-    there an unaligned end of the query is a real difference."""
-    return "reference" in str(manifest.get("score_over", "")).lower()
-
-
-def calling_rule(manifest: dict, override: str | None = None) -> str:
-    """'floors' (an identity floor per rank, as for V4) or 'gap' (ITS2:
-    species only when the next species is several edits further off).
-    An explicit choice wins; then the manifest's `calling_rule`; then a
-    release scored over its records' span takes the gap rule, the rule it
-    was validated with; everything else keeps the floors."""
-    if override and override != "auto":
-        return override
-    given = str(manifest.get("calling_rule", "")).lower()
-    if given in ("floors", "gap"):
-        return given
-    return "gap" if scores_over_reference(manifest) else "floors"
-
-
-def illumina_tail(manifest: dict, read_length: int | None = None) -> int:
-    """Bases a primer-trimmed R2 reads before its record's span starts.
-
-    0 for a release scored over whole inserts. For one scored over its
-    records' span (ITS2), R2 opens with the 28S stretch the records stop
-    short of, and the release's windows count record bases only (130 +
-    83 at 2x150): a geometry's read length, less its reverse primer and
-    its R2 window, is that stretch (150 - 20 - 83 = 47)."""
-    if not scores_over_reference(manifest):
-        return 0
-    rev = len(((manifest.get("primers") or {}).get("reverse") or {})
-              .get("sequence", ""))
-    geoms = [g for g in manifest.get("illumina_geometries") or []
-             if isinstance(g, dict) and len(g.get("windows") or []) == 2
-             and g.get("read_length")]
-    if not geoms or not rev:
-        return 0
-    fits = [g for g in geoms
-            if read_length and int(g["read_length"]) <= read_length]
-    g = max(fits, key=lambda g: int(g["read_length"])) if fits else \
-        min(geoms, key=lambda g: int(g["read_length"]))
-    return max(0, int(g["read_length"]) - rev - int(g["windows"][1]))
-
 
 # --------------------------------------------------------------------------
 # span distances (releases scored over their records' span)
@@ -2507,3 +2462,331 @@ def anchored_distance(ref: str, read: str, min_span: int = 1) -> tuple:
                               d * best[1] <= best[0] * i):
             best = (d, i)
     return best if best else (float("inf"), 0)
+
+
+# --------------------------------------------------------------------------
+# database mode: helpers every protocol may use
+# --------------------------------------------------------------------------
+#
+# Database mode has three layers (docs/CONTRACTS.md): a platform adapter
+# gets each sample's reads, a protocol (bin/protocols/) turns them into
+# calls, and synthesis and the report are shared. What follows is what
+# the protocols and the read-type routes share - minimap2, primer
+# trimming, the LCA and identity floors - so that no protocol needs to
+# import another.
+
+# minimap2's index parameters for the database. k=19, w=10 gave the same
+# accuracy as the map-ont default k=15 on the leave-out benchmark and ran
+# 1.6x faster; the index builds in 1-2 s, so it is built once per run.
+INDEX_ARGS = ["-x", "map-ont", "-k", "19", "-w", "10"]
+
+
+class Minimap2:
+    """Runs minimap2 and parses its PAF. One instance per sample, so the
+    executable and thread count are decided once."""
+
+    def __init__(self, exe: str = "minimap2", threads: int = 1):
+        path = shutil.which(exe) or (exe if os.path.isfile(exe) else None)
+        if not path:
+            raise SystemExit(
+                f"minimap2 not found ('{exe}'). Database mode needs it; see "
+                "docs/USAGE.md, field setup")
+        self.exe, self.threads = path, max(1, threads)
+        self.calls = 0
+
+    def version(self) -> str:
+        out = subprocess.run([self.exe, "--version"], capture_output=True,
+                             text=True)
+        return out.stdout.strip()
+
+    def map(self, target: str, query: str, extra=(), preset=("-x", "map-ont"),
+            cs: bool = False):
+        """Yield minimap2's hits one at a time, as it writes them.
+
+        Streamed rather than collected: a deep well has millions of reads,
+        and holding minimap2's whole output as text, then as a list of
+        dicts, cost several GB before a single hit was used (STOP23 on
+        vespa_run1 was killed at 16 GB). Callers keep only what they need.
+        stderr goes to a file so a chatty minimap2 cannot fill a pipe and
+        stall while stdout is being read."""
+        args = [self.exe, *preset, "-c", "-t", str(self.threads),
+                *(["--cs"] if cs else []), *extra, target, query]
+        self.calls += 1
+        with tempfile.TemporaryFile("w+") as err:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=err,
+                                    text=True, bufsize=1 << 20)
+            stopped = False
+            try:
+                for line in proc.stdout:
+                    f = line.rstrip("\n").split("\t")
+                    tags = {t[:2]: t[5:] for t in f[12:]}
+                    yield {
+                        "q": f[0], "qlen": int(f[1]), "qs": int(f[2]),
+                        "qe": int(f[3]), "strand": f[4], "t": f[5],
+                        "tlen": int(f[6]), "ts": int(f[7]), "te": int(f[8]),
+                        "match": int(f[9]), "alen": int(f[10]),
+                        "AS": int(tags.get("AS", 0)), "cs": tags.get("cs", ""),
+                        "tp": tags.get("tp", "P"),
+                    }
+            finally:
+                # A caller that stops early must not leave minimap2 running.
+                if proc.poll() is None:
+                    stopped = True
+                    proc.stdout.close()
+                    proc.kill()
+                proc.wait()
+            if proc.returncode != 0 and not stopped:
+                err.seek(0)
+                raise SystemExit(f"minimap2 failed ({' '.join(args)}):\n"
+                                 f"{err.read()[-2000:]}")
+
+
+def write_fasta(path: str, recs) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        for name, seq in recs:
+            fh.write(f">{name}\n{seq}\n")
+
+
+def ranks_of(tax) -> list[str]:
+    """The release's rank columns (ampseqlib.Taxonomy), PR2's by default."""
+    return getattr(tax, "ranks", RANKS)
+
+
+def hit_identity(hit: dict) -> float:
+    """Matching bases over the alignment block PLUS any of the query left
+    unaligned at either end.
+
+    minimap2's own ratio (column 10 over column 11) ignores the ends it
+    clipped, so a consensus aligned over only part of its length would
+    look as close as one aligned end to end. A consensus and a record are
+    both primer-to-primer inserts, so an unaligned end is a real
+    difference and is charged as one."""
+    clip = hit["qs"] + (hit["qlen"] - hit["qe"])
+    return hit["match"] / max(1, hit["alen"] + clip)
+
+
+def lca_depth(names, tax: dict) -> int:
+    """Index into RANKS of the deepest rank at which every record agrees;
+    -1 when they disagree even at domain. A blank rank (a PR2
+    placeholder) breaks agreement: no record can vouch for a name it
+    does not have."""
+    depth = -1
+    for d, r in enumerate(ranks_of(tax)):
+        vals = {tax.get(t, {}).get(r, "") for t in names}
+        if len(vals) == 1 and "" not in vals:
+            depth = d
+        else:
+            break
+    return depth
+
+
+def apply_floors(depth: int, ident: float, floors: dict,
+                 ranks: list[str] = RANKS) -> int:
+    """Cut a rank back until the identity clears its floor. Ranks
+    without a floor are kept as the LCA gives them."""
+    for r in ("species", "genus", "family", "order", "class"):
+        if r in floors and depth >= ranks.index(r) and ident < floors[r]:
+            depth = ranks.index(r) - 1
+    return depth
+
+
+def parse_floors(text: str, ranks: list[str] = RANKS) -> dict:
+    out = {}
+    for part in (text or "").split(","):
+        if not part.strip():
+            continue
+        k, _, v = part.partition("=")
+        k = k.strip()
+        if k not in ranks:
+            raise SystemExit(f"--floors: '{k}' is not a rank ({', '.join(ranks)})")
+        out[k] = float(v)
+    return out
+
+
+def trim_reads(path, primers) -> tuple[dict[str, str], Counter]:
+    """Oriented, primer-trimmed inserts by read id, and what was lost.
+
+    The release's records are primer-trimmed inserts, so reads must be
+    too: identity is measured over the insert, and a primer left on one
+    side and not the other would be charged as a difference."""
+    fate: Counter = Counter()
+    return dict(iter_trimmed(path, primers, fate)), fate
+
+
+def iter_trimmed(path, primers, fate: Counter):
+    """trim_reads() one read at a time, so main() can write them to disk
+    without holding a deep well's reads in memory; fate is filled in as
+    they pass. Only the ids are kept, to make duplicates unique. `path`
+    may be a list: a sample delivered as several FASTQs (a predemultiplexed
+    run) is read as one."""
+    out: set[str] = set()
+    paths = path if isinstance(path, (list, tuple)) else [path]
+    for rid, seq, _q in open_reads_many(paths):
+        fate["reads_in"] += 1
+        seq = seq.upper()
+        hit = None
+        for s in (seq, revcomp(seq)):
+            f = primers.match(s, "fwd")
+            r = primers.match(revcomp(s), "rev")
+            if f is not None and r is not None:
+                hit = s[f[1]:len(s) - r[1]]
+                break
+        if hit is None:
+            fate["no_primer"] += 1
+            continue
+        if len(hit) < 50:
+            fate["too_short"] += 1
+            continue
+        # Duplicate ids happen when a split read keeps its parent's name;
+        # minimap2 would merge them, so each gets its own.
+        key = rid if rid not in out else f"{rid}_{fate['reads_in']}"
+        out.add(key)
+        yield key, hit
+
+
+def orient_pair(r1, r2, ps):
+    """((r1 seq, qual), (r2 seq, qual)) with primers trimmed, R1 the
+    forward-primer mate; None when no primer pair is found."""
+    for a, b in ((r1, r2), (r2, r1)):
+        f = ps.match(a[1].upper(), "fwd")
+        if f is None:
+            continue
+        r = ps.match(b[1].upper(), "rev")
+        if r is None:
+            continue
+        return ((a[1][f[1]:].upper(), a[2][f[1]:]),
+                (b[1][r[1]:].upper(), b[2][r[1]:]), f[0], r[0])
+    return None
+
+
+def consensus_hits(mm, index: str, tmp: str, seqs: dict) -> dict:
+    """{"c<key>": [hits]} for sequences {key: sequence} against the
+    database, every secondary hit within 90% of the best kept: what a
+    consensus is classified from."""
+    kfa = os.path.join(tmp, "classify.fa")
+    write_fasta(kfa, ((f"c{k}", s) for k, s in seqs.items()))
+    hits: dict[str, list] = defaultdict(list)
+    for a in mm.map(index, kfa, preset=INDEX_ARGS,
+                    extra=("--secondary=yes", "-N", "1000",
+                           "-p", "0.9")):
+        hits[a["q"]].append(a)
+    return hits
+
+
+# Window mapping, with minimap2's short-read preset.
+SR = ("-x", "sr")
+
+
+def map_windows(mm, index, paths: dict, extra, preset) -> dict:
+    """{window: {query: {record: best hit}}} for each FASTA in paths."""
+    hits: dict[str, dict] = {name: defaultdict(dict) for name in paths}
+    for name, path in paths.items():
+        if os.path.getsize(path):
+            for h in mm.map(index, path, preset=preset, extra=extra):
+                prev = hits[name][h["q"]].get(h["t"])
+                if prev is None or h["AS"] > prev["AS"]:
+                    hits[name][h["q"]][h["t"]] = h
+    return hits
+
+
+def pair_hits(mm, index: str, tmp: str, centroids: list,
+              max_secondary: int) -> tuple[dict, dict, tuple]:
+    """(hits, paths, extra): each denoised pair's windows mapped to the
+    database (map_windows), R1 and R2 windows as "r1" and "r2", whole
+    inserts as "full", queries named p<k>; and the FASTAs and options
+    used, for a protocol that maps some of them again."""
+    f1, f2, ff = (os.path.join(tmp, n) for n in ("r1.fa", "r2.fa", "full.fa"))
+    write_fasta(f1, ((f"p{k}", x) for k, (x, y, _n) in enumerate(centroids) if y))
+    write_fasta(f2, ((f"p{k}", y) for k, (x, y, _n) in enumerate(centroids) if y))
+    write_fasta(ff, ((f"p{k}", x) for k, (x, y, _n) in enumerate(centroids) if not y))
+    # -p 0.5, not the nanopore route's 0.9: each window is kept with
+    # every record that scores within half of its best, so that a
+    # record second-best for BOTH windows - which is what a taxon
+    # missing from the database often looks like - is still there to
+    # be joined.
+    extra = ("--secondary=yes", "-N", str(max_secondary), "-p", "0.5")
+    paths = {"r1": f1, "r2": f2, "full": ff}
+    return map_windows(mm, index, paths, extra, SR), paths, extra
+
+
+# --------------------------------------------------------------------------
+# contract B: what a protocol hands to synthesis (docs/CONTRACTS.md)
+# --------------------------------------------------------------------------
+
+# <sample>.clusters.tsv: these columns, in this order, from every
+# protocol; then the protocol's own declared extra columns
+# (Protocol.extra_columns), if any.
+CLUSTER_COLUMNS = [
+    "sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
+    "label", "identity", "coverage", "lineage", "best_hit",
+    "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
+    "db_margin", "origin", "merged", "chimera_of", "length",
+    "database_version", "consensus"]
+# <sample>.taxa.tsv: exactly these.
+TAXA_COLUMNS = ["sample_id", "rank", "taxon", "label", "reads",
+                "rel_abundance", "clusters", "best_identity", "lineage",
+                "database_version"]
+# <sample>.assign_db.json: at least these keys; "reads" at least
+# ASSIGN_READ_FATES, which balance (docs/CONTRACTS.md).
+ASSIGN_SUMMARY_KEYS = ["sample_id", "mode", "database", "minimap2",
+                       "elapsed_s", "reads", "reads_note", "clusters",
+                       "haplotype_splits", "chimeras", "settings",
+                       "rank_reached"]
+ASSIGN_READ_FATES = ["reads_in", "no_primer", "too_short", "clustered",
+                     "unclustered"]
+# synthesis/db_calls.tsv, the shared layer's own output: these columns,
+# then any of DB_CALL_OPTIONAL that a protocol's clusters carry.
+DB_CALL_COLUMNS = [
+    "run_id", "sample_id", "sample_type", "rank", "taxon", "label", "reads",
+    "rel_abundance", "call", "limit_reads", "limit_basis",
+    "misassign_expected", "misassign_excess", "identity", "clusters",
+    "lineage", "group", "group_reads", "group_share", "primer_fit",
+    "margin", "rank_meaning", "database_version"]
+DB_CALL_OPTIONAL = ["nearest", "next", "grade"]
+
+
+def write_assignment(outdir: str, sid: str, rows: list[dict],
+                     extra_columns, version: str, summary: dict) -> None:
+    """Write one sample's contract-B files: clusters.tsv (rows, most
+    reads first, with the protocol's extra columns after the required
+    ones), consensus.fasta, taxa.tsv and assign_db.json."""
+    cols = CLUSTER_COLUMNS + list(extra_columns)
+    with open(os.path.join(outdir, f"{sid}.clusters.tsv"), "w",
+              encoding="utf-8") as fh:
+        w = writer(fh, cols)
+        w.writeheader()
+        w.writerows(rows)
+    with open(os.path.join(outdir, f"{sid}.consensus.fasta"), "w",
+              encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(f">{r['cluster']} reads={r['reads']} rank={r['rank'] or 'none'} "
+                     f"taxon={r['taxon'] or 'none'} identity={r['identity']}\n"
+                     f"{r['consensus']}\n")
+
+    # Per taxon at the rank each call reached. Two clusters of one
+    # species (haplotypes) are one row; a species call and a genus call
+    # in the same genus are NOT merged - they are different statements.
+    total = sum(r["reads"] for r in rows)
+    agg: dict = {}
+    for r in rows:
+        key = (r["rank"], r["taxon"], r["label"])
+        a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
+                                 "lineage": r["lineage"]})
+        a["reads"] += r["reads"]
+        a["clusters"] += 1
+        a["identity"] = max(a["identity"], float(r["identity"]))
+    with open(os.path.join(outdir, f"{sid}.taxa.tsv"), "w",
+              encoding="utf-8") as fh:
+        w = writer(fh, TAXA_COLUMNS)
+        w.writeheader()
+        for (rank, taxon, label), a in sorted(agg.items(),
+                                              key=lambda kv: -kv[1]["reads"]):
+            w.writerow({"sample_id": sid, "rank": rank, "taxon": taxon,
+                        "label": label, "reads": a["reads"],
+                        "rel_abundance": f"{a['reads'] / total:.6f}" if total else "",
+                        "clusters": a["clusters"],
+                        "best_identity": f"{a['identity']:.4f}",
+                        "lineage": a["lineage"], "database_version": version})
+    with open(os.path.join(outdir, f"{sid}.assign_db.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)

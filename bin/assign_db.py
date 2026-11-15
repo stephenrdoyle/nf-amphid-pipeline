@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Database-mode assignment for nanopore: one sample's reads against a
+Database-mode assignment of single reads: one sample's reads against a
 taxonomically annotated reference database release.
+
+This is the single-read route of the protocol layer (docs/CONTRACTS.md):
+it takes the reads a platform adapter delivered for one sample, builds
+consensus sequences, and asks the release's protocol (bin/protocols/,
+--protocol) to classify them. Steps 1-6 below are shared by every
+protocol; step 7 is the protocol's - what follows describes vespa_v4,
+and nemits2 scores each record over its own span under the gap rule
+instead (bin/protocols/nemits2.py). Read types: single_long_noisy, and
+whatever else a protocol declares.
 
 Panel mode asks "which of these few targets is this read?", and a read
 can only ever be called something on the panel. Database mode asks "what
@@ -68,156 +77,32 @@ dependency, used in database mode only.
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import random
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
 from itertools import combinations
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    RANKS, anchored_distance, bounded_edit, calling_rule, infix_distance,
-    load_primers, load_rank_names, load_release_manifest, load_taxonomy,
-    open_reads, rank_word, read_fasta, read_table, release_version,
-    scores_over_reference, writer,
+    INDEX_ARGS, RANKS, Minimap2, bounded_edit,
+    iter_trimmed, load_primers, load_rank_names, load_release_manifest,
+    load_taxonomy, rank_word, ranks_of, read_fasta, read_table,
+    release_version, write_assignment, write_fasta,
 )
-
-# minimap2's index parameters for the database. k=19, w=10 gave the same
-# accuracy as the map-ont default k=15 on the leave-out benchmark and ran
-# 1.6x faster; the index builds in 1-2 s, so it is built once per run.
-INDEX_ARGS = ["-x", "map-ont", "-k", "19", "-w", "10"]
-
-# Floors on the best hit's identity, per rank. A consensus is named at a
-# rank only if its best hit is at least this close; otherwise it stops at
-# the next rank up. From the leave-out benchmark at consensus error rates:
-# species 0.995 kept 90% of correct species calls and cut wrong calls on
-# missing species to 5-8%. Genus was 0.98 in the prototype, which let
-# 27% of consensus from missing genera take a wrong genus on a 150-sample
-# leave-out run of v0.4.0; 0.99 cut that to 20% at no cost to present
-# taxa, the rest moving honestly to family (docs/REFERENCE_DATABASE.md
-# section 11.3, tests/bench_db_floors.py).
-DEFAULT_FLOORS = {"species": 0.995, "genus": 0.99, "family": 0.95}
-
-# The gap rule, for releases scored over their records' span (ITS2):
-# species needs >= 99% identity AND the best record of any other species
-# >= 4 edits further off over the same span; genus >= 97%, family >= 95%.
-# From nemabiome-its2-refdb's leave-one-out (3,164 queries, 1,210
-# species): it named 52.9% of species present at 0.7% wrong, against
-# 18.5% under the V4 floors; reads of missing species took a sister's
-# name 6.6% of the time (V4 floors 2.4%, assignTaxonomy 42%). Per-genus
-# or per-family limits did no better on held-out species.
-GAP_FLOORS = {"species": 0.99, "genus": 0.97, "family": 0.95}
-GAP_EDITS = 4
-# Span scoring. A record must be aligned over at least MIN_SPAN bases to
-# count as evidence at all (a 77-base fragment 32 edits off otherwise
-# outranks full-length records by identity); among equally identical
-# records, those within SPAN_SLACK bases of the longest span tie and the
-# rest - partials matching over less of the read - drop out. A window's
-# overhang past its record is free for at most WINDOW_TRIM bases beyond
-# the 28S stretch. SPAN_CANDIDATES: records minimap2 proposes that are
-# scored exactly, enough for every tie and the nearest other species.
-MIN_SPAN = 100
-SPAN_SLACK = 5
-WINDOW_TRIM = 30
-SPAN_CANDIDATES = 100
+import protocols  # noqa: E402
+from protocols.nemits2 import GAP_EDITS, GAP_FLOORS, MIN_SPAN  # noqa: E402
+from protocols.vespa_v4 import DEFAULT_FLOORS  # noqa: E402
 
 CS = re.compile(r"(:\d+|\*[a-z][a-z]|\+[a-z]+|-[a-z]+)")
 
 
-# --------------------------------------------------------------------------
-# minimap2
-# --------------------------------------------------------------------------
-
-
-class Minimap2:
-    """Runs minimap2 and parses its PAF. One instance per sample, so the
-    executable and thread count are decided once."""
-
-    def __init__(self, exe: str = "minimap2", threads: int = 1):
-        path = shutil.which(exe) or (exe if os.path.isfile(exe) else None)
-        if not path:
-            raise SystemExit(
-                f"minimap2 not found ('{exe}'). Database mode needs it; see "
-                "docs/USAGE.md, field setup")
-        self.exe, self.threads = path, max(1, threads)
-        self.calls = 0
-
-    def version(self) -> str:
-        out = subprocess.run([self.exe, "--version"], capture_output=True,
-                             text=True)
-        return out.stdout.strip()
-
-    def map(self, target: str, query: str, extra=(), preset=("-x", "map-ont"),
-            cs: bool = False):
-        """Yield minimap2's hits one at a time, as it writes them.
-
-        Streamed rather than collected: a deep well has millions of reads,
-        and holding minimap2's whole output as text, then as a list of
-        dicts, cost several GB before a single hit was used (STOP23 on
-        vespa_run1 was killed at 16 GB). Callers keep only what they need.
-        stderr goes to a file so a chatty minimap2 cannot fill a pipe and
-        stall while stdout is being read."""
-        args = [self.exe, *preset, "-c", "-t", str(self.threads),
-                *(["--cs"] if cs else []), *extra, target, query]
-        self.calls += 1
-        with tempfile.TemporaryFile("w+") as err:
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=err,
-                                    text=True, bufsize=1 << 20)
-            stopped = False
-            try:
-                for line in proc.stdout:
-                    f = line.rstrip("\n").split("\t")
-                    tags = {t[:2]: t[5:] for t in f[12:]}
-                    yield {
-                        "q": f[0], "qlen": int(f[1]), "qs": int(f[2]),
-                        "qe": int(f[3]), "strand": f[4], "t": f[5],
-                        "tlen": int(f[6]), "ts": int(f[7]), "te": int(f[8]),
-                        "match": int(f[9]), "alen": int(f[10]),
-                        "AS": int(tags.get("AS", 0)), "cs": tags.get("cs", ""),
-                        "tp": tags.get("tp", "P"),
-                    }
-            finally:
-                # A caller that stops early must not leave minimap2 running.
-                if proc.poll() is None:
-                    stopped = True
-                    proc.stdout.close()
-                    proc.kill()
-                proc.wait()
-            if proc.returncode != 0 and not stopped:
-                err.seek(0)
-                raise SystemExit(f"minimap2 failed ({' '.join(args)}):\n"
-                                 f"{err.read()[-2000:]}")
-
-
-def write_fasta(path: str, recs) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
-        for name, seq in recs:
-            fh.write(f">{name}\n{seq}\n")
-
-
-def ranks_of(tax) -> list[str]:
-    """The release's rank columns (ampseqlib.Taxonomy), PR2's by default."""
-    return getattr(tax, "ranks", RANKS)
-
-
-def identity(hit: dict) -> float:
-    """Matching bases over the alignment block PLUS any of the query left
-    unaligned at either end.
-
-    minimap2's own ratio (column 10 over column 11) ignores the ends it
-    clipped, so a consensus aligned over only part of its length would
-    look as close as one aligned end to end. A consensus and a record are
-    both primer-to-primer inserts, so an unaligned end is a real
-    difference and is charged as one."""
-    clip = hit["qs"] + (hit["qlen"] - hit["qe"])
-    return hit["match"] / max(1, hit["alen"] + clip)
 
 
 # --------------------------------------------------------------------------
@@ -665,312 +550,8 @@ def parents_differ(call_a: dict, call_b: dict, tax: dict) -> bool:
 
 
 # --------------------------------------------------------------------------
-# classification
+# labels: what a call says, whichever protocol made it
 # --------------------------------------------------------------------------
-
-
-def lca_depth(names, tax: dict) -> int:
-    """Index into RANKS of the deepest rank at which every record agrees;
-    -1 when they disagree even at domain. A blank rank (a PR2
-    placeholder) breaks agreement: no record can vouch for a name it
-    does not have."""
-    depth = -1
-    for d, r in enumerate(ranks_of(tax)):
-        vals = {tax.get(t, {}).get(r, "") for t in names}
-        if len(vals) == 1 and "" not in vals:
-            depth = d
-        else:
-            break
-    return depth
-
-
-def apply_floors(depth: int, ident: float, floors: dict,
-                 ranks: list[str] = RANKS) -> int:
-    """Cut a rank back until the identity clears its floor. Ranks
-    without a floor are kept as the LCA gives them."""
-    for r in ("species", "genus", "family", "order", "class"):
-        if r in floors and depth >= ranks.index(r) and ident < floors[r]:
-            depth = ranks.index(r) - 1
-    return depth
-
-
-def classify_hits(hits: list[dict], tax: dict, floors: dict,
-                  margin: float) -> dict:
-    """One consensus's call from its database hits."""
-    ranks = ranks_of(tax)
-    if not hits:
-        return {"rank": "", "depth": -1, "identity": 0.0, "coverage": 0.0,
-                "best_hit": "", "near_hits": 0, "lca_depth": -1}
-    top = max(h["AS"] for h in hits)
-    near = [h for h in hits if h["AS"] >= top * (1 - margin)]
-    best = max(near, key=lambda h: (h["AS"], identity(h), h["t"]))
-    ident = identity(best)
-    names = sorted({h["t"] for h in near})
-    # A record with no taxonomy at all - v0.4.0 has nine, conflicts its
-    # build left unresolved - can vouch for nothing, and as a member of
-    # the LCA it vetoed everything: human 18S tied with one stopped at
-    # no rank. It is left out of the LCA, unless it is all there is.
-    known = [t for t in names if tax.get(t, {}).get(ranks[0])]
-    lca = lca_depth(known or names, tax)
-    depth = apply_floors(lca, ident, floors, ranks)
-    return {
-        "depth": depth, "rank": ranks[depth] if depth >= 0 else "",
-        "identity": ident,
-        "coverage": (best["qe"] - best["qs"]) / max(1, best["qlen"]),
-        "best_hit": best["t"], "near_hits": len(names),
-        "lca_depth": lca,
-    }
-
-
-def aligned_identity(parts: list[tuple[str, str]], record: str,
-                     max_frac: float = 0.35) -> float | None:
-    """Identity of a consensus against one record, from a full alignment
-    of each piece rather than minimap2's local block.
-
-    identity() charges every base minimap2 leaves unaligned at an end as
-    a difference. For a sequence close to its record that is nothing -
-    the alignment runs end to end - but -x sr stops extending at the
-    first divergent stretch, so a sequence 6% from its nearest record
-    was charged for a whole clipped end it would have matched most of:
-    VESPA's Entamoeba-like candidates read 90% where BLAST gives 95% and
-    an end-to-end alignment 94%, enough to fall under the family floor
-    and read as unclassified. Here each piece is aligned in full
-    (bounded_edit, unit costs):
-
-      "whole"  against the whole record (a primer-to-primer insert);
-      "start"  against the record's start, its tail free (R1's window);
-      "end"    against the record's end, its head free (R2's window,
-               given in the insert's orientation).
-
-    Edits over the pieces' length; None when a piece is further than
-    max_frac from the record, where no floor could be cleared anyway.
-    """
-    edits = length = 0
-    for seq, where in parts:
-        if not seq:
-            continue
-        cap = max(1, int(max_frac * len(seq)))
-        if where == "whole":
-            d = bounded_edit(seq, record, cap)
-        elif where == "start":
-            d = bounded_edit(seq, record, cap, free_b_suffix=True)
-        else:
-            d = bounded_edit(seq[::-1], record[::-1], cap, free_b_suffix=True)
-        if d > cap:
-            return None
-        edits += d
-        length += len(seq)
-    return 1 - edits / length if length else None
-
-
-def refine_identity(call: dict, parts: list[tuple[str, str]],
-                    record: str | None, floors: dict,
-                    ranks: list[str] = RANKS) -> dict:
-    """Raise a call's identity to its full-alignment value, and re-apply
-    the floors from its LCA. Never lowers it: where minimap2 aligned end
-    to end the two measures agree, and the floors were calibrated on
-    those calls, so they stay exactly as they were."""
-    if not record or not call.get("best_hit"):
-        return call
-    new = aligned_identity(parts, record)
-    if new is None or new <= call["identity"] + 1e-9:
-        return call
-    depth = (apply_floors(call["lca_depth"], new, floors, ranks)
-             if call.get("lca_depth", -1) >= 0 else call["depth"])
-    return {**call, "identity": new, "depth": depth,
-            "rank": ranks[depth] if depth >= 0 else "",
-            "identity_minimap2": call["identity"]}
-
-
-# --------------------------------------------------------------------------
-# span scoring and the gap rule (releases scored over their records' span)
-# --------------------------------------------------------------------------
-
-
-def hit_span_identity(h: dict) -> float:
-    """minimap2's estimate of a hit's identity over the record's span:
-    matches over the alignment plus the record's unaligned ends (the
-    query's are free)."""
-    return h["match"] / max(1, h["alen"] + h["ts"] + h["tlen"] - h["te"])
-
-
-def span_candidates(hits: list[dict], n: int = SPAN_CANDIDATES) -> list[str]:
-    """The records minimap2 proposes that are scored exactly: the n best
-    by estimated identity ("ident", else hit_span_identity), then
-    alignment score, and every record tied with the n-th. By identity,
-    not score: a partial record scores lower on length alone, and a
-    species with hundreds of records pushed a partial of the sister
-    species 3 edits off - the one that decides the gap - to 247th by
-    score (an H. placei sequence, 7% of a sheep set)."""
-    best: dict[str, tuple] = {}
-    for h in hits:
-        k = (round(h["ident"] if "ident" in h else hit_span_identity(h), 6),
-             h["AS"])
-        best[h["t"]] = max(best.get(h["t"], k), k)
-    order = sorted(best, key=lambda t: (-best[t][0], -best[t][1], t))
-    if len(order) > n:
-        cut = best[order[n - 1]]
-        order = [t for t in order if best[t] >= cut]
-    return order
-
-
-def span_scores(parts: list[tuple[str, str]], cands, refs: dict,
-                tail: int = 0) -> list[tuple]:
-    """(edits, span, record) for each candidate record, scored over the
-    record's span (manifest score_over), each piece in full:
-
-      "whole"  the record placed whole inside the query, the query's
-               bases either side free (a consensus, or an insert read
-               through: ITS2 plus the 28S stretch);
-      "start"  a window against the record's start, the record past the
-               window free (R1);
-      "end"    a window against the record's end, given in the insert's
-               orientation; the window's last `tail` bases (R2's 28S
-               stretch) run past the record and are free.
-
-    A window may also overhang a partial record's outer end by up to
-    WINDOW_TRIM bases for free; beyond that the overhang is charged.
-    Edits and spans add up over the pieces. A record no piece fits is
-    left out."""
-    out = []
-    for c in cands:
-        r = refs.get(c)
-        if not r:
-            continue
-        d = sp = 0
-        for seq, where in parts:
-            if not seq:
-                continue
-            if where == "whole":
-                e, k = infix_distance(r, seq), len(r)
-            elif where == "start":
-                e, k = anchored_distance(
-                    r, seq, min(len(r), max(1, len(seq) - WINDOW_TRIM)))
-            else:
-                e, k = anchored_distance(
-                    r[::-1], seq[::-1],
-                    min(len(r), max(1, len(seq) - tail - WINDOW_TRIM)))
-            d += e
-            sp += k
-        if sp and d != float("inf"):
-            out.append((int(d), sp, c))
-    return out
-
-
-def span_call(scores: list[tuple], tax, rule: str, floors: dict,
-              gap_edits: int = GAP_EDITS, qlen: int = 0,
-              min_species_span: int = MIN_SPAN) -> dict:
-    """One query's call from its span scores (span_scores), in
-    classify_hits()'s shape plus what the gap rule adds.
-
-    Records are ranked by identity over their span, not by raw edits: on
-    edits a short partial, with fewer bases to get wrong, beat full-length
-    records. The ties are every record at the best identity whose span is
-    within SPAN_SLACK of the longest such span - a partial matching only
-    over a shorter span does not tie with a full-length match (an H.
-    placei sequence, 23% of one cattle set, tied with a partial H.
-    contortus record and stopped at genus). The call is their LCA, cut
-    back by the floors; under the gap rule a species also needs the
-    nearest record of any OTHER species to be gap_edits further off over
-    the same span. A shared record (its members name two species) counts
-    as another species; an unnamed one (hybrid, cf., environmental) does
-    not - counting three hybrid records once cut a cattle set's species
-    calls from 87% to 35%. With no other species among the candidates,
-    the gap is the whole span.
-
-    Adds: span and edits of the best record, gap (None unless the ties
-    name exactly one species), next (record, edits further) for the
-    nearest other species, and ties (the tied records)."""
-    ranks = ranks_of(tax)
-    empty = {"rank": "", "depth": -1, "identity": 0.0, "coverage": 0.0,
-             "best_hit": "", "near_hits": 0, "lca_depth": -1, "span": 0,
-             "edits": None, "gap": None, "next": None, "ties": []}
-    scores = [x for x in scores if x[1] >= MIN_SPAN]
-    if not scores:
-        return empty
-    top = max(1 - d / sp for d, sp, _c in scores)
-    ties = [x for x in scores if 1 - x[0] / x[1] >= top - 1e-9]
-    longest = max(x[1] for x in ties)
-    ties = [x for x in ties if x[1] >= longest - SPAN_SLACK]
-    d0, sp0, best = min(ties, key=lambda x: (x[0], -x[1], x[2]))
-    species = {tax.get(c, {}).get("species", "") for _d, _s, c in ties}
-    other = [(1 - d / sp, sp, c) for d, sp, c in scores
-             if tax.get(c, {}).get("species", "") not in species
-             and tax.get(c, {}).get("species_status", "shared") != "unnamed"]
-    nxt = None
-    if other:
-        oi, _osp, oc = max(other)
-        nxt = (oc, round((1 - oi) * sp0) - d0)
-    gap = None
-    if len(species) == 1 and "" not in species:
-        gap = nxt[1] if nxt else sp0 - d0
-    tied = sorted(c for _d, _s, c in ties)
-    lca = lca_depth(tied, tax)
-    ident = 1 - d0 / sp0
-    depth = apply_floors(lca, ident, floors, ranks)
-    k = ranks.index("species")
-    if depth >= k and (sp0 < min_species_span or rule == "gap" and (
-            gap is None or gap < gap_edits)):
-        depth = k - 1
-    return {"depth": depth, "rank": ranks[depth] if depth >= 0 else "",
-            "identity": ident,
-            "coverage": min(1.0, sp0 / qlen) if qlen else 1.0,
-            "best_hit": best, "near_hits": len(tied), "lca_depth": lca,
-            "span": sp0, "edits": d0, "gap": gap, "next": nxt,
-            "ties": tied}
-
-
-def record_label(rid: str, tax) -> str:
-    """A record's species; for a shared record the species its members
-    name ("Cooperia shared: punctata / spatulata"); else its deepest
-    name and rank."""
-    t = tax.get(rid, {})
-    if t.get("species"):
-        return t["species"]
-    ranks = ranks_of(tax)
-    rank, name = next(((r, t[r]) for r in reversed(ranks) if t.get(r)),
-                      ("", ""))
-    shared = getattr(tax, "shared", {}).get(rid)
-    if shared and name:
-        return f"{name} shared: " + " / ".join(
-            s.split(" ", 1)[-1] for s in shared)
-    return f"{name} ({rank})" if name else rid
-
-
-def nearest_next(call: dict, tax) -> tuple[str, str]:
-    """How close a span-scored call came: (nearest, next).
-
-    nearest: the tied species and their identity ("Haemonchus contortus
-    99.6%"); next: the nearest record of any other species and how many
-    edits further it is ("Haemonchus placei +2"), or "none close" when
-    minimap2 proposed none. A call stopped at genus then says whether it
-    was "exactly X, but its sister is 2 edits away" (ITS2 cannot separate
-    them) or "98% to X, nothing else close" (a variant the database does
-    not hold, or a missing relative)."""
-    if not call.get("span"):
-        return "", ""
-    shared = getattr(tax, "shared", {})
-    names = sorted({n for t in call["ties"]
-                    for n in (shared.get(t) or [record_label(t, tax)])})
-    near = " / ".join(names[:3]) + (
-        f" / +{len(names) - 3} more" if len(names) > 3 else "")
-    nxt = call.get("next")
-    return (f"{near} {100 * call['identity']:.1f}%",
-            f"{record_label(nxt[0], tax)} +{nxt[1]}" if nxt else "none close")
-
-
-def span_columns(call: dict, tax) -> dict:
-    """The columns a span-scored call adds to clusters.tsv."""
-    near, nxt = nearest_next(call, tax)
-    gap = call.get("gap")
-    return {"span": call.get("span") or "",
-            "edits": "" if call.get("edits") is None else call["edits"],
-            "gap": "" if gap is None else gap,
-            "nearest": near, "next": nxt,
-            "grade": tax.get(call.get("best_hit", ""), {}).get("grade", "")}
-
-
-SPAN_COLUMNS = ["span", "edits", "gap", "nearest", "next", "grade"]
 
 
 def deepest_named(lineage: dict, ranks: list[str] = RANKS) -> str:
@@ -1096,21 +677,14 @@ def label_for(call: dict, tax: dict, label_depth: int,
 # --------------------------------------------------------------------------
 
 
-def parse_floors(text: str, ranks: list[str] = RANKS) -> dict:
-    out = {}
-    for part in (text or "").split(","):
-        if not part.strip():
-            continue
-        k, _, v = part.partition("=")
-        k = k.strip()
-        if k not in ranks:
-            raise SystemExit(f"--floors: '{k}' is not a rank ({', '.join(ranks)})")
-        out[k] = float(v)
-    return out
-
-
 def add_calling_args(ap) -> None:
-    """The calling-rule options both routes share."""
+    """The protocol and calling-rule options both routes share."""
+    ap.add_argument("--protocol", default="auto",
+                    help="the database protocol (bin/protocols/): "
+                    f"{', '.join(protocols.PROTOCOLS)}. auto: the release's "
+                    "manifest 'protocol', else nemits2 for a release scored "
+                    "over its records' span or called by the gap rule, else "
+                    "vespa_v4")
     ap.add_argument("--calling-rule", choices=("auto", "floors", "gap"),
                     default="auto",
                     help="floors: an identity floor per rank (--floors); gap: "
@@ -1130,69 +704,28 @@ def add_calling_args(ap) -> None:
                     "cover to count)")
 
 
-def calling_setup(args, man: dict, tax) -> tuple:
-    """(exact, rule, floors): whether calls come from span scoring, the
-    calling rule, and its floors over the release's ranks."""
-    rule = calling_rule(man, args.calling_rule)
-    exact = scores_over_reference(man) or rule == "gap"
-    floors = parse_floors(args.gap_floors if rule == "gap" else args.floors,
-                          ranks_of(tax))
-    return exact, rule, floors
-
-
-def calling_settings(exact: bool, rule: str, args) -> dict:
-    """What the summary records of how calls were made. Nothing for a V4
-    release under its floors, so those summaries read as they did."""
-    if not exact:
-        return {}
-    return {"score_over": "reference span", "calling_rule": rule,
-            "gap_edits": args.gap_edits if rule == "gap" else None,
-            "min_span": MIN_SPAN, "min_species_span": args.min_species_span,
-            "span_slack": SPAN_SLACK}
-
-
-def trim_reads(path: str, primers) -> tuple[dict[str, str], Counter]:
-    """Oriented, primer-trimmed inserts by read id, and what was lost.
-
-    The release's records are primer-trimmed inserts, so reads must be
-    too: identity is measured over the insert, and a primer left on one
-    side and not the other would be charged as a difference."""
-    fate: Counter = Counter()
-    return dict(iter_trimmed(path, primers, fate)), fate
-
-
-def iter_trimmed(path: str, primers, fate: Counter):
-    """trim_reads() one read at a time, so main() can write them to disk
-    without holding a deep well's reads in memory; fate is filled in as
-    they pass. Only the ids are kept, to make duplicates unique."""
-    out: set[str] = set()
-    from ampseqlib import revcomp
-    for rid, seq, _q in open_reads(path):
-        fate["reads_in"] += 1
-        seq = seq.upper()
-        hit = None
-        for s in (seq, revcomp(seq)):
-            f = primers.match(s, "fwd")
-            r = primers.match(revcomp(s), "rev")
-            if f is not None and r is not None:
-                hit = s[f[1]:len(s) - r[1]]
-                break
-        if hit is None:
-            fate["no_primer"] += 1
-            continue
-        if len(hit) < 50:
-            fate["too_short"] += 1
-            continue
-        # Duplicate ids happen when a split read keeps its parent's name;
-        # minimap2 would merge them, so each gets its own.
-        key = rid if rid not in out else f"{rid}_{fate['reads_in']}"
-        out.add(key)
-        yield key, hit
+def protocol_of(args, man: dict):
+    """The release's protocol under these options (protocols.resolve);
+    SystemExit naming the problem when there is none, or when it cannot
+    take this read type."""
+    try:
+        proto = protocols.resolve(man, args.protocol, args.calling_rule)
+    except ValueError as exc:
+        raise SystemExit(f"--protocol: {exc}") from None
+    why = proto.unsupported(args.read_type)
+    if why:
+        raise SystemExit(why)
+    return proto
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--reads", required=True, help="the sample's FASTQ")
+    ap.add_argument("--reads", required=True, nargs="+",
+                    help="the sample's FASTQ (several are read as one)")
+    ap.add_argument("--read-type", choices=[t for t in protocols.READ_TYPES
+                                            if t.startswith("single")],
+                    default="single_long_noisy",
+                    help="what the platform delivered (contract A)")
     ap.add_argument("--database", required=True,
                     help="reference database release directory")
     ap.add_argument("--index", help="minimap2 index of the release's "
@@ -1251,7 +784,8 @@ def main(argv=None) -> int:
                                                    "resolution_nanopore.tsv"))}
     db_fasta = os.path.join(args.database, "refdb.fasta")
     index = args.index or db_fasta
-    exact, rule, floors = calling_setup(args, man, tax)
+    proto = protocol_of(args, man)
+    rule, floors = proto.calling(args, man, tax)
     st = Settings(min_reads=args.min_cluster_reads,
                   max_reads=args.max_consensus_reads,
                   hap_min_frac=args.haplotype_min_frac,
@@ -1331,42 +865,16 @@ def main(argv=None) -> int:
         fate["clustered"] = n_clustered
         fate["unclustered"] = n_reads - n_clustered
 
-        # Classify the consensus sequences that kept any reads.
+        # Classify the consensus sequences that kept any reads: the
+        # protocol's step.
         keep = [k for k in range(len(clusters)) if counts[k] > 0]
         calls: dict[int, dict] = {}
         if keep:
-            kfa = os.path.join(tmp, "classify.fa")
-            write_fasta(kfa, ((f"c{k}", clusters[k]["consensus"]) for k in keep))
-            hits: dict[str, list] = defaultdict(list)
-            for a in mm.map(index, kfa, preset=INDEX_ARGS,
-                            extra=("--secondary=yes", "-N", "1000",
-                                   "-p", "0.9")):
-                hits[a["q"]].append(a)
-            if exact:
-                # Scored over each record's span (span_call): the
-                # consensus carries the 28S stretch its records lack.
-                cands = {k: span_candidates(hits.get(f"c{k}", []))
-                         for k in keep}
-                need = {t for ts in cands.values() for t in ts}
-                recs = {i: s for i, s in read_fasta(db_fasta) if i in need}
-                for k in keep:
-                    cons = clusters[k]["consensus"]
-                    calls[k] = span_call(
-                        span_scores([(cons, "whole")], cands[k], recs),
-                        tax, rule, floors, args.gap_edits, len(cons),
-                        args.min_species_span)
-            else:
-                for k in keep:
-                    calls[k] = classify_hits(hits.get(f"c{k}", []), tax,
-                                             floors, args.lca_margin)
-                # Identity from a full alignment to the best record, where
-                # that is higher than minimap2's (aligned_identity).
-                need = {c["best_hit"] for c in calls.values() if c["best_hit"]}
-                recs = {i: s for i, s in read_fasta(db_fasta) if i in need}
-                for k in keep:
-                    calls[k] = refine_identity(
-                        calls[k], [(clusters[k]["consensus"], "whole")],
-                        recs.get(calls[k]["best_hit"]), floors, ranks)
+            ctx = SimpleNamespace(mm=mm, index=index, db_fasta=db_fasta,
+                                  tmp=tmp, tax=tax, ranks=ranks, rule=rule,
+                                  floors=floors, args=args)
+            calls = proto.classify_consensus(
+                ctx, {k: clusters[k]["consensus"] for k in keep})
         mm_version = mm.version()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1425,51 +933,8 @@ def main(argv=None) -> int:
             "length": len(c["consensus"]),
             "database_version": version,
             "consensus": c["consensus"],
-            **(span_columns(call, tax) if exact else {}),
+            **proto.column_values(call, tax),
         })
-    cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
-            "label", "identity", "coverage", "lineage", "best_hit",
-            "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "db_margin", "origin", "merged", "chimera_of", "length",
-            "database_version", "consensus"] + (SPAN_COLUMNS if exact else [])
-    with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
-              encoding="utf-8") as fh:
-        w = writer(fh, cols)
-        w.writeheader()
-        w.writerows(rows)
-    with open(os.path.join(args.outdir, f"{sid}.consensus.fasta"), "w",
-              encoding="utf-8") as fh:
-        for r in rows:
-            fh.write(f">{r['cluster']} reads={r['reads']} rank={r['rank'] or 'none'} "
-                     f"taxon={r['taxon'] or 'none'} identity={r['identity']}\n"
-                     f"{r['consensus']}\n")
-
-    # Per taxon at the rank each call reached. Two clusters of one
-    # species (haplotypes) are one row; a species call and a genus call
-    # in the same genus are NOT merged - they are different statements.
-    agg: dict = {}
-    for r in rows:
-        key = (r["rank"], r["taxon"], r["label"])
-        a = agg.setdefault(key, {"reads": 0, "clusters": 0, "identity": 0.0,
-                                 "lineage": r["lineage"]})
-        a["reads"] += r["reads"]
-        a["clusters"] += 1
-        a["identity"] = max(a["identity"], float(r["identity"]))
-    with open(os.path.join(args.outdir, f"{sid}.taxa.tsv"), "w",
-              encoding="utf-8") as fh:
-        w = writer(fh, ["sample_id", "rank", "taxon", "label", "reads",
-                        "rel_abundance", "clusters", "best_identity",
-                        "lineage", "database_version"])
-        w.writeheader()
-        for (rank, taxon, label), a in sorted(agg.items(),
-                                              key=lambda kv: -kv[1]["reads"]):
-            w.writerow({"sample_id": sid, "rank": rank, "taxon": taxon,
-                        "label": label, "reads": a["reads"],
-                        "rel_abundance": f"{a['reads'] / total:.6f}" if total else "",
-                        "clusters": a["clusters"],
-                        "best_identity": f"{a['identity']:.4f}",
-                        "lineage": a["lineage"], "database_version": version})
-
     summary = {
         "sample_id": sid,
         "mode": "database",
@@ -1500,12 +965,11 @@ def main(argv=None) -> int:
                      "lca_margin": args.lca_margin,
                      "recruit_margin": args.recruit_margin,
                      "index_args": INDEX_ARGS,
-                     **calling_settings(exact, rule, args)},
+                     **proto.calling_settings(rule, args)},
         "rank_reached": dict(Counter(r["rank"] or "none" for r in rows)),
     }
-    with open(os.path.join(args.outdir, f"{sid}.assign_db.json"), "w",
-              encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
+    write_assignment(args.outdir, sid, rows, proto.extra_columns, version,
+                     summary)
     print(f"{sid}: {fate['reads_in']} reads, {len(rows)} clusters, "
           f"{fate['clustered']} clustered, {fate['unclustered']} unclustered, "
           f"{cb.splits} haplotype split(s), {summary['elapsed_s']} s")

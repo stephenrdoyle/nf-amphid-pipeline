@@ -96,7 +96,7 @@ def prepare(rel: str, work: str, rng: random.Random, n_genera: int,
         if not os.path.exists(dst):
             os.symlink(os.path.join(os.path.abspath(rel), f), dst)
     mmi = os.path.join(work, "leaveout.k19w10.mmi")
-    subprocess.run([mm2, *adb.INDEX_ARGS, "-d", mmi,
+    subprocess.run([mm2, *al.INDEX_ARGS, "-d", mmi,
                     os.path.join(lo, "refdb.fasta")], check=True,
                    capture_output=True)
     pools = {
@@ -208,7 +208,7 @@ def outcome(r, tax, floors) -> str:
     if r["category"] == "spurious":
         return "spurious"
     lca = al.RANKS.index(r["lca_rank"]) if r["lca_rank"] else -1
-    depth = adb.apply_floors(lca, float(r["identity"]), floors)
+    depth = al.apply_floors(lca, float(r["identity"]), floors)
     lim = al.RANKS.index(ALLOWED[r["category"]])
     t, h = tax[r["source"]], tax.get(r["best_hit"], {})
     if any(t[x] != h.get(x, "") for x in al.RANKS[:min(depth, lim) + 1]) \

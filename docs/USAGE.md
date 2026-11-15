@@ -164,13 +164,13 @@ required field as missing.
 | column | required | meaning |
 |---|---|---|
 | `run_id` | yes | must match a `run_id` in the run manifest |
-| `platform` | yes | `illumina` or `nanopore` |
+| `platform` | yes | `illumina`, `nanopore`, or `predemultiplexed` (database mode, §2.10) |
 | `sample_id` | yes | unique within the run |
-| `index_i7` | yes | i7 index sequence or name |
-| `index_i5` | yes | i5 index sequence or name |
+| `index_i7` | yes | i7 index sequence or name (may be blank on a predemultiplexed run) |
+| `index_i5` | yes | i5 index sequence or name (may be blank on a predemultiplexed run) |
 | `sample_type` | yes | `unknown`, `neg_extraction`, `neg_ntc`, `mock`, `pos_control` |
 | `subject_id` | no | who the library came from. Groups replicates with no metadata file needed; also the join key for a subject-keyed `--metadata`. Defaults to `sample_id` |
-| `file_prefix` | no | overrides filename matching for Illumina file resolution |
+| `file_prefix` | no | overrides filename matching for Illumina and predemultiplexed file resolution |
 | `expected_taxa` | no | on a `pos_control` row: what it should contain, `;`-separated target taxa or seq_ids |
 
 The `sample_type` vocabulary is **not** configurable. The logic depends
@@ -212,8 +212,9 @@ results afterwards with `--comparison`.
 | column | required | meaning |
 |---|---|---|
 | `run_id` | yes | matches the samplesheet |
-| `platform` | yes | `illumina` or `nanopore` |
-| `path` | yes | Illumina: directory of per-sample FASTQ. Nanopore: MinKNOW run folder, or a pooled FASTQ |
+| `platform` | yes | `illumina`, `nanopore`, or `predemultiplexed` (database mode, §2.10) |
+| `path` | yes | Illumina or predemultiplexed: directory of per-sample FASTQ. Nanopore: MinKNOW run folder, or a pooled FASTQ |
+| `read_type` | no | predemultiplexed only: `single_long_noisy` (nanopore reads; the default) or `single_long_accurate` (PacBio HiFi). Illumina is always `paired_short`, nanopore `single_long_noisy` |
 | `barcode_repeats` | no | tandem copies of each index (1 or 2). Defaults to the assay config |
 | `dna_input_ng` | no | DNA input, for the quantification chain |
 | `lot_*` | no | any column starting `lot_` is recorded as reagent provenance |
@@ -336,11 +337,25 @@ both Nextflow and `preflight.py`, so the values are defined once.
 ### 2.9 `--reference_database` — a database release instead of a panel (directory)
 
 For protocols with no panel, no control plasmids and no quantification
-standards - the VESPA 18S V4 protocol is the one it was built for. Give a
-release directory built by the vespa-18s-refdb repository *instead of*
+standards - the VESPA 18S V4 protocol is the one it was built for, and
+nemabiome ITS2 the second. Give a release directory built by the
+vespa-18s-refdb or nemabiome-its2-refdb repository *instead of*
 `--reference`, with `--assay assets/assay/vespa18s.json` and the
 protocol's primers. The design, and why each step is there, is in
-[REFERENCE_DATABASE.md](REFERENCE_DATABASE.md).
+[REFERENCE_DATABASE.md](REFERENCE_DATABASE.md); how the platform,
+protocol and shared layers fit together, and what each hands the next,
+in [CONTRACTS.md](CONTRACTS.md).
+
+**The protocol.** Everything from primer trimming to a call is the
+release's protocol: `vespa_v4` (identity floors over minimap2's hits) or
+`nemits2` (each record scored over its own span, the gap rule). A
+release names its protocol in `manifest.json` (`"protocol"`); one built
+before that field existed is recognised from what its manifest already
+says - a release scored over its records' span is `nemits2`, any other
+`vespa_v4` - so every existing release runs as it always has.
+`--db_protocol` overrides either. Pre-flight says which protocol it
+resolved, and fails when the protocol cannot take the run's read type or
+the release lacks a file it reads.
 
 ```bash
 nextflow run . -profile field \
@@ -356,7 +371,7 @@ What changes:
   `--primers`, its adapter anchors equal to the assay's. The release's
   look-alike mask becomes `preflight/anchor_lookalikes.tsv`, which the
   splitter and demultiplexer read exactly as they read a panel's.
-  `--spiked`, `--mocks` and Illumina runs are refused in this mode, and a
+  `--spiked` and `--mocks` are refused in this mode, and a
   plate without negative controls is warned about: with no plasmids or
   standards, blanks are the only measure of contamination left.
 - **Assignment** is per-sample consensus, not per read: reads are grouped
@@ -391,6 +406,50 @@ is close. Give the NC1/NC2 primers (`assets/primers_nemabiome_its2.tsv`)
 and `--db_primer_offset 3`, for the protocol's 0-3 spacer bases.
 REFERENCE_DATABASE.md §12.
 
+### 2.10 Reads that arrive demultiplexed (`platform` `predemultiplexed`)
+
+Database mode can start from per-sample FASTQs that already exist - lima
+on PacBio, Dorado on nanopore, or a sequencing centre's own split - with
+the same samplesheet, run manifest, primers, assay and release as any
+other run. Set `platform` to `predemultiplexed` in both files, point the
+run's `path` at the directory holding the files, and say what the reads
+are in the manifest's `read_type` column:
+
+```
+run_id  platform          path                  read_type
+PB01    predemultiplexed  /data/pb01/demux      single_long_accurate
+```
+
+Each sample's files are found under `path` by its `file_prefix` (else its
+`sample_id`), in any of these shapes:
+
+| on disk | taken as |
+|---|---|
+| `<prefix>.fastq.gz` (or `.fq.gz`, `.fastq`, `.fq`) | the sample's one file |
+| `<prefix>_*.fastq.gz`, `<prefix>.*.fastq.gz`, `<prefix>-*.fastq.gz` | chunks of the sample, read as one |
+| `<prefix>/` holding FASTQs | a folder per sample (Dorado, MinKNOW's `barcodeNN/`) |
+
+A file a longer declared prefix also owns belongs to that one (`S1` never
+takes `S10_*`). lima names its output `<movie>.<bc>--<bc>`, so a lima run
+sets `file_prefix` to that. A sample with no file stops pre-flight, as on
+Illumina.
+
+The reads go straight to the release's protocol, as nanopore's do after
+demultiplexing; there is no splitting and no demultiplexing here, so the
+read funnel starts at the reads each sample was delivered
+(`demux/demux_accounting.json` says nothing is known of what the
+upstream tool discarded). Indices may be left blank: such a well has no
+plate position, and the misassignment model and plate tests leave it
+out. With `--input_dir`, use `--platform predemultiplexed`; the reads are
+then taken as `single_long_noisy`.
+
+**Read types today.** Both protocols take `single_long_noisy` (nanopore)
+and `paired_short` (Illumina). Neither takes `single_long_accurate` yet:
+the floors and the gap rule have not been checked on PacBio reads, so
+pre-flight refuses it rather than call them unvalidated. A built-in
+PacBio adapter (symmetric-tag demultiplexing, and lima on Linux) is the
+next step.
+
 ---
 
 ## 3. Parameters
@@ -403,7 +462,7 @@ REFERENCE_DATABASE.md §12.
 | `--samplesheet` | — | samplesheet CSV (required) |
 | `--runs` | — | run manifest TSV; one of this or `--input_dir` |
 | `--input_dir` | — | single-run shortcut; requires `--platform` |
-| `--platform` | — | `illumina` or `nanopore`; only with `--input_dir` |
+| `--platform` | — | `illumina`, `nanopore` or `predemultiplexed` (database mode); only with `--input_dir` |
 | `--run_id` | `RUN01` | run id when using `--input_dir` |
 | `--primers` | — | PCR1 primers TSV; **required** |
 | `--metadata` | — | grouping metadata TSV, keyed on `subject_id` **or** `sample_id` |
@@ -470,19 +529,20 @@ On the real MinION run this affected 41.6% of reads.
 
 | parameter | default | meaning |
 |---|---|---|
-| `--reference_database` | — | a vespa-18s-refdb release directory, in place of `--reference` (§2.9) |
+| `--reference_database` | — | a vespa-18s-refdb or nemabiome-its2-refdb release directory, in place of `--reference` (§2.9) |
+| `--db_protocol` | `auto` | the protocol the release is run with: `vespa_v4` or `nemits2` (docs/CONTRACTS.md). `auto` takes the release's manifest `"protocol"`, else infers it: `nemits2` for a release scored over its records' span or called by the gap rule, `vespa_v4` otherwise |
 | `--db_min_cluster_reads` | `5` | reads a group needs for a consensus of its own; smaller groups' reads are still counted |
 | `--db_lca_margin` | `0.005` | database hits within this fraction of the best alignment score take part in the LCA |
 | `--db_floors` | `species=0.995,genus=0.99,family=0.95` | identity floor per rank; a consensus is named at a rank only when its best hit is this close. Below family it is reported as `unclassified, NN% to X` |
-| `--db_min_rel_abundance` | `0.001` | a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
+| `--db_min_rel_abundance` | `null` | the protocol's (0.001 for both) when `null`; a call must also be this share of its well's classified reads; `--min_depth` and `--absolute_floor` apply as in panel mode |
 | `--db_primer_max_edits` | `3` | edits allowed when finding each primer in database mode (panel mode uses 2). Off-target bacterial 16S differs from the forward primer at its 3' end, often by three; at two it is dropped as `no_primer` rather than counted as bacteria |
-| `--db_host_clade` | `Craniata` | a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
+| `--db_host_clade` | `null` | the protocol's (Craniata for both) when `null`; a name anywhere in a best hit's PR2 lineage that marks host reads, for the off-target fractions (Craniata: vertebrates) |
 | `--db_misassign_default_rate` | `0.001` | per-pair index misassignment rate calls are checked against when the run cannot measure its own (see *Index misassignment* below). Never taken off the blanks |
 | `--db_misassign_margin` | `2` | how far above the run's fitted rate one pair of indexes may leak before a call is more than misassignment: a misread lands on the nearest index, so some pairs leak more than most |
 | `--db_floors_illumina` | `species=0.997,genus=0.995,family=0.95` | the same for Illumina pairs, over both windows together: stricter, because the windows miss most of what separates sister taxa |
 | `--db_window_r1` | `null` | Illumina database mode: insert bases kept from R1, so error copies line up base for base; `null` takes the release's windows for `--illumina_read_length` (`illumina_geometries`: 132 at 2x150 or 2x250, 250 at 2x300) |
 | `--db_window_r2` | `null` | the same for R2 (128 at 2x150, 200 at 2x300). For an ITS2 release both count ITS2 bases; R2 also reads the 28S stretch |
-| `--db_calling_rule` | `auto` | `floors` (the floors above) or `gap`: species only at >= 99% identity with the nearest other species `--db_gap_edits` further off over the same span. `auto` takes the release's: `gap` for a release scored over its records' span (ITS2), `floors` for V4 |
+| `--db_calling_rule` | `auto` | `floors` (the floors above) or `gap`: species only at >= 99% identity with the nearest other species `--db_gap_edits` further off over the same span. `auto` takes the release's: `gap` for a release scored over its records' span (ITS2), `floors` for V4. `vespa_v4` calls by floors only; `gap` on a V4 release with no declared protocol selects `nemits2`'s span scoring, as it always has |
 | `--db_gap_floors` | `species=0.99,genus=0.97,family=0.95` | identity floors under the gap rule |
 | `--db_gap_edits` | `4` | edits the nearest other species must be further off for a species call under the gap rule. A `shared` record counts as another species; an `unnamed` one does not |
 | `--db_min_species_span` | `100` | record bases a span-scored species call must rest on |
@@ -633,6 +693,11 @@ reproducibility choice, not a dependency.
     <sample>.counts.tsv         reads per reference entry
     <sample>.taxa.tsv
     <sample>.assign.json
+  demux/demux_accounting.json   database mode: where the run's reads went
+                                before any sample saw them, in fates every
+                                platform shares, and plate positions
+                                (docs/CONTRACTS.md, contract A)
+  preflight/read_types.tsv      database mode: each run's read type
   assign_db/                    database mode (--reference_database)
     <sample>.clusters.tsv       one row per consensus: reads, rank reached,
                                 taxon, identity, best hit, consensus

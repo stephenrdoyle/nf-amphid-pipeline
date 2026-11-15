@@ -65,6 +65,8 @@ adp = _load("assign_db_pairs", "bin/assign_db_pairs.py")
 pf = _load("preflight", "bin/preflight.py")
 sdb = _load("synthesise_db", "bin/synthesise_db.py")
 import ampseqlib as al          # noqa: E402
+import protocols  # noqa: E402
+import protocols.nemits2 as its2  # noqa: E402
 
 PASS, FAIL = [], []
 
@@ -290,15 +292,15 @@ def test_loading() -> None:
         check("a header with neither set gives None",
               al.ranks_in(["id", "domain", "genus"]) is None)
         check("the release is scored over its records' span; V4 is not",
-              al.scores_over_reference(man) and not al.scores_over_reference(
+              protocols.scores_over_reference(man) and not protocols.scores_over_reference(
                   {"insert": "between the primers"}))
         check("the calling rule: gap for ITS2, floors for V4, explicit wins",
-              al.calling_rule(man) == "gap" and al.calling_rule({}) == "floors"
-              and al.calling_rule(man, "floors") == "floors"
-              and al.calling_rule({"calling_rule": "gap"}) == "gap")
+              protocols.calling_rule(man) == "gap" and protocols.calling_rule({}) == "floors"
+              and protocols.calling_rule(man, "floors") == "floors"
+              and protocols.calling_rule({"calling_rule": "gap"}) == "gap")
         check("R2's 28S stretch is taken from the geometries (150-20-83 = 47)",
-              al.illumina_tail(man, 150) == 47 and al.illumina_tail(man, 251) == 47
-              and al.illumina_tail({}, 150) == 0, str(al.illumina_tail(man, 150)))
+              its2.PROTOCOL.tail(man, 150) == 47 and its2.PROTOCOL.tail(man, 251) == 47
+              and its2.PROTOCOL.tail({}, 150) == 0, str(its2.PROTOCOL.tail(man, 150)))
     vespa = os.path.join(HERE, "data", "db", "release", "taxonomy.tsv")
     tv = al.load_taxonomy(vespa)
     check("a vespa release still loads over PR2's nine ranks",
@@ -372,41 +374,41 @@ def test_span_call() -> None:
         tax[rid] = dict(zip(al.NCBI_RANKS, lin + [gen, sp]),
                         species_status=status, grade="complete")
     tax.shared["shr"] = ["Haemonchus contortus", "Haemonchus placei"]
-    g = adb.GAP_FLOORS
-    c = adb.span_call([(0, 240, "full"), (0, 150, "part"), (8, 240, "sis")],
+    g = its2.GAP_FLOORS
+    c = its2.span_call([(0, 240, "full"), (0, 150, "part"), (8, 240, "sis")],
                       tax, "gap", g)
     check("a partial matching over a shorter span does not tie with a "
           "full-length match", c["ties"] == ["full"], str(c["ties"]))
-    c = adb.span_call([(0, 240, "full"), (6, 240, "sis")], tax, "gap", g)
+    c = its2.span_call([(0, 240, "full"), (6, 240, "sis")], tax, "gap", g)
     check("species when the next species is >= 4 edits further off",
           c["rank"] == "species" and c["gap"] == 6, str(c))
-    c = adb.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "gap", g)
+    c = its2.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "gap", g)
     check("genus when it is closer, with how close",
-          c["rank"] == "genus" and adb.nearest_next(c, tax) ==
+          c["rank"] == "genus" and its2.nearest_next(c, tax) ==
           ("Haemonchus contortus 100.0%", "Haemonchus placei +2"),
-          str(adb.nearest_next(c, tax)))
-    c = adb.span_call([(0, 240, "full"), (1, 240, "hyb")], tax, "gap", g)
+          str(its2.nearest_next(c, tax)))
+    c = its2.span_call([(0, 240, "full"), (1, 240, "hyb")], tax, "gap", g)
     check("an unnamed record is not another species",
           c["rank"] == "species" and c["next"] is None, str(c))
-    c = adb.span_call([(0, 240, "full"), (1, 240, "shr")], tax, "gap", g)
+    c = its2.span_call([(0, 240, "full"), (1, 240, "shr")], tax, "gap", g)
     check("a shared record is another species, named by its members",
-          c["rank"] == "genus" and adb.nearest_next(c, tax)[1] ==
+          c["rank"] == "genus" and its2.nearest_next(c, tax)[1] ==
           "Haemonchus shared: contortus / placei +1",
-          str(adb.nearest_next(c, tax)))
-    c = adb.span_call([(3, 240, "full"), (20, 240, "sis")], tax, "gap", g)
+          str(its2.nearest_next(c, tax)))
+    c = its2.span_call([(3, 240, "full"), (20, 240, "sis")], tax, "gap", g)
     check("species needs 99% identity too (3 edits in 240 is 98.75%)",
           c["rank"] == "genus", str(c["rank"]))
-    c = adb.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "floors",
+    c = its2.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "floors",
                       {"species": 0.995})
     check("the floors rule ignores the gap", c["rank"] == "species")
-    c = adb.span_call([(0, 120, "full")], tax, "gap", g, min_species_span=150)
+    c = its2.span_call([(0, 120, "full")], tax, "gap", g, min_species_span=150)
     check("a species call rests on at least --min-species-span bases",
           c["rank"] == "genus" and c["span"] == 120, str(c))
-    c = adb.span_call([(0, 90, "full")], tax, "gap", g)
+    c = its2.span_call([(0, 90, "full")], tax, "gap", g)
     check("a span under MIN_SPAN is no evidence", c["best_hit"] == "")
     hits = [{"t": f"r{i}", "AS": 100 - (i // 2), "ident": 0.99}
             for i in range(10)]
-    got = adb.span_candidates(hits, 3)
+    got = its2.span_candidates(hits, 3)
     check("candidates keep every record tied with the last one taken",
           got == ["r0", "r1", "r2", "r3"], str(got))
     hits = [{"t": "full", "match": 238, "alen": 240, "ts": 0, "tlen": 240,
@@ -415,7 +417,7 @@ def test_span_call() -> None:
              "te": 150, "AS": 300},
             {"t": "clipped", "match": 200, "alen": 200, "ts": 0, "tlen": 240,
              "te": 200, "AS": 400}]
-    got = adb.span_candidates(hits, 2)
+    got = its2.span_candidates(hits, 2)
     check("candidates are ranked by identity over the record's span, so a "
           "partial is not pushed out by score alone",
           got == ["part", "full"], str(got))
@@ -431,22 +433,22 @@ def test_primers_and_merging() -> None:
           [e[1] if e else None for e in ends] == [20, 21, 22, 23], str(ends))
     insert = rand(rng, 287)
     s1, s2 = insert[:228], al.revcomp(insert)[:228]
-    m = adp.merge_pair(s1, "I" * 228, s2, "I" * 228)
+    m = its2.merge_pair(s1, "I" * 228, s2, "I" * 228)
     check("overlapping mates merge into the insert", m and m[0] == insert,
           str(len(m[0]) if m else None))
     s1e = s1[:200] + ("A" if s1[200] != "A" else "C") + s1[201:]
-    m = adp.merge_pair(s1e, "I" * 228, s2, "I" * 228)
+    m = its2.merge_pair(s1e, "I" * 228, s2, "I" * 228)
     check("an error in the overlap does not stop a merge; R1's base is kept",
           m is not None and m[0][200] == s1e[200])
     s1, s2 = insert[:127], al.revcomp(insert)[:127]
     check("mates that do not overlap are not merged",
-          adp.merge_pair(s1, "I" * 127, s2, "I" * 127) is None)
+          its2.merge_pair(s1, "I" * 127, s2, "I" * 127) is None)
 
 
 def test_groups() -> None:
     print("\norganism groups over NCBI ranks")
     R = al.NCBI_RANKS
-    g = sdb.organism_group
+    g = protocols.organism_group
     check("a nematode is a helminth",
           g(LINEAGE + ["Trichostrongylidae"], "Craniata", R) == "helminths")
     check("a vertebrate is host",

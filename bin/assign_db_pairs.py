@@ -3,6 +3,13 @@
 Database-mode assignment for Illumina: one sample's read pairs against a
 reference database release.
 
+This is the paired route of the protocol layer (docs/CONTRACTS.md): it
+takes the pairs a platform adapter delivered for one sample (read type
+paired_short), orients, windows and denoises them, and asks the
+release's protocol (bin/protocols/, --protocol) to classify the result.
+Pairing, windowing and denoising are shared; what a protocol changes is
+said below, and lives in its module.
+
 The nanopore route (assign_db.py) builds a consensus because a nanopore
 read is too noisy to name a species: sister taxa differ by ~1% over V4
 and a read errs at 2-3%. An Illumina read errs at ~0.1%, so the noise is
@@ -48,14 +55,14 @@ Per sample:
   5. LCA and floors as on nanopore, on the identity of both windows
      together (unaligned ends counted as differences).
 
-A release scored over its records' span (manifest score_over; nemabiome
-ITS2) differs in three places. Its windows count record bases, and R2
+The nemits2 protocol (nemabiome ITS2, bin/protocols/nemits2.py) differs
+in three places. Its windows count record bases, and R2
 opens with the 28S stretch the records stop short of, so R2's window
 takes that stretch too (illumina_tail: 130 + 83 at 2x150 is 130 + 130
 read bases). Step 4 only proposes candidate records; each is scored
-exactly over its own span, the stretch free (assign_db.span_scores).
+exactly over its own span, the stretch free (nemits2.span_scores).
 And step 5 is the release's calling rule, the gap rule for ITS2
-(assign_db.span_call). --primer-offset shortens both windows by the
+(nemits2.span_call). --primer-offset shortens both windows by the
 spacer bases some protocols put before each primer (0-3 for NC1/NC2),
 so a pair with a 3-base spacer still fills them. And mates that overlap
 (most ITS2 pairs at 2x250) are merged into the insert and scored whole
@@ -72,111 +79,27 @@ Standard-library Python plus minimap2.
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import os
 import shutil
 import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ampseqlib import (  # noqa: E402
-    illumina_tail, illumina_windows, load_assay, load_primers,
-    load_rank_names, load_release_manifest, load_taxonomy, read_table,
-    release_version, revcomp, writer,
+    Minimap2, illumina_windows, load_assay, load_primers, load_rank_names,
+    load_release_manifest, load_taxonomy, orient_pair, ranks_of, read_table,
+    release_version, revcomp, write_assignment,
 )
 import assign_db as adb  # noqa: E402
 from prep_illumina import paired_reads, trim_readthrough  # noqa: E402
-
-
-# Floors for pairs, stricter than nanopore's. Over the two 2x150 windows
-# (~260bp) the bases that separate sister taxa are mostly in the gap the
-# pair never reads, so the nanopore floors - fractions calibrated on
-# whole inserts - let a missing species take its sister's name. On a
-# 150-sample leave-out run of v0.4.0 at 2x150 (tests/bench_db_floors.py
-# --illumina 150), species 0.997 (an exact match over 260bp) cut wrong
-# names on missing species from 16% to 9% at a cost of 2.6 points of
-# species calls on present ones; genus 0.995 cut wrong genera on missing
-# genera from 18% to 17%. docs/REFERENCE_DATABASE.md section 11.5.
-ILLUMINA_FLOORS = {"species": 0.997, "genus": 0.995, "family": 0.95}
-
-
-# Window mapping. SR_DIVERGENT keeps sr's seeds and chaining but scores
-# as map-ont does (mismatch 4, gap 4+2k), so an alignment carries on
-# through a divergent stretch instead of stopping at it (main()).
-SR = ("-x", "sr")
-SR_DIVERGENT = ("-x", "sr", "-B4", "-O4,24", "-E2,1")
-SR_CLIP = 0.10
-
-
-def map_windows(mm, index, paths: dict, extra, preset) -> dict:
-    """{window: {query: {record: best hit}}} for each FASTA in paths."""
-    hits: dict[str, dict] = {name: defaultdict(dict) for name in paths}
-    for name, path in paths.items():
-        if os.path.getsize(path):
-            for h in mm.map(index, path, preset=preset, extra=extra):
-                prev = hits[name][h["q"]].get(h["t"])
-                if prev is None or h["AS"] > prev["AS"]:
-                    hits[name][h["q"]][h["t"]] = h
-    return hits
+from protocols.vespa_v4 import ILLUMINA_FLOORS  # noqa: E402
 
 
 def expected_errors(qual: str) -> float:
     return sum(10 ** (-(ord(c) - 33) / 10) for c in qual)
-
-
-def orient(r1, r2, ps):
-    """((r1 seq, qual), (r2 seq, qual)) with primers trimmed, R1 the
-    forward-primer mate; None when no primer pair is found."""
-    for a, b in ((r1, r2), (r2, r1)):
-        f = ps.match(a[1].upper(), "fwd")
-        if f is None:
-            continue
-        r = ps.match(b[1].upper(), "rev")
-        if r is None:
-            continue
-        return ((a[1][f[1]:].upper(), a[2][f[1]:]),
-                (b[1][r[1]:].upper(), b[2][r[1]:]), f[0], r[0])
-    return None
-
-
-MERGE_MIN_OVERLAP = 20
-MERGE_MAX_MISMATCH = 0.05
-
-
-def merge_pair(s1: str, q1: str, s2: str, q2: str):
-    """(insert, quality) of a pair whose mates overlap, or None.
-
-    The overlap is R1's end against R2's reverse complement's start, found
-    from a 16-base seed at the start of R2's reverse complement (or the
-    next 16, if the first holds an error) and accepted at
-    MERGE_MIN_OVERLAP or more bases with at most MERGE_MAX_MISMATCH of
-    them mismatched; the longest such overlap wins. In the overlap R1's
-    bases are kept. As DADA2's mergePairs does in spirit, and as
-    nemabiome-its2-refdb's its2_classify.py merges."""
-    r = revcomp(s2)
-    rq = q2[::-1]
-    best = None
-    for off in (0, 16):
-        seed = r[off:off + 16]
-        if len(seed) < 16:
-            break
-        i = s1.find(seed)
-        while i >= 0:
-            ov = len(s1) - i + off
-            if MERGE_MIN_OVERLAP <= ov <= min(len(s1), len(r)) and \
-                    (best is None or ov > best):
-                a, b = s1[-ov:], r[:ov]
-                if sum(x != y for x, y in zip(a, b)) <= MERGE_MAX_MISMATCH * ov:
-                    best = ov
-            i = s1.find(seed, i + 1)
-        if best is not None:
-            break
-    if best is None:
-        return None
-    return s1 + r[best:], q1 + rq[best:]
 
 
 _LOW_BITS: dict[int, int] = {}
@@ -375,6 +298,9 @@ def main(argv=None) -> int:
     ap.add_argument("--primers", required=True)
     ap.add_argument("--assay", help="for the adapter, to cut read-through")
     ap.add_argument("--sample-id", required=True)
+    ap.add_argument("--read-type", choices=["paired_short"],
+                    default="paired_short",
+                    help="what the platform delivered (contract A)")
     ap.add_argument("--outdir", default="assign_db")
     ap.add_argument("--minimap2", default="minimap2")
     ap.add_argument("--threads", type=int, default=1)
@@ -422,19 +348,19 @@ def main(argv=None) -> int:
     os.makedirs(args.outdir, exist_ok=True)
     man = load_release_manifest(args.database)
     version = release_version(man)
+    proto = adb.protocol_of(args, man)
     # The windows of the longest geometry the release resolved that the
     # reads can hold (250/200 at 2x300), unless set here.
     w1, w2, rtable = illumina_windows(man, args.read_length,
                                       args.window_r1, args.window_r2)
     # Read bases kept from each mate: the windows, R2's past-the-record
     # stretch (0 for V4), less any spacer allowance.
-    tail = illumina_tail(man, args.read_length)
-    rw1 = w1 - args.primer_offset
-    rw2 = w2 + tail - args.primer_offset
+    rw1, rw2, tail = proto.read_windows(man, args.read_length, w1, w2,
+                                        args.primer_offset)
     tax = load_taxonomy(os.path.join(args.database, "taxonomy.tsv"), man)
-    ranks = adb.ranks_of(tax)
+    ranks = ranks_of(tax)
     rank_names = load_rank_names(args.database)
-    exact, rule, floors = adb.calling_setup(args, man, tax)
+    rule, floors = proto.calling(args, man, tax)
     ps = load_primers(args.primers)
     ps.max_edits = args.primer_max_edits
     cfg = load_assay(args.assay)
@@ -453,7 +379,7 @@ def main(argv=None) -> int:
         fate["reads_in"] += 1
         if len(qual_values) < 4:
             qual_values.update(a[2], b[2])
-        o = orient(a, b, ps)
+        o = orient_pair(a, b, ps)
         if o is None:
             fate["no_primer"] += 1
             continue
@@ -470,15 +396,15 @@ def main(argv=None) -> int:
             counts[(t1, "")] += 1
             fate["whole_insert"] += 1
             continue
-        if exact and not args.no_merge:
-            j = merge_pair(s1, q1, s2, q2)
-            if j is not None:
-                if expected_errors(j[1]) > args.max_ee:
-                    fate["low_quality"] += 1
-                    continue
-                counts[(j[0], "")] += 1
-                fate["merged"] += 1
+        # Mates the protocol scores as one merged insert (nemits2).
+        j = proto.merge_mates(s1, q1, s2, q2, args)
+        if j is not None:
+            if expected_errors(j[1]) > args.max_ee:
+                fate["low_quality"] += 1
                 continue
+            counts[(j[0], "")] += 1
+            fate["merged"] += 1
+            continue
         if len(s1) < rw1 or len(s2) < rw2:
             fate["too_short"] += 1
             continue
@@ -514,194 +440,17 @@ def main(argv=None) -> int:
     fate["unclustered"] = unclustered
     fate["clustered"] = sum(n for _x, _y, n in centroids)
 
-    mm = adb.Minimap2(args.minimap2, args.threads)
+    mm = Minimap2(args.minimap2, args.threads)
     index = args.index or os.path.join(args.database, "refdb.fasta")
     tmp = tempfile.mkdtemp(prefix=f"assign_db_pairs_{sid}_", dir=args.outdir)
-    calls: dict[int, dict] = {}
     try:
-        f1, f2, ff = (os.path.join(tmp, n) for n in ("r1.fa", "r2.fa", "full.fa"))
-        adb.write_fasta(f1, ((f"p{k}", x) for k, (x, y, _n) in enumerate(centroids) if y))
-        adb.write_fasta(f2, ((f"p{k}", y) for k, (x, y, _n) in enumerate(centroids) if y))
-        adb.write_fasta(ff, ((f"p{k}", x) for k, (x, y, _n) in enumerate(centroids) if not y))
-        # -p 0.5, not the nanopore route's 0.9: each window is kept with
-        # every record that scores within half of its best, so that a
-        # record second-best for BOTH windows - which is what a taxon
-        # missing from the database often looks like - is still there to
-        # be joined.
-        extra = ("--secondary=yes", "-N", str(args.max_secondary), "-p", "0.5")
-        paths = {"r1": f1, "r2": f2, "full": ff}
-        hits = map_windows(mm, index, paths, extra, SR)
-        # -x sr's penalties (mismatch 8, gap open 12) are made for reads
-        # of a genome they belong to. Against a taxon ~15% from its
-        # nearest record - VESPA's NHP gregarines, Hexamita,
-        # Hypotrichomonas - the extension stops at the first divergent
-        # stretch, the window aligns as two pieces, and the pair was
-        # joined on one 60bp piece: identity ~0.5 over the pair, best hit
-        # a record that merely shares the conserved start. A pair sr
-        # leaves more than SR_CLIP of a window unaligned is mapped again,
-        # BOTH its windows, with nanopore's penalties on the same seeds,
-        # and that mapping replaces the first; the rest keep sr's, so
-        # ordinary calls and the floors calibrated on them are unchanged.
-        # Judged on the window's best-scoring hit, the one its call rests
-        # on: sr will often also give some record a gappy end-to-end
-        # alignment scoring below the clean partial ones. A window with
-        # no hit at all counts as unaligned too.
-        def poor(name, q):
-            hs = hits[name].get(q)
-            if not hs:
-                return True
-            h = max(hs.values(), key=lambda h: (h["AS"], h["t"]))
-            return h["qs"] + h["qlen"] - h["qe"] > SR_CLIP * h["qlen"]
-        # Not for span scoring, which only takes candidates from these
-        # hits: R2's 28S stretch is unaligned in every pair there.
-        redo = set() if exact else {
-            f"p{k}" for k, (x, y, _n) in enumerate(centroids)
-            if (poor("r1", f"p{k}") or poor("r2", f"p{k}") if y
-                else poor("full", f"p{k}"))}
-        if redo:
-            seqs = {"r1": lambda x, y: x if y else "",
-                    "r2": lambda x, y: y, "full": lambda x, y: "" if y else x}
-            again_paths = {}
-            for name, pick in seqs.items():
-                again_paths[name] = paths[name] + ".divergent"
-                adb.write_fasta(again_paths[name], (
-                    (f"p{k}", pick(x, y)) for k, (x, y, _n) in
-                    enumerate(centroids) if f"p{k}" in redo and pick(x, y)))
-            again = map_windows(mm, index, again_paths, extra, SR_DIVERGENT)
-            for name in paths:
-                for q in redo:
-                    hits[name].pop(q, None)
-                    if q in again[name]:
-                        hits[name][q] = again[name][q]
-        fate["remapped"] = sum(centroids[int(q[1:])][2] for q in redo)
-        if exact:
-            # Every record either window proposed, scored exactly over
-            # its span with both windows (adb.span_scores): a pair is one
-            # sequence with a gap in it, and a record that minimap2 saw
-            # through one window only is still scored on both.
-            cands = {}
-            for k, (x, y, _n) in enumerate(centroids):
-                q = f"p{k}"
-                hs = [h for name in (("r1", "r2") if y else ("full",))
-                      for h in hits[name].get(q, {}).values()
-                      if h["strand"] == ("-" if name == "r2" else "+")]
-                if y:
-                    # Ranked on both windows together: matches over the
-                    # aligned blocks (a window's record runs past it, so
-                    # the record's unaligned ends say nothing), then score.
-                    both: dict = defaultdict(lambda: [0, 0, 0])
-                    for h in hs:
-                        b = both[h["t"]]
-                        b[0] += h["match"]
-                        b[1] += h["alen"]
-                        b[2] += h["AS"]
-                    hs = [{"t": t, "ident": m / max(1, a), "AS": sc}
-                          for t, (m, a, sc) in both.items()]
-                cands[k] = adb.span_candidates(hs)
-            need = {t for ts in cands.values() for t in ts}
-            recs = {i: s for i, s in adb.read_fasta(
-                os.path.join(args.database, "refdb.fasta")) if i in need}
-            for k, (x, y, _n) in enumerate(centroids):
-                parts = [(x, "start"), (revcomp(y), "end")] if y else \
-                    [(x, "whole")]
-                scorable = len(x) + max(0, len(y) - tail) if y else \
-                    len(x) - tail
-                calls[k] = adb.span_call(
-                    adb.span_scores(parts, cands[k], recs, tail), tax, rule,
-                    floors, args.gap_edits, scorable, args.min_species_span)
-        for k, (x, y, _n) in enumerate(centroids if not exact else []):
-            q = f"p{k}"
-            if not y:
-                calls[k] = adb.classify_hits(
-                    [h for h in hits["full"].get(q, {}).values()
-                     if h["strand"] == "+"], tax, floors, args.lca_margin)
-                continue
-            joined = []
-            a_hits, b_hits = hits["r1"].get(q, {}), hits["r2"].get(q, {})
-            for t, h1 in a_hits.items():
-                h2 = b_hits.get(t)
-                # The shape a pair has on its insert: R1 forward from the
-                # start, R2 reverse back from the end.
-                if h2 is None or h1["strand"] != "+" or h2["strand"] != "-":
-                    continue
-                if h1["ts"] > 30 or h2["tlen"] - h2["te"] > 30:
-                    continue
-                c1 = h1["qs"] + h1["qlen"] - h1["qe"]
-                c2 = h2["qs"] + h2["qlen"] - h2["qe"]
-                joined.append({
-                    "t": t, "AS": h1["AS"] + h2["AS"],
-                    "match": h1["match"] + h2["match"],
-                    "alen": h1["alen"] + h2["alen"],
-                    "qlen": h1["qlen"] + h2["qlen"], "qs": c1 + c2,
-                    "qe": h1["qlen"] + h2["qlen"]})
-            if joined:
-                calls[k] = adb.classify_hits(joined, tax, floors,
-                                             args.lca_margin)
-                continue
-            # No record carries both windows in a pair's shape: the two
-            # halves point at different records (a chimera, or a lineage
-            # the database has only parts of). Each window is classified
-            # alone and the call is their LCA, at the lower identity - it
-            # can say no more than both halves agree on.
-            one = [adb.classify_hits(list(hs.values()), tax, floors,
-                                     args.lca_margin)
-                   for hs in (a_hits, b_hits) if hs]
-            if len(one) < 2:
-                calls[k] = one[0] if one else adb.classify_hits(
-                    [], tax, floors, args.lca_margin)
-                calls[k]["split_mates"] = True
-                continue
-            lin = [tax.get(c["best_hit"], {}) for c in one]
-            depth = -1
-            for di, r in enumerate(ranks):
-                if di <= min(c["depth"] for c in one) and lin[0].get(r) \
-                        and lin[0].get(r) == lin[1].get(r):
-                    depth = di
-                else:
-                    break
-            worse = min(one, key=lambda c: c["identity"])
-            calls[k] = {**worse, "depth": depth,
-                        "rank": ranks[depth] if depth >= 0 else "",
-                        "lca_depth": depth, "split_mates": True,
-                        # Each window's own call, for the label: two
-                        # windows that disagree below what they share
-                        # are usually a chimera or an artefact.
-                        "windows": [(c["best_hit"], c["identity"],
-                                     c["depth"]) for c in one]}
-        # Identity from a full alignment of the windows to the best
-        # record, where that is higher than minimap2's: -x sr clips a
-        # divergent end and identity() charges all of it
-        # (adb.aligned_identity). Joined pairs and whole inserts only; a
-        # pair whose windows disagree has no one record to align to.
-        need = set() if exact else {
-            c["best_hit"] for c in calls.values()
-            if c["best_hit"] and not c.get("split_mates")}
-        need |= {h for c in calls.values() for h, _i, _d in
-                 c.get("windows") or [] if h}
-        if not exact:
-            recs = {i: s for i, s in adb.read_fasta(
-                os.path.join(args.database, "refdb.fasta")) if i in need}
-        for k, (x, y, _n) in enumerate(centroids if not exact else []):
-            c = calls.get(k)
-            if c and c.get("windows") and len(c["windows"]) == 2:
-                # Each window against its own best record, so the label's
-                # "R1 NN%" is not minimap2's clipped figure: a gregarine
-                # R1 read "37%" where it aligns 74% end to end.
-                ws = []
-                for (h, i, dd), part in zip(c["windows"], ((x, "start"),
-                                                           (revcomp(y), "end"))):
-                    v = adb.aligned_identity([part], recs.get(h, ""), 0.5) \
-                        if recs.get(h) else None
-                    ws.append((h, max(i, v or 0.0), dd))
-                calls[k] = {**c, "windows": ws,
-                            "identity": min(w[1] for w in ws)}
-            if not c or c.get("split_mates"):
-                continue
-            parts = [(x, "start"), (revcomp(y), "end")] if y else \
-                [(x, "whole")]
-            calls[k] = adb.refine_identity(c, parts,
-                                           recs.get(c["best_hit"]), floors,
-                                           ranks)
+        # The protocol's step: map, classify, refine.
+        ctx = SimpleNamespace(mm=mm, index=index, tmp=tmp, tax=tax,
+                              ranks=ranks, rule=rule, floors=floors,
+                              args=args, tail=tail,
+                              db_fasta=os.path.join(args.database,
+                                                    "refdb.fasta"))
+        calls, fate["remapped"] = proto.classify_pairs(ctx, centroids)
         mm_version = mm.version()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -813,47 +562,8 @@ def main(argv=None) -> int:
             "database_version": version,
             # The insert as far as it was read, gap marked by Ns.
             "consensus": x + ("N" * 10 + revcomp(y) if y else ""),
-            **(adb.span_columns(call, tax) if exact else {}),
+            **proto.column_values(call, tax),
         })
-    cols = ["sample_id", "cluster", "reads", "rel_abundance", "rank", "taxon",
-            "label", "identity", "coverage", "lineage", "best_hit",
-            "best_hit_lineage", "near_hits", "lca_rank", "db_resolution",
-            "db_margin", "origin", "merged", "chimera_of", "length",
-            "database_version", "consensus"] + (
-                adb.SPAN_COLUMNS if exact else [])
-    with open(os.path.join(args.outdir, f"{sid}.clusters.tsv"), "w",
-              encoding="utf-8") as fh:
-        w = writer(fh, cols)
-        w.writeheader()
-        w.writerows(rows)
-    with open(os.path.join(args.outdir, f"{sid}.consensus.fasta"), "w",
-              encoding="utf-8") as fh:
-        for r in rows:
-            fh.write(f">{r['cluster']} reads={r['reads']} rank={r['rank'] or 'none'} "
-                     f"taxon={r['taxon'] or 'none'} identity={r['identity']}\n"
-                     f"{r['consensus']}\n")
-    agg: dict = {}
-    for r in rows:
-        a = agg.setdefault((r["rank"], r["taxon"], r["label"]),
-                           {"reads": 0, "clusters": 0, "identity": 0.0,
-                            "lineage": r["lineage"]})
-        a["reads"] += r["reads"]
-        a["clusters"] += 1
-        a["identity"] = max(a["identity"], float(r["identity"]))
-    with open(os.path.join(args.outdir, f"{sid}.taxa.tsv"), "w",
-              encoding="utf-8") as fh:
-        w = writer(fh, ["sample_id", "rank", "taxon", "label", "reads",
-                        "rel_abundance", "clusters", "best_identity",
-                        "lineage", "database_version"])
-        w.writeheader()
-        for (rank, taxon, label), a in sorted(agg.items(),
-                                              key=lambda kv: -kv[1]["reads"]):
-            w.writerow({"sample_id": sid, "rank": rank, "taxon": taxon,
-                        "label": label, "reads": a["reads"],
-                        "rel_abundance": f"{a['reads'] / total:.6f}" if total else "",
-                        "clusters": a["clusters"],
-                        "best_identity": f"{a['identity']:.4f}",
-                        "lineage": a["lineage"], "database_version": version})
     summary = {
         "sample_id": sid, "mode": "database", "platform": "illumina",
         "database": {"version": version, "name": man.get("name", ""),
@@ -863,15 +573,13 @@ def main(argv=None) -> int:
         "reads": {k: fate.get(k, 0) for k in
                   ("reads_in", "no_primer", "too_short", "low_quality",
                    "clustered", "unclustered", "whole_insert")
-                  + (("merged",) if exact else ())},
+                  + proto.pair_fates},
         "reads_note": (
             "Read pairs. reads_in = no_primer + too_short + low_quality + "
             "clustered + unclustered; whole_insert counts the pairs (within "
             "clustered or unclustered) whose insert was shorter than R1. "
             "rel_abundance is over clustered pairs: relative 18S abundance."
-            + (" merged counts the pairs (within clustered or unclustered) "
-               "whose mates overlapped and were merged into the insert."
-               if exact else "")),
+            + proto.pair_note),
         # Pairs whose windows -x sr could not align end to end, mapped
         # again with softer penalties (SR_DIVERGENT).
         "remapped_divergent": fate.get("remapped", 0),
@@ -893,17 +601,14 @@ def main(argv=None) -> int:
                      else "1.5% of length, at least 3",
                      "alpha": args.alpha, "floors": floors,
                      "lca_margin": args.lca_margin,
-                     **({"read_windows": [rw1, rw2],
-                         "primer_offset": args.primer_offset}
-                        if exact or args.primer_offset else {}),
-                     **adb.calling_settings(exact, rule, args),
+                     **proto.window_settings(rw1, rw2, args),
+                     **proto.calling_settings(rule, args),
                      "resolution_table": os.path.basename(rpath)
                      if resolution else ""},
         "rank_reached": dict(Counter(r["rank"] or "none" for r in rows)),
     }
-    with open(os.path.join(args.outdir, f"{sid}.assign_db.json"), "w",
-              encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
+    write_assignment(args.outdir, sid, rows, proto.extra_columns, version,
+                     summary)
     print(f"{sid}: {fate['reads_in']} pairs, {len(rows)} sequences, "
           f"{fate['clustered']} clustered, {unclustered} unclustered, "
           f"{summary['elapsed_s']} s")
