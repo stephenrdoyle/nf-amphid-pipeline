@@ -329,6 +329,26 @@ def test_homopolymer_merge() -> None:
           far in {x["consensus"] for x in m})
 
 
+def test_exact_support() -> None:
+    print("\ndropping consensus sequences no read supports")
+    with tempfile.TemporaryDirectory() as tmp:
+        fa = os.path.join(tmp, "r.fa")
+        al.write_fasta(fa, [("r1", "ACGTACGTTT"), ("r2", "ACGTACGAAA"),
+                            ("r3", "ACGTAAAA"), ("r4", "TTTT")])
+        ex = adb.exact_reads(fa, ["ACGTACG", "ACGTACGTT", "GGGG"])
+    check("a read counts to the longest consensus it begins with",
+          ex == {1: 1, 0: 1}, str(dict(ex)))
+    counts = {0: 1000, 1: 120, 2: 100, 3: 6}
+    exact = {0: 400, 1: 40, 2: 3, 3: 0}
+    drop = adb.unsupported(counts, exact, 1 / 3, 1e-3)
+    check("a consensus read exactly at the sample's rate stays, one read "
+          "exactly by 3% is dropped", drop == {2}, str(drop))
+    check("a 6-read consensus with no exact read cannot be shown "
+          "unsupported, so it stays", 3 not in drop)
+    check("no exact reads at all (a noisy run): nothing is dropped",
+          adb.unsupported({0: 100, 1: 50}, {}, 1 / 3, 1e-3) == set())
+
+
 def _tax():
     lin = {
         "A1": "E;S;D;SD;C;O;F1;G1;G1_a",
@@ -756,6 +776,7 @@ def main() -> int:
     test_linkage_signature()
     test_merge()
     test_homopolymer_merge()
+    test_exact_support()
     test_lca_and_floors()
     test_floor_parsing()
     test_trim_reads()
