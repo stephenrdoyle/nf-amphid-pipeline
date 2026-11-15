@@ -289,6 +289,45 @@ def test_homopolymer_merge() -> None:
     check("merge_close carries the weight of what it merges",
           m[0]["weight"] == 13.0)
 
+    print("\ncorrecting run lengths toward a larger consensus")
+    sub2 = a[:200] + ("A" if a[200] != "A" else "C") + a[201:]
+    hap_hp = stretch(sub, runs_at[20], 1)           # haplotype + CCS indel
+    hap2_hp = stretch(stretch(sub2, runs_at[20], 1), runs_at[5], 1)
+    fixed, k = adb.correct_runs(hap_hp, a, 8)
+    check("a haplotype's homopolymer indel is undone, its substitution kept",
+          fixed == sub and k == 1)
+    lone = runs_at[10] + 3
+    while a[lone] in (a[lone - 1], a[lone + 1]):
+        lone += 1
+    odd = stretch(a[:lone] + a[lone + 1:], runs_at[5], 1)  # a lone base lost
+    check("an indel outside a run leaves the whole consensus as it is",
+          adb.correct_runs(odd, a, 8) == (odd, 0))
+    m = adb.correct_homopolymer(
+        [cl(a, 200, "a"), cl(hap2_hp, 20, "h")], 4, 4.0, 8)
+    got = {x["consensus"]: x for x in m}
+    check("the corrected haplotype stays its own consensus",
+          len(m) == 2 and sub2 in got and got[sub2]["corrected"] == 2,
+          str([(len(x["reads"]), x.get("corrected")) for x in m]))
+    m = adb.correct_homopolymer(
+        [cl(a, 200, "a"), cl(sub, 30, "s"), cl(hap_hp, 5, "t")], 4, 4.0, 8)
+    got = {x["consensus"]: (len(x["reads"]), x["merged"]) for x in m}
+    check("corrected into a haplotype already there, it joins it",
+          len(m) == 2 and got.get(sub) == (35, 1), str(got))
+    known = {**cl(hap2_hp, 20, "h"), "known": True}
+    m = adb.correct_homopolymer([cl(a, 200, "a"), known], 4, 4.0, 8)
+    check("a consensus that is its database record keeps its run lengths",
+          hap2_hp in {x["consensus"] for x in m})
+    m = adb.correct_homopolymer(
+        [cl(a, 60, "a"), cl(hap_hp, 20, "h")], 4, 4.0, 8)
+    check("below the abundance ratio nothing is corrected",
+          {x["consensus"] for x in m} == {a, hap_hp})
+    far = stretch(stretch(stretch(sub2, runs_at[30], 2), runs_at[20], 2),
+                  runs_at[5], 1)
+    m = adb.correct_homopolymer([cl(a, 200, "a"), cl(far, 10, "f")],
+                                4, 4.0, 8)
+    check("more than max_edits run-length changes: left as it is",
+          far in {x["consensus"] for x in m})
+
 
 def _tax():
     lin = {

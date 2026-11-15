@@ -200,23 +200,32 @@ enabled on what was measured:
     bin/assign_db.py: a consensus whose bases equal a larger one's once
     runs are collapsed, run lengths 4 or fewer bases apart in total, and
     the larger standing for 4 or more times its reads). On the same
-    reads it absorbed 152 consensus sequences:
+    reads it absorbed 152 consensus sequences ("merge" below). Most of
+    what then still stopped at genus was a consensus differing from the
+    sample's main *H. contortus* by one or two substitutions (a real
+    haplotype) and also by one or two homopolymer indels. So a smaller
+    consensus is then given the run lengths of the nearest larger one
+    (4x its reads, within 8 edits) when every indel between them is a
+    run length - the base in a run of two or more in the sequence that
+    has it - keeping its substitutions (`correct_homopolymer`; "+
+    correct" below, 294 consensus sequences corrected). Where any indel
+    is not a run length nothing is corrected: allowing those moved as
+    many reads' consensus away from the ASVs as towards them, and lost
+    304 sample-ASV pairs. Nor is a consensus that is its group's
+    database record: a run length a record carries is not a read error
+    (without this, one consensus identical to an ASV, TTT where a 6x
+    larger neighbour had TT, was corrected away).
 
-    | S-BSST527 | before | after | DADA2 |
-    |---|---|---|---|
-    | clustered reads named to species | 94.55% | 94.90% | 99.28% |
-    | *Haemonchus* at genus, study-wide (paper filter) | 4.09% | 3.75% | 0.03% |
-    | *H. contortus*, study-wide | 60.81% | 61.15% | 64.49% |
-    | reads naming another species than the nearest ASV | 5 | 5 | |
-    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | |
-    | sample-ASV pairs with an identical consensus | 1604 | 1604 (none lost) | |
-    | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | |
+    | S-BSST527 | before | merge | + correct | DADA2 |
+    |---|---|---|---|---|
+    | clustered reads named to species | 94.55% | 94.90% | 96.36% | 99.28% |
+    | *Haemonchus* at genus, study-wide (paper filter) | 4.09% | 3.75% | 2.26% | 0.03% |
+    | *H. contortus*, study-wide | 60.81% | 61.15% | 62.63% | 64.49% |
+    | reads naming another species than the nearest ASV | 5 | 5 | 5 | |
+    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | 92.02% | |
+    | sample-ASV pairs with an identical consensus | 1604 | 1604 | 1611 (7 gained, none lost) | |
+    | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | 0.014 / 0.078 | |
 
-    Most of what still stops at genus is not a pure homopolymer copy: a
-    consensus differing from the sample's main *H. contortus* by one or
-    two substitutions (a real haplotype) and also by one or two
-    homopolymer indels, which a substitution rightly keeps apart. Of
-    the pure copies left (2,465 reads), most are under the 4x ratio.
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the

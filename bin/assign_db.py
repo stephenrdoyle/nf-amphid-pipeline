@@ -53,7 +53,11 @@ So, per sample:
      absorb a consensus that differs from a much larger one only in the
      lengths of a few homopolymer runs (merge_homopolymer): CCS errors
      are homopolymer indels, reads that share one map to the same
-     database record, and that group's consensus copies the error.
+     database record, and that group's consensus copies the error. Then
+     give a smaller consensus the run lengths of the nearest much larger
+     one where they differ only by such indels and substitutions
+     (correct_homopolymer): a real haplotype whose group shared a CCS
+     indel keeps its substitutions and loses the indel.
   6. Count reads per consensus by mapping every read to the final set, so
      reads from groups too small for a consensus of their own are counted
      too - or left unclustered, if they fit their own database hit better
@@ -392,6 +396,9 @@ def merge_close(clusters: list[dict], max_edits: int) -> list[dict]:
 # - its homopolymer errors are spread over every read of a group, not
 # gathered into groups of their own, and its floors were set without this.
 HOMOPOLYMER_MERGE = {"single_long_accurate": (4, 4.0)}
+# ... and how far (edits) a smaller consensus may be from the larger one
+# whose run lengths correct_homopolymer gives it; 0: no correction.
+HOMOPOLYMER_REACH = {"single_long_accurate": 8}
 
 
 def runs(seq: str) -> tuple[str, list[int]]:
@@ -438,6 +445,109 @@ def merge_homopolymer(clusters: list[dict], max_edits: int,
                 m["merged"] += c["merged"] + 1
                 m["weight"] += c["weight"]
                 break
+        else:
+            out.append(c)
+    return out
+
+
+def align_ops(a: str, b: str, band: int) -> list[tuple[str, int, int]]:
+    """A global unit-cost alignment of a to b within a diagonal band, as its
+    edits: ('S', i, j) a[i] for b[j]; ('I', i, j) a[i] not in b, before
+    b[j]; ('D', i, j) b[j] not in a, before a[i]. Empty when a == b."""
+    n, m = len(a), len(b)
+    band = max(band, abs(n - m)) + 1
+    INF = n + m + 1
+    D = [dict() for _ in range(n + 1)]
+    for j in range(0, min(m, band) + 1):
+        D[0][j] = j
+    for i in range(1, n + 1):
+        Di, Dp = D[i], D[i - 1]
+        for j in range(max(0, i - band), min(m, i + band) + 1):
+            best = Dp.get(j, INF) + 1
+            if j:
+                best = min(best, Dp.get(j - 1, INF) + (a[i - 1] != b[j - 1]),
+                           Di.get(j - 1, INF) + 1)
+            Di[j] = best
+    ops = []
+    i, j = n, m
+    while i or j:
+        here = D[i].get(j, INF)
+        if i and j and here == D[i - 1].get(j - 1, INF) + (a[i - 1] != b[j - 1]):
+            if a[i - 1] != b[j - 1]:
+                ops.append(("S", i - 1, j - 1))
+            i, j = i - 1, j - 1
+        elif i and here == D[i - 1].get(j, INF) + 1:
+            ops.append(("I", i - 1, j))
+            i -= 1
+        else:
+            ops.append(("D", i, j - 1))
+            j -= 1
+    return ops[::-1]
+
+
+def correct_runs(a: str, b: str, band: int) -> tuple[str, int]:
+    """a with the homopolymer-length indels between it and b undone - each
+    run they share takes b's length - and its substitutions kept; with how
+    many bases were changed. Only when every indel between them is such a
+    run length: the base gained or lost sits in a run of two or more in
+    the sequence that has it, beside the same base in the other. Any other
+    indel leaves a as it is. On S-BSST527, a looser rule (beside the same
+    base in the other sequence only, which is how an alignment places an
+    indel next to a substitution) moved as many reads' consensus away from
+    DADA2's ASVs as towards them."""
+    ins, dels = set(), {}
+    for op, i, j in align_ops(a, b, band):
+        if op == "S":
+            continue
+        if op == "I" and in_homopolymer(a, i) and (
+                (j < len(b) and b[j] == a[i]) or (j > 0 and b[j - 1] == a[i])):
+            ins.add(i)
+        elif op == "D" and in_homopolymer(b, j) and (
+                (i < len(a) and a[i] == b[j]) or (i > 0 and a[i - 1] == b[j])):
+            dels.setdefault(i, []).append(b[j])
+        else:
+            return a, 0
+    out = []
+    for i, x in enumerate(a):
+        out.extend(dels.get(i, ()))
+        if i not in ins:
+            out.append(x)
+    out.extend(dels.get(len(a), ()))
+    return "".join(out), len(ins) + sum(map(len, dels.values()))
+
+
+def correct_homopolymer(clusters: list[dict], max_edits: int,
+                        min_ratio: float, reach: int) -> list[dict]:
+    """Undo, in a smaller consensus, the homopolymer-length indels that set
+    it apart from the nearest much larger one (at least min_ratio times
+    its reads, within reach edits), keeping its substitutions: a real
+    haplotype whose group shared a CCS indel. At most max_edits bases are
+    changed. A consensus corrected into one already present joins it.
+    A "known" consensus - its group's database record, over the record's
+    span - is left as it is: a run length a record carries is not a read
+    error. (On S-BSST527 that kept a consensus identical to a DADA2 ASV
+    whose TTT a 6x larger neighbour had as TT.)"""
+    out: list[dict] = []
+    for c in sorted(clusters, key=lambda x: (-x["weight"], x["consensus"])):
+        q = c["consensus"]
+        near = None
+        for m in out:
+            if m["weight"] < min_ratio * c["weight"]:
+                continue
+            d = bounded_edit(q, m["consensus"], reach)
+            if d <= reach and (near is None or d < near[0]):
+                near = (d, m)
+        if near and not c.get("known"):
+            fixed, k = correct_runs(q, near[1]["consensus"], reach)
+            if 0 < k <= max_edits:
+                c = {**c, "consensus": fixed,
+                     "corrected": c.get("corrected", 0) + k}
+        same = next((m for m in out if m["consensus"] == c["consensus"]),
+                    None)
+        if same:
+            same["reads"].extend(c["reads"])
+            same["merged"] += c["merged"] + 1
+            same["weight"] += c["weight"]
         else:
             out.append(c)
     return out
@@ -816,6 +926,12 @@ def main(argv=None) -> int:
                     "(0: never). Default by read type: "
                     + ", ".join(f"{k} {v[0]}" for k, v in
                                 HOMOPOLYMER_MERGE.items()) + ", else 0")
+    ap.add_argument("--homopolymer-correct-reach", type=int,
+                    help="give a smaller consensus the run lengths of a "
+                    "larger one within this many edits, keeping its other "
+                    "differences (0: never). Default by read type: "
+                    + ", ".join(f"{k} {v}" for k, v in
+                                HOMOPOLYMER_REACH.items()) + ", else 0")
     ap.add_argument("--homopolymer-merge-ratio", type=float,
                     help="...when the larger has at least this many times "
                     "its reads. Default by read type: "
@@ -871,6 +987,9 @@ def main(argv=None) -> int:
         hp_edits = args.homopolymer_merge_edits
     if args.homopolymer_merge_ratio is not None:
         hp_ratio = args.homopolymer_merge_ratio
+    hp_reach = HOMOPOLYMER_REACH.get(args.read_type, 0) \
+        if args.homopolymer_correct_reach is None \
+        else args.homopolymer_correct_reach
     mm = Minimap2(args.minimap2, args.threads)
 
     primers = load_primers(args.primers)
@@ -878,7 +997,7 @@ def main(argv=None) -> int:
     fate: Counter = Counter()
     tmp = tempfile.mkdtemp(prefix=f"assign_db_{sid}_", dir=args.outdir)
     clusters: list[dict] = []
-    hp_merges = 0
+    hp_merges = hp_corrected = 0
     # Per read, only the alignment score of its primary database hit: the
     # one field used later (recruitment, below). A deep well holds millions
     # of these, so a full hit record each was the bulk of its memory.
@@ -928,12 +1047,18 @@ def main(argv=None) -> int:
             for c in cb.resolve(qs, refseq[t]):
                 c["group"] = t
                 c["weight"] = len(c["reads"]) * scale[t]
+                c["known"] = refseq[t] in c["consensus"]
                 built.append(c)
         clusters = merge_close(built, st.merge_edits)
         if hp_edits > 0:
             n_built = len(clusters)
             clusters = merge_homopolymer(clusters, hp_edits, hp_ratio)
             hp_merges = n_built - len(clusters)
+            if hp_reach > 0:
+                clusters = correct_homopolymer(clusters, hp_edits, hp_ratio,
+                                               hp_reach)
+                hp_corrected = sum(1 for c in clusters if c.get("corrected"))
+                hp_merges = n_built - len(clusters)
 
         # Count every read against the final set.
         # Each read is decided on its first primary hit as it streams
@@ -1057,12 +1182,16 @@ def main(argv=None) -> int:
         "minimap2_calls": mm.calls,
         # Only where it ran, so other read types' summaries are unchanged.
         **({"homopolymer_merges": hp_merges} if hp_edits > 0 else {}),
+        **({"homopolymer_corrected": hp_corrected}
+           if hp_edits > 0 and hp_reach > 0 else {}),
         "settings": {**st.as_dict(), "floors": floors,
                      "lca_margin": args.lca_margin,
                      "recruit_margin": args.recruit_margin,
                      "index_args": INDEX_ARGS,
                      **({"homopolymer_merge_edits": hp_edits,
-                         "homopolymer_merge_ratio": hp_ratio}
+                         "homopolymer_merge_ratio": hp_ratio,
+                         **({"homopolymer_correct_reach": hp_reach}
+                            if hp_reach > 0 else {})}
                         if hp_edits > 0 else {}),
                      **proto.calling_settings(rule, args)},
         "rank_reached": dict(Counter(r["rank"] or "none" for r in rows)),
