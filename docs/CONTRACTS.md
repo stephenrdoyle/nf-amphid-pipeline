@@ -395,8 +395,8 @@ clusters.tsv's `reads`.
 
 `settings` records what the protocol was run with; a protocol adds its
 own keys (`nemits2`: `score_over`, `calling_rule`, `gap_edits`,
-`min_span`, `min_species_span`, `span_slack`, `read_windows`,
-`primer_offset`).
+`gap_exact`, `tentative_identity`, `repeat_aware`, `min_span`,
+`min_species_span`, `span_slack`, `read_windows`, `primer_offset`).
 
 ### `synthesis/db_calls.tsv`
 

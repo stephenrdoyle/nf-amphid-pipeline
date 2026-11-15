@@ -940,6 +940,10 @@ def add_calling_args(ap) -> None:
                     help="under the tiered rule, the identity at which a "
                     "species the gap rule stops at genus is named, flagged "
                     "tentative (the gap must be as clear)")
+    ap.add_argument("--no-repeats", action="store_true",
+                    help="span-scored releases: score simple repeats base by "
+                    "base, not by copy number (repeat-aware scoring is the "
+                    "release's default)")
     ap.add_argument("--min-species-span", type=int, default=MIN_SPAN,
                     help="record bases a span-scored species call must rest "
                     f"on (default {MIN_SPAN}, the least any record must "

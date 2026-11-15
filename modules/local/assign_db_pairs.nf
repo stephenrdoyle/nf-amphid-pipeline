@@ -49,6 +49,7 @@ process ASSIGN_DB_PAIRS {
         --gap-edits ${params.db_gap_edits} \\
         --gap-exact ${params.db_gap_exact} \\
         --tentative-identity ${params.db_tentative_identity} \\
+        ${params.db_repeat_aware ? '' : '--no-repeats'} \\
         --min-species-span ${params.db_min_species_span} \\
         --primer-offset ${params.db_primer_offset} \\
         --outdir assign_db
