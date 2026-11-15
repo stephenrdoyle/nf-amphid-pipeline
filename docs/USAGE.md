@@ -565,11 +565,12 @@ tests, which run on macOS.
 ITS2 v0.2.0) the calls agree with a DADA2 analysis of the same reads:
 per-sample compositions differ by a median Bray-Curtis of 0.024, and
 study-wide species shares are within 0.4 points but for *Haemonchus
-contortus*, of which 3.8% of reads stop at genus - consensus sequences
+contortus*, of which 2.3% of reads stop at genus - consensus sequences
 of small groups of reads that share homopolymer indels, safe but less
-resolved. Copies of a much larger consensus that differ from it only in
-homopolymer run lengths are absorbed into it (4.1% at genus before);
-what remains are mostly real haplotypes that also carry such an indel. On simulated HiFi, vespa's floors make the same calls as on
+resolved. A consensus that differs from a much larger one only in
+homopolymer run lengths is absorbed into it, and one that also differs
+by substitutions (a real haplotype) takes the larger one's run lengths
+and keeps its substitutions (4.1% at genus without either). On simulated HiFi, vespa's floors make the same calls as on
 nanopore. docs/CONTRACTS.md (Read types) has the measurements.
 
 ---
