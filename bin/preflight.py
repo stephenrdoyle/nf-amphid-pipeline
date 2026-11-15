@@ -69,9 +69,10 @@ SAMPLE_TYPES = {"unknown", "neg_extraction", "neg_ntc", "mock", "pos_control"}
 # Where a run's per-sample reads come from (docs/CONTRACTS.md, layer 1).
 # predemultiplexed: any platform whose per-sample FASTQs already exist
 # (lima, Dorado, a sequencing centre), resolved like Illumina but one
-# read per molecule; database mode only. pacbio, with a demultiplexer of
-# its own, is the next adapter.
-PLATFORMS = {"illumina", "nanopore", "predemultiplexed"}
+# read per molecule; database mode only. pacbio: a library's CCS/HiFi
+# reads, demultiplexed here by the tags the samplesheet gives
+# (bin/demux_pacbio.py, or lima); database mode only.
+PLATFORMS = {"illumina", "nanopore", "predemultiplexed", "pacbio"}
 # The read type each platform delivers (contract A). A predemultiplexed
 # run says which in runs.tsv's read_type column; single_long_noisy when
 # it does not.
@@ -79,6 +80,7 @@ PLATFORM_READ_TYPES = {
     "illumina": ("paired_short",),
     "nanopore": ("single_long_noisy",),
     "predemultiplexed": ("single_long_noisy", "single_long_accurate"),
+    "pacbio": ("single_long_accurate",),
 }
 
 IUPAC = set("ACGTRYSWKMBDHVN")
@@ -2609,6 +2611,9 @@ def resolve_against(manifest: str, value: str, base: str = "") -> str:
 PATH_BASE = ""
 
 
+PACBIO_SUFFIXES = FASTQ_SUFFIXES + (".bam",)
+
+
 def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
     rows = read_table(path, diag, "run manifest")
     if not require_columns(rows, {"run_id", "platform", "path"}, diag, "run manifest"):
@@ -2667,6 +2672,12 @@ def parse_runs(path: str, diag: Diagnostics) -> dict[str, Run]:
         row["path"] = resolve_against(path, row["path"], PATH_BASE)
         if not os.path.exists(row["path"]):
             diag.error(f"run manifest '{rid}': path does not exist: {row['path']}")
+        elif platform == "pacbio" and os.path.isfile(row["path"]) and \
+                not row["path"].lower().endswith(PACBIO_SUFFIXES):
+            diag.error(
+                f"run manifest '{rid}': {row['path']} is not a FASTQ or BAM. "
+                "A PacBio run's path is the library's reads: a FASTQ or "
+                "unaligned BAM, or a directory of them (one library)")
         elif platform == "predemultiplexed" and not os.path.isdir(row["path"]):
             diag.error(
                 f"run manifest '{rid}': path is a file, not a directory: "
@@ -2955,6 +2966,12 @@ def parse_samplesheet(
                         "nanopore - the index pair is the demultiplexing key, "
                         "not metadata"
                     )
+                elif s.platform == "pacbio":
+                    diag.error(
+                        f"samplesheet '{s.sample_id}': {label} is required for "
+                        "pacbio - the "
+                        + ("forward" if label == "index_i5" else "reverse")
+                        + " tag is half the demultiplexing key")
                 elif s.platform == "predemultiplexed":
                     diag.warn(
                         f"samplesheet '{s.sample_id}': {label} is not recorded. "
@@ -2977,6 +2994,11 @@ def parse_samplesheet(
                     f"character(s): {''.join(sorted(bad))}"
                 )
             table = im.i7 if label == "index_i7" else im.i5
+            if s.platform == "pacbio":
+                # A PacBio tag set is the library's own, not the index
+                # primer set the map describes: a tag in the map gives a
+                # plate position, one that is not is no fault.
+                continue
             if table and seq not in table:
                 # i5 is written in two orientations depending on the
                 # instrument's chemistry (forward-strand vs reverse-
@@ -3000,6 +3022,28 @@ def parse_samplesheet(
         rc = im.row_col(s.index_i7, s.index_i5)
         if rc:
             s.plate_row, s.plate_col = rc
+
+    # -- PacBio: the tags are the key, and give a plate position only
+    # where the index map has both ---------------------------------------
+    unplaced: dict[str, int] = Counter()
+    pairs: dict[tuple, list[str]] = defaultdict(list)
+    for s in samples:
+        if s.platform != "pacbio" or not (s.index_i5 and s.index_i7):
+            continue
+        pairs[(s.run_id, s.index_i5, s.index_i7)].append(s.sample_id)
+        if not s.well:
+            unplaced[s.run_id] += 1
+    for (rid, a, b), ids in pairs.items():
+        if len(ids) > 1:
+            diag.error(
+                f"run '{rid}': forward tag {a} with reverse tag {b} is "
+                f"declared for {len(ids)} samples ({', '.join(ids)}) - a "
+                "read carrying them could belong to any of them")
+    for rid, n in unplaced.items():
+        diag.info(
+            f"run '{rid}': {n} PacBio sample(s) have tags the index map "
+            "does not list, so no plate position: the misassignment model "
+            "and the plate-position tests leave them out")
 
     # -- one sample per well ---------------------------------------------
     wells: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -3571,9 +3615,9 @@ def main(argv: list[str] | None = None) -> int:
     # Illumina branch merges pairs and its nanopore branch demultiplexes.
     if not database:
         for r in runs.values():
-            if r.platform == "predemultiplexed":
+            if r.platform in ("predemultiplexed", "pacbio"):
                 diag.error(
-                    f"run manifest '{r.run_id}': predemultiplexed runs are "
+                    f"run manifest '{r.run_id}': {r.platform} runs are "
                     "database mode only (--reference_database) for now")
 
     # -- reference panel --------------------------------------------------

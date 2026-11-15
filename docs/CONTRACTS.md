@@ -10,9 +10,10 @@ and neither touches synthesis or the report.
  get each sample's reads      primer trimming -> calls          synthesis, report
 
  illumina ──────┐                                           ┌── synthesise_db.py
- nanopore ──────┼─ CONTRACT A ─► vespa_v4 | nemits2 ─ CONTRACT B ─┤   (blank limits, floors,
- predemultiplexed┘  reads,         (bin/protocols/,       clusters.tsv,  │    misassignment, plate QC)
- (pacbio: next)     read type,      chosen by the         taxa.tsv,      └── report_db.py
+ nanopore ──────┤                                           │   (blank limits, floors,
+ pacbio ────────┼─ CONTRACT A ─► vespa_v4 | nemits2 ─ CONTRACT B ─┤    misassignment, plate QC)
+ predemultiplexed┘  reads,         (bin/protocols/,       clusters.tsv,  └── report_db.py
+                    read type,      chosen by the         taxa.tsv,
                     accounting,     release)              assign_db.json
                     plate
 ```
@@ -35,9 +36,9 @@ what it writes against this document and against the column lists in
 | `illumina` | split per sample by the sequencer | `paired_short` | pre-flight resolves each sample's R1/R2 by `file_prefix` |
 | `nanopore` | as a flow cell's FASTQs | `single_long_noisy` | `split_concatemers.py`, then `demux_ont.py` on the construct the assay JSON describes |
 | `predemultiplexed` | already split per sample, by lima, Dorado or a sequencing centre | `single_long_noisy` (default) or `single_long_accurate` | pre-flight resolves each sample's FASTQ(s) by `file_prefix`, like Illumina but one read per molecule |
-| `pacbio` | (next) | `single_long_accurate` | a built-in symmetric-tag demultiplexer, lima on Linux |
+| `pacbio` | as a library's CCS/HiFi FASTQ or BAM | `single_long_accurate` | `demux_pacbio.py` on the samplesheet's tags (`index_i5` forward, `index_i7` reverse), or lima on Linux read back by it (`--pacbio_demux`) |
 
-`predemultiplexed` is database mode only. Its samples are found under the
+`predemultiplexed` and `pacbio` are database mode only. Its samples are found under the
 run's `path` as `<prefix>.fastq.gz` (or `.fq.gz`, `.fastq`, `.fq`),
 as chunks `<prefix>.*`, `<prefix>_*` or `<prefix>-*` with a FASTQ suffix,
 or as every FASTQ in a folder `<prefix>/` (Dorado and MinKNOW's
@@ -46,13 +47,21 @@ its output `<movie>.<bc>--<bc>`, so a lima run sets `file_prefix` to that.
 Indices may be left blank on a predemultiplexed run; a well without them
 has no plate position (below).
 
+A `pacbio` run is one library: its `path` is the reads (FASTQ or
+unaligned BAM, or a directory of a library's SMRT cells), and only that
+run's tags are matched, since a shared SMRT cell carries other
+libraries'. The adapter writes per-sample FASTQs (tags off, primers on,
+forward primer first), `demux_summary.json` in nanopore's tiers A-D (no
+E: CCS has removed the adapters, so a read is one molecule) and an
+`index_matrix.tsv` of forward x reverse tag pairs. USAGE.md §2.11.
+
 ### Contract A
 
 What every adapter hands the protocol layer, for each run:
 
-1. **Per-sample reads.** One FASTQ per nanopore sample (demultiplexed
-   here); R1 and R2 per Illumina sample; one or more FASTQs per
-   predemultiplexed sample, read as one. Pre-flight's
+1. **Per-sample reads.** One FASTQ per nanopore or PacBio sample
+   (demultiplexed here); R1 and R2 per Illumina sample; one or more
+   FASTQs per predemultiplexed sample, read as one. Pre-flight's
    `file_resolution.tsv` names every file a sample was resolved to.
 2. **The read type**, one of:
 
@@ -76,19 +85,23 @@ What every adapter hands the protocol layer, for each run:
    | `reads_off_instrument` | int or null | reads as they came off the instrument (nanopore: before splitting at internal adapters) |
    | `reads_in` | int or null | reads (units, after splitting) entering demultiplexing |
    | `assigned` | int or null | reads written to a sample |
-   | `fates` | {fate: int} | `assigned`, `one_end_only`, `chimeric`, `unmatched`, `internal_adapter`; `{}` when the adapter cannot know (Illumina, predemultiplexed) |
+   | `fates` | {fate: int} | `assigned`, `one_end_only`, `chimeric`, `unmatched`, and `internal_adapter` where the adapter looks for one (nanopore); `{}` when the adapter cannot know (Illumina, predemultiplexed) |
    | `balanced` | bool or null | whether the fates add up to `reads_in` |
    | `per_sample` | {sample_id: int or null} | reads delivered to each declared sample; null where the adapter did not count them (assignment's `reads_in` then holds the count) |
    | `plate` | {sample_id: {row, col}} | plate position of each well that has one |
    | `native` | {demux, split} | the platform's own summaries, verbatim, or null |
 
-   Null is "not known at this layer", never zero. Synthesis reads the
-   accounting, not a platform's own files: `native` carries the detail a
-   shared fate cannot (nanopore's end reasons, combination grid,
-   basecaller), and the read funnel and plate QC are built from it.
+   Null is "not known at this layer", never zero; a fate the adapter
+   does not have is left out, not zero. Synthesis reads the accounting,
+   not a platform's own files: `native` carries the detail a shared fate
+   cannot (nanopore's end reasons, combination grid, basecaller;
+   PacBio's reasons, per-end matches, tag edits, lima's summary), and
+   the read funnel and plate QC are built from it.
 4. **Plate positions**, where the platform has them: from the index map,
    the i5 giving the row and the i7 the column (`file_resolution.tsv`
-   `plate_row`, `plate_col`, and the accounting's `plate`). The
+   `plate_row`, `plate_col`, and the accounting's `plate`). A PacBio
+   sample has one where its forward tag is an i5 in the map and its
+   reverse tag an i7. The
    misassignment model and the plate-position tests in synthesis need
    them; a well without one is left out of both rather than guessed.
 
@@ -128,8 +141,13 @@ not call by the calling rule asked for, or lacks a release file it reads
 
 | | `paired_short` | `single_long_noisy` | `single_long_accurate` |
 |---|---|---|---|
-| `vespa_v4` | two fixed windows, denoised, pair floors | reference-guided consensus, nanopore floors | not yet: floors not validated on PacBio |
-| `nemits2` | overlapping mates merged, else two windows (R2 with its 28S stretch), span-scored | consensus carrying the 28S stretch, span-scored | not yet: gap rule not validated on PacBio |
+| `vespa_v4` | two fixed windows, denoised, pair floors | reference-guided consensus, nanopore floors | the same consensus route and floors |
+| `nemits2` | overlapping mates merged, else two windows (R2 with its 28S stretch), span-scored | consensus carrying the 28S stretch, span-scored | the same consensus route, span-scored, gap rule |
+
+`single_long_accurate` takes the consensus route unchanged. It was
+enabled on what was measured:
+
+MEASUREMENTS
 
 The routes that call a protocol are `bin/assign_db.py` (single reads:
 trim, map, build and split consensus sequences, then

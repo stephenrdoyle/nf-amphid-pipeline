@@ -7,7 +7,7 @@ each sample's reads, their read type, and this - one JSON per run saying
 where the reads from the instrument went before any sample saw them, in
 fates every platform shares, plus the plate position of each well where
 the platform has one. Synthesis reads it, never a platform's own
-summaries, so a new platform (PacBio next) needs only its adapter.
+summaries, so a new platform needs only its adapter.
 
   illumina          demultiplexed by the sequencer: nothing is known of
                     reads that reached no sample, so reads_in and the
@@ -19,6 +19,11 @@ summaries, so a new platform (PacBio next) needs only its adapter.
   predemultiplexed  demultiplexed upstream (lima, Dorado, a sequencing
                     centre): as Illumina - nothing is known of what it
                     discarded.
+  pacbio            demultiplexed here by the samplesheet's tags
+                    (demux_pacbio.py, or lima read back by it): every
+                    fate but internal_adapter counted, from the same
+                    tiers as nanopore's - CCS has removed the adapters,
+                    so a read is one molecule and there is no tier E.
 
 The platform's own summaries ride along unchanged under "native", for
 the detail a shared fate cannot hold (nanopore's end reasons, the
@@ -46,6 +51,7 @@ DEMULTIPLEXED_BY = {
     "illumina": "the sequencer",
     "nanopore": "amphid (split_concatemers.py, demux_ont.py)",
     "predemultiplexed": "upstream of amphid",
+    "pacbio": "amphid (demux_pacbio.py)",
 }
 
 
@@ -75,7 +81,10 @@ def accounting(run_id: str, platform: str, read_type: str,
     per_sample = {r["sample_id"]: None for r in rows}
     if demux:
         tiers = demux.get("by_tier") or {}
-        fates = {f: int(tiers.get(t, 0)) for f, t in FATES.items()}
+        # The fates the adapter counts: a tier it does not have (PacBio's
+        # E) is not a fate of its reads, rather than zero of them.
+        fates = {f: int(tiers.get(t, 0)) for f, t in FATES.items()
+                 if t in tiers}
         reads_in = demux.get("total_reads")
         assigned = demux.get("assigned_reads", fates["assigned"])
         got = demux.get("per_sample") or {}
@@ -88,7 +97,9 @@ def accounting(run_id: str, platform: str, read_type: str,
         "run_id": run_id,
         "platform": platform,
         "read_type": read_type,
-        "demultiplexed_by": DEMULTIPLEXED_BY.get(platform, platform),
+        # The adapter's own word where it gives one (lima, on PacBio).
+        "demultiplexed_by": (demux or {}).get("demultiplexed_by")
+        or DEMULTIPLEXED_BY.get(platform, platform),
         # Reads off the instrument, where the adapter saw them; on
         # nanopore that is before splitting at internal adapters.
         "reads_off_instrument": (split or {}).get("reads_in", reads_in),
@@ -109,7 +120,8 @@ def main(argv=None) -> int:
                     help="pre-flight's outputs: file_resolution.tsv for the "
                     "samples and plate positions, read_types.tsv for the "
                     "run's platform and read type")
-    ap.add_argument("--demux-summary", help="nanopore: demux_summary.json")
+    ap.add_argument("--demux-summary",
+                    help="nanopore or pacbio: demux_summary.json")
     ap.add_argument("--split-summary", help="nanopore: split_summary.json")
     ap.add_argument("--out", default="demux_accounting.json")
     args = ap.parse_args(argv)

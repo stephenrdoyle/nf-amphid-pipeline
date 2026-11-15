@@ -52,6 +52,8 @@ ERROR_MODELS = {
     "nanopore_sup": {"rate": 0.01, "indel_fraction": 0.45, "homopolymer_bias": 3.0},
     "nanopore_hac": {"rate": 0.02, "indel_fraction": 0.50, "homopolymer_bias": 3.5},
     "nanopore_fast": {"rate": 0.05, "indel_fraction": 0.55, "homopolymer_bias": 4.0},
+    # PacBio HiFi/CCS: ~Q30, what errors remain mostly homopolymer indels.
+    "pacbio_hifi": {"rate": 0.001, "indel_fraction": 0.6, "homopolymer_bias": 3.0},
 }
 
 FATES = [

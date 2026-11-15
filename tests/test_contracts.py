@@ -16,7 +16,10 @@ Tests for database mode's layers and contracts (docs/CONTRACTS.md).
     and says what an Illumina or predemultiplexed run cannot know, and
     synthesis reads a run through it exactly as through the summaries;
   * the predemultiplexed adapter: pre-flight resolves each sample's
-    FASTQs, writes the read types, and refuses what cannot run.
+    FASTQs, writes the read types, and refuses what cannot run;
+  * the pacbio adapter: pre-flight takes the tags as the demultiplexing
+    key, places a well where the index map lists both, and refuses what
+    cannot run; its accounting folds in as nanopore's does.
 
 The protocol runs need minimap2 (on the PATH or in ~/bin).
 
@@ -129,8 +132,11 @@ def vespa_fixture(tmp: str) -> dict:
               os.path.join(run, f"{sid}_R2.fastq.gz"),
               ["--read-length", "150"]) for sid, _t, _c in picked]
     types = {s: t for s, t, _c in picked}
+    hifi = [(sid, [(fx.amplicon(species[src]["seq"]), n)
+                   for src, n in comp.items()]) for sid, _t, comp in picked]
     return {"release": rel, "primers": prim, "types": types,
-            "single_long_noisy": single, "paired_short": pairs}
+            "single_long_noisy": single, "paired_short": pairs,
+            "hifi_sources": hifi}
 
 
 def nemits2_fixture(tmp: str) -> dict:
@@ -150,12 +156,50 @@ def nemits2_fixture(tmp: str) -> dict:
         nem.write_pairs(r1, r2, seqs, L, random.Random(L))
         pairs.append((f"S{L}", r1, r2, ["--read-length", str(L),
                                          "--primer-offset", "3"]))
+    amps = [(nem.NC1 + its2 + nem.STRETCH + al.revcomp(nem.NC2), 30)
+            for its2 in seqs.values()]
     return {"release": rel, "primers": prim,
-            "types": {"N": "unknown", "S150": "unknown", "S250": "unknown"},
-            "single_long_noisy": [("N", [fq])], "paired_short": pairs}
+            "types": {"N": "unknown", "S150": "unknown", "S250": "unknown",
+                      "H": "unknown"},
+            "single_long_noisy": [("N", [fq])], "paired_short": pairs,
+            "hifi_sources": [("H", amps)]}
 
 
-FIXTURES = {"vespa_v4": vespa_fixture, "nemits2": nemits2_fixture}
+def hifi_reads(path: str, sid: str, amplicons, rng: random.Random) -> None:
+    """Single reads with PacBio HiFi errors (simulate's pacbio_hifi), primer
+    to primer and either orientation, as the pacbio adapter writes a
+    sample's reads; amplicons is [(amplicon, reads)]."""
+    model = sim.ERROR_MODELS["pacbio_hifi"]
+    with gzip.open(path, "wt") as fh:
+        k = 0
+        for amp, n in amplicons:
+            for _ in range(n):
+                m = amp if rng.random() < 0.5 else al.revcomp(amp)
+                m, _s, _i = sim.apply_errors(rng, m, model)
+                fh.write(f"@{sid}.{k}/ccs\n{m}\n+\n{'~' * len(m)}\n")
+                k += 1
+
+
+def with_hifi(make):
+    """A protocol fixture plus single_long_accurate reads of the same
+    samples (each source's single_long_noisy composition, from its own
+    random stream so the other read types' inputs are untouched)."""
+    def build(tmp: str) -> dict:
+        fx_ = make(tmp)
+        rng = random.Random(15)
+        items = []
+        for sid, amps in fx_.pop("hifi_sources"):
+            path = os.path.join(tmp, f"{sid}.hifi.fastq.gz")
+            hifi_reads(path, sid, amps, rng)
+            items.append((sid, [path]))
+        fx_["single_long_accurate"] = items
+        return fx_
+    build.__name__ = make.__name__
+    return build
+
+
+FIXTURES = {"vespa_v4": with_hifi(vespa_fixture),
+            "nemits2": with_hifi(nemits2_fixture)}
 
 
 def run_route(proto: str, read_type: str, fx_: dict, item, outdir: str,
@@ -509,8 +553,24 @@ def test_predemultiplexed(tmp: str) -> None:
           any("'S2': no FASTQ matched" in e for e in summ["errors"]),
           str(summ["errors"]))
     code, summ, _ = go("hifi", sheet, read_type="single_long_accurate")
+    check("single_long_accurate passes: vespa_v4 takes it",
+          not [e for e in summ["errors"] if "minimap2" not in e],
+          str(summ["errors"]))
+    # A protocol that does not take a read type is refused before any
+    # read is touched - checked with vespa_v4 made to refuse it.
+    p = protocols.get("vespa_v4")
+    saved = (p.read_types, p.not_supported)
+    p.read_types = {k: v for k, v in saved[0].items()
+                    if k != "single_long_accurate"}
+    p.not_supported = {"single_long_accurate": "not for this test"}
+    try:
+        code, summ, _ = go("hifi_refused", sheet,
+                           read_type="single_long_accurate")
+    finally:
+        p.read_types, p.not_supported = saved
     check("a read type the protocol cannot take is refused before any read "
           "is touched", any("cannot take single_long_accurate" in e
+                            and "not for this test" in e
                             for e in summ["errors"]), str(summ["errors"]))
     code, summ, _ = go("pairs", sheet, read_type="paired_short")
     check("pairs are an Illumina run, not a predemultiplexed one",
@@ -530,6 +590,92 @@ def test_predemultiplexed(tmp: str) -> None:
           str(summ["errors"]))
 
 
+def test_pacbio(tmp: str) -> None:
+    print("\nthe pacbio adapter, in pre-flight")
+    pbf = _load("make_pacbio_fixture", "tests/make_pacbio_fixture.py")
+    fxd = os.path.join(tmp, "fx")
+    quiet(pbf.main, ["--outdir", fxd])
+    sheet = al.read_table(os.path.join(fxd, "samplesheet.tsv"))
+    rel = os.path.join(ROOT, "tests", "data", "db", "release")
+    prim = os.path.join(ROOT, "tests", "data", "db", "primers.tsv")
+    assay = os.path.join(ROOT, "assets", "assay", "vespa18s.json")
+    run = os.path.join(fxd, "run")
+
+    def go(label, rows, path=run, read_type="", database=True):
+        d = os.path.join(tmp, label)
+        os.makedirs(d, exist_ok=True)
+        ss = os.path.join(d, "samplesheet.tsv")
+        with open(ss, "w") as fh:
+            w = csv.DictWriter(fh, list(rows[0]), delimiter="\t",
+                               lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        runs = os.path.join(d, "runs.tsv")
+        with open(runs, "w") as fh:
+            fh.write("run_id\tplatform\tpath\tread_type\tdna_input_ng\n"
+                     f"DB03\tpacbio\t{path}\t{read_type}\t10\n")
+        args = ["--samplesheet", ss, "--runs", runs, "--index-map", INDEX_MAP,
+                "--assay", assay, "--primers", prim,
+                "--outdir", os.path.join(d, "out")]
+        args += (["--reference-database", rel] if database else
+                 ["--reference", os.path.join(ROOT, "tests", "data",
+                                              "reference.tsv")])
+        quiet(pf.main, args)
+        summ = json.load(open(os.path.join(d, "out", "preflight_summary.json")))
+        return summ, os.path.join(d, "out")
+
+    summ, out = go("ok", sheet)
+    errs = [e for e in summ["errors"] if "minimap2" not in e]
+    check("a pacbio run passes pre-flight", not errs, str(errs))
+    _h, rts = read_tsv(os.path.join(out, "read_types.tsv"))
+    check("its read type is single_long_accurate (contract A)",
+          rts == [{"run_id": "DB03", "platform": "pacbio",
+                   "read_type": "single_long_accurate"}], str(rts))
+    _h, rr = read_tsv(os.path.join(out, "runs_resolved.tsv"))
+    check("the library's path is resolved for the workflow",
+          rr[0]["platform"] == "pacbio" and rr[0]["path"] == run)
+    _h, res = read_tsv(os.path.join(out, "file_resolution.tsv"))
+    check("tags the index map lists place every well on the plate",
+          all(r["plate_row"] and r["plate_col"] for r in res), str(res[:2]))
+    check("no files are resolved per sample: they are demultiplexed here",
+          all(r["files"] == "" for r in res))
+
+    tags = ["GACATAGTCT", "GACGATCAGA", "GACGTGCTCT", "GACTATAGCC",
+            "GAGACGTCTA", "GAGCTCATAC", "GATAGCTGAC", "GATCGTACAG"]
+    own = [dict(r, index_i5=t, index_i7=t) for r, t in zip(sheet, tags)]
+    summ, out = go("own_tags", own)
+    _h, res = read_tsv(os.path.join(out, "file_resolution.tsv"))
+    check("a library's own tags, not in the index map: no error, no plate "
+          "position, and a note saying so",
+          not [e for e in summ["errors"] if "minimap2" not in e]
+          and not any(r["plate_row"] for r in res)
+          and "8 PacBio sample(s) have tags the index map does not list" in
+          open(os.path.join(out, "validation.log")).read(),
+          str(summ["errors"]))
+    summ, _ = go("no_tag", [dict(sheet[0], index_i7="")] + sheet[1:])
+    check("a sample without its reverse tag is an error",
+          any("index_i7 is required for pacbio" in e for e in summ["errors"]),
+          str(summ["errors"]))
+    summ, _ = go("dup", sheet + [dict(sheet[2], sample_id="S01b")])
+    check("a tag pair declared twice is an error",
+          any("declared for 2 samples" in e for e in summ["errors"]),
+          str(summ["errors"]))
+    summ, _ = go("noisy", sheet, read_type="single_long_noisy")
+    check("pacbio reads are single_long_accurate, nothing else",
+          any("delivers single_long_accurate reads, not single_long_noisy"
+              in e for e in summ["errors"]), str(summ["errors"]))
+    txt = os.path.join(tmp, "notes.txt")
+    open(txt, "w").write("not reads\n")
+    summ, _ = go("file", sheet, path=txt)
+    check("a path that is neither FASTQ nor BAM is refused",
+          any("not a FASTQ or BAM" in e for e in summ["errors"]),
+          str(summ["errors"]))
+    summ, _ = go("panel", sheet, database=False)
+    check("pacbio is database mode only",
+          any("pacbio runs are database mode only" in e
+              for e in summ["errors"]), str(summ["errors"]))
+
+
 def main() -> int:
     mm2 = minimap2()
     test_registry()
@@ -546,6 +692,7 @@ def main() -> int:
             test_db_calls(fixtures, outs, tmp)
         test_contract_a(os.path.join(tmp, "a"))
         test_predemultiplexed(os.path.join(tmp, "p"))
+        test_pacbio(os.path.join(tmp, "pb"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("\n" + "=" * 70)

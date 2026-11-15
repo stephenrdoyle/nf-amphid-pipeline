@@ -15,10 +15,12 @@ Pairs whose windows -x sr cannot align end to end are mapped again with
 nanopore's penalties (SR_DIVERGENT), and a pair whose windows point at
 different records is called at what the two agree on.
 
-Read types: single_long_noisy (nanopore consensus) and paired_short
-(Illumina windows). Not single_long_accurate yet: the consensus route
-would run, but the floors were calibrated at nanopore consensus and
-Illumina error rates, and no PacBio run has been checked against them.
+Read types: single_long_noisy (nanopore consensus), paired_short
+(Illumina windows) and single_long_accurate (PacBio HiFi: the same
+consensus route and floors). The floors were calibrated on nanopore
+consensus sequences; a leave-out benchmark on simulated HiFi reads
+(tests/bench_db_floors.py --error-model pacbio_hifi, docs/CONTRACTS.md)
+measured them before HiFi reads were taken.
 
 Standard-library Python plus minimap2.
 """
@@ -161,12 +163,10 @@ class VespaV4(Protocol):
                              "classified by identity floors",
         "paired_short": "two fixed windows per pair, denoised, classified "
                         "by the stricter pair floors",
+        "single_long_accurate": "the consensus route, as nanopore's, "
+                                "classified by the same floors",
     }
-    not_supported = {
-        "single_long_accurate": "not validated yet - the floors were "
-                                "calibrated on nanopore consensus and "
-                                "Illumina pairs, not PacBio reads",
-    }
+    not_supported: dict = {}
     calling_rules = ("floors",)
     required_files = ("refdb.fasta", "taxonomy.tsv",
                       "resolution_nanopore.tsv")

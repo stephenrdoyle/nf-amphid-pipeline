@@ -16,6 +16,7 @@ nextflow.enable.dsl = 2
 include { PREFLIGHT      } from './modules/local/preflight'
 include { ILLUMINA_PATH  } from './subworkflows/local/illumina'
 include { NANOPORE_PATH  } from './subworkflows/local/nanopore'
+include { PACBIO_PATH    } from './subworkflows/local/pacbio'
 include { ASSIGN         } from './modules/local/assign'
 include { DB_INDEX       } from './modules/local/db_index'
 include { ASSIGN_DB      } from './modules/local/assign_db'
@@ -53,8 +54,8 @@ def helpMessage() {
     One of:
       --runs             Run manifest TSV (run_id, platform, path, ...)
       --input_dir        Single-run shortcut; requires --platform
-                         (illumina, nanopore, or predemultiplexed in
-                         database mode)
+                         (illumina, nanopore, or predemultiplexed or
+                         pacbio in database mode)
 
     Options:
       --assay            Assay definition JSON
@@ -68,6 +69,7 @@ def helpMessage() {
       --expected_tag     Override the assay's control tag sequence
       --db_protocol      Database mode: the protocol to run (vespa_v4,
                          nemits2; default: the release's)
+      --pacbio_demux     PacBio: builtin (default) or lima (Linux only)
       --outdir           Results directory (default: ./results)
     """.stripIndent()
 }
@@ -102,13 +104,23 @@ workflow {
         problems << "one of --runs or --input_dir is required"
     }
     if (params.input_dir && !params.platform) {
-        problems << "--input_dir requires --platform (illumina, nanopore or predemultiplexed)"
+        problems << "--input_dir requires --platform (illumina, nanopore, predemultiplexed or pacbio)"
     }
-    if (params.platform && !(params.platform in ['illumina', 'nanopore', 'predemultiplexed'])) {
-        problems << "--platform must be illumina, nanopore or predemultiplexed"
+    if (params.platform && !(params.platform in ['illumina', 'nanopore', 'predemultiplexed', 'pacbio'])) {
+        problems << "--platform must be illumina, nanopore, predemultiplexed or pacbio"
     }
-    if (params.platform == 'predemultiplexed' && !params.reference_database) {
-        problems << "--platform predemultiplexed is database mode only (--reference_database)"
+    if (params.platform in ['predemultiplexed', 'pacbio'] && !params.reference_database) {
+        problems << "--platform ${params.platform} is database mode only (--reference_database)"
+    }
+    if (!(params.pacbio_demux in ['builtin', 'lima'])) {
+        problems << "--pacbio_demux must be builtin or lima (got '${params.pacbio_demux}')"
+    }
+    // lima has no macOS build. Refused here, where it can be said
+    // plainly, rather than as "lima: command not found" in a task.
+    if (params.pacbio_demux == 'lima' &&
+            System.getProperty('os.name').toLowerCase().contains('mac')) {
+        problems << "--pacbio_demux lima: lima runs on Linux only (there is no macOS build). " +
+                    "Run on the farm, or use the built-in demultiplexer (--pacbio_demux builtin)"
     }
     // A flag. Compared as text, never by truthiness: from Nextflow 26.04
     // every command-line parameter arrives as a string, so a bare
@@ -136,6 +148,8 @@ workflow {
                       "python3 tests/make_db_fixture.py" ],
         'test_db_il': [ "${projectDir}/tests/data/db/run_il",
                       "python3 tests/make_db_fixture.py" ],
+        'test_pacbio': [ "${projectDir}/tests/data/pacbio/run",
+                      "python3 tests/make_pacbio_fixture.py" ],
     ]
     (workflow.profile ?: '').tokenize(',').each { prof ->
         def fx = fixtures[prof.trim()]
@@ -275,6 +289,8 @@ workflow {
     //   nanopore          split and demultiplexed here -> ASSIGN_DB
     //   predemultiplexed  per-sample FASTQs from upstream -> ASSIGN_DB,
     //                     resolved by pre-flight like Illumina's
+    //   pacbio            a library's reads, demultiplexed here by the
+    //                     samplesheet's tags (PACBIO_PATH) -> ASSIGN_DB
     // A predemultiplexed sample carries its run's read type to ASSIGN_DB;
     // pre-flight refuses the route in panel mode, so there it is empty.
     ch_read_types = PREFLIGHT.out.read_types
@@ -285,6 +301,20 @@ workflow {
         .map { meta, files -> [ meta.run_id, meta, files ] }
         .combine(ch_read_types, by: 0)
         .map { rid, meta, files, rt -> [ meta + [ read_type: rt ], files ] }
+    // PacBio runs, from pre-flight's resolved manifest as nanopore's are:
+    // one library each, its FASTQ or BAM file or a directory of them.
+    ch_pacbio_runs = PREFLIGHT.out.runs_resolved
+        .splitCsv(header: true, sep: '\t')
+        .filter { row -> row.platform == 'pacbio' }
+        .map { row ->
+            [ [ run_id: row.run_id, platform: 'pacbio' ],
+              file(row.path, checkIfExists: true) ]
+        }
+    PACBIO_PATH(ch_pacbio_runs, ch_samplesheet, ch_primers, ch_assay)
+    ch_pacbio_db = PACBIO_PATH.out.seqs
+        .map { meta, fq -> [ meta.run_id, meta, fq ] }
+        .combine(ch_read_types, by: 0)
+        .map { rid, meta, fq, rt -> [ meta + [ read_type: rt ], fq ] }
 
     // -- the two read paths ----------------------------------------------
     // In database mode Illumina pairs are not merged and prepped for a
@@ -314,7 +344,7 @@ workflow {
     ch_seqs = ILLUMINA_PATH.out.seqs
         .mix(NANOPORE_PATH.out.seqs)
     PREFLIGHT.out.summary
-        .combine(ch_seqs.mix(ch_illumina_db, ch_predemux_db).count())
+        .combine(ch_seqs.mix(ch_illumina_db, ch_predemux_db, ch_pacbio_db).count())
         .subscribe { _summary, n ->
             if (n == 0 && !workflow.session.isAborted()) {
                 error(
@@ -339,7 +369,7 @@ workflow {
         // note above).
         DB_INDEX(ch_database)
         ASSIGN_DB(
-            ch_seqs.mix(ch_predemux_db),
+            ch_seqs.mix(ch_predemux_db, ch_pacbio_db),
             ch_database,
             DB_INDEX.out.index,
             ch_primers,
@@ -357,12 +387,14 @@ workflow {
         // blanks, with off-target fractions per well.
         ch_run_id_db = ch_resolved.map { meta, files -> meta.run_id }.first()
         // Contract A's accounting, one per run whatever the platform.
-        // Nanopore's own summaries are folded in; absent on any other
+        // Nanopore's or PacBio's own summaries are folded in (a run is
+        // one platform, so at most one of them); absent on any other
         // run, each has its own placeholder (see the NO_ placeholders
         // above).
         DEMUX_ACCOUNTING(
             ch_run_id_db,
-            NANOPORE_PATH.out.summary.ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
+            NANOPORE_PATH.out.summary.mix(PACBIO_PATH.out.summary)
+                .ifEmpty(file("${projectDir}/assets/NO_DEMUX_DB")),
             NANOPORE_PATH.out.split.ifEmpty(file("${projectDir}/assets/NO_SPLIT_DB")),
             PREFLIGHT.out.dir,
         )
@@ -371,7 +403,8 @@ workflow {
             ASSIGN_DB.out.clusters.mix(ASSIGN_DB_PAIRS.out.clusters).collect(),
             ASSIGN_DB.out.summary.mix(ASSIGN_DB_PAIRS.out.summary).collect(),
             DEMUX_ACCOUNTING.out.json,
-            NANOPORE_PATH.out.matrix.ifEmpty(file("${projectDir}/assets/NO_MATRIX_DB")),
+            NANOPORE_PATH.out.matrix.mix(PACBIO_PATH.out.matrix)
+                .ifEmpty(file("${projectDir}/assets/NO_MATRIX_DB")),
             PREFLIGHT.out.dir,
             ch_database,
         )
