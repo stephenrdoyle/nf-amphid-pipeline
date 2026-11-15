@@ -932,8 +932,8 @@ under 99%.
 
 ### 12.4 Calling: the gap rule
 
-`--db_calling_rule auto` takes the gap rule for a release scored over its
-span: species at >= 99% identity AND the nearest record of any other
+Under the gap rule (`--db_calling_rule gap`; the tiered rule below,
+the default, contains it): species at >= 99% identity AND the nearest record of any other
 species >= 4 edits further off over the same span; genus >= 97%, family
 >= 95%. A `shared` record counts as another species, an `unnamed` one
 (hybrids, cf., environmental) does not. An exact match to its record
@@ -948,6 +948,25 @@ is as before. The V4 floors stay the rule for vespa. Each span-scored call adds 
 ("Cooperia oncophora 100.0%"), `next` ("Cooperia surnabada +1", or "none
 close") and `grade` to `clusters.tsv`; synthesis carries `nearest`,
 `next` and `grade` into `db_calls.tsv`.
+
+**The tentative tier (2026-11-15).** `--db_calling_rule auto` takes the
+tiered rule for a release scored over its span, as the release
+recommends (nemabiome-its2-refdb `its2_classify.py`, `tiered`): every
+call the gap rule makes, plus a species the gap rule stops at genus
+when the identity is >= 98% (`--db_tentative_identity`) and the gap as
+clear. Such a call is labelled "<species> (tentative)", so it is never
+pooled with confident calls of the same species, and `clusters.tsv`
+and `db_calls.tsv` carry `tentative` and the gap rule's own call beside
+it (`gap_rule_rank`, `gap_rule_taxon`). Half the present-species reads
+the gap rule stops at genus have no other species within 4 edits but
+are 1-3% from their own records; in the release's leave-one-out the
+tier raised right species calls from 56% to 68% where the species is
+present, and wrong ones from 5.4% to 9.0% where it is hidden. A read
+1-2% from its own species cannot be told from one 1-2% from an
+unsampled sister, so the flag stays: read a tentative call as species
+where the host's parasites are well sampled (livestock), as genus where
+they may not be (wildlife). `--db_calling_rule gap` gives the confident
+calls alone.
 
 ### 12.5 Checked against the database's own results (v0.1.0)
 

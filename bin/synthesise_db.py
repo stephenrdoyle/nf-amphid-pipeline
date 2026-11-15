@@ -301,6 +301,24 @@ def fragile_species(calls: list[dict]) -> list[dict]:
     return sorted(by.values(), key=lambda f: (-len(f["samples"]), f["taxon"]))
 
 
+def tentative_species(calls: list[dict]) -> list[dict]:
+    """Detected species calls the tiered rule names but the gap rule does
+    not (tentative: >= 98% to the species, no other species near), by
+    species: the gap rule's own call, the samples and reads, most
+    samples first. Empty for a run called by any other rule."""
+    by: dict = {}
+    for c in calls:
+        if c["call"] == "detected" and c.get("tentative") == "yes":
+            f = by.setdefault(c["taxon"], {
+                "taxon": c["taxon"], "label": c["label"], "group": c["group"],
+                "gap_rule": f"{c.get('gap_rule_rank', '')} "
+                            f"{c.get('gap_rule_taxon', '')}".strip(),
+                "samples": [], "reads": 0})
+            f["samples"].append(c["sample_id"])
+            f["reads"] += int(c["reads"])
+    return sorted(by.values(), key=lambda f: (-len(f["samples"]), f["taxon"]))
+
+
 def misassign_taxa(which: str, wells: dict, rows: dict, geom: dict,
                    args) -> set | None:
     """The taxa the misassignment rates are fitted on (None: all).
@@ -1138,6 +1156,9 @@ def main(argv=None) -> int:
         # Detected species calls whose name rests on 1-2 edits: the
         # nearest other species in the release is that close.
         "fragile_species_calls": fragile_species(calls),
+        # Detected species calls named only by the tiered rule's lower
+        # floor (>= 98%), with the gap rule's own call.
+        "tentative_species_calls": tentative_species(calls),
         # Illumina pairs whose two windows point at different records
         # (assign_db_pairs): usually chimeras or artefacts, not gaps.
         "windows_disagree": {

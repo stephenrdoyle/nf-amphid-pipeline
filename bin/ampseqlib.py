@@ -2751,7 +2751,8 @@ DB_CALL_COLUMNS = [
     "misassign_expected", "misassign_excess", "identity", "clusters",
     "lineage", "group", "group_reads", "group_share", "primer_fit",
     "margin", "rank_meaning", "database_version"]
-DB_CALL_OPTIONAL = ["nearest", "next", "grade"]
+DB_CALL_OPTIONAL = ["nearest", "next", "grade", "tentative", "gap_rule_rank",
+                    "gap_rule_taxon"]
 
 
 def write_assignment(outdir: str, sid: str, rows: list[dict],

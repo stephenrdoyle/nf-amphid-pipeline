@@ -60,18 +60,24 @@ def scores_over_reference(manifest: dict) -> bool:
     return "reference" in str(manifest.get("score_over", "")).lower()
 
 
+# The rules that need span scoring (protocols/nemits2.py).
+SPAN_RULES = ("tiered", "gap")
+
+
 def calling_rule(manifest: dict, override: str | None = None) -> str:
-    """'floors' (an identity floor per rank, as for V4) or 'gap' (ITS2:
-    species only when the next species is several edits further off).
-    An explicit choice wins; then the manifest's `calling_rule`; then a
-    release scored over its records' span takes the gap rule, the rule it
-    was validated with; everything else keeps the floors."""
+    """'floors' (an identity floor per rank, as for V4), 'gap' (ITS2:
+    species only when the next species is several edits further off) or
+    'tiered' (the gap rule's calls, plus a flagged tentative species at a
+    lower identity with the same gap). An explicit choice wins; then the
+    manifest's `calling_rule`; then a release scored over its records'
+    span takes the tiered rule, its database's recommended default;
+    everything else keeps the floors."""
     if override and override != "auto":
         return override
     given = str(manifest.get("calling_rule", "")).lower()
-    if given in ("floors", "gap"):
+    if given in ("floors",) + SPAN_RULES:
         return given
-    return "gap" if scores_over_reference(manifest) else "floors"
+    return "tiered" if scores_over_reference(manifest) else "floors"
 
 
 def protocol_for(manifest: dict, override: str | None = None,
@@ -80,8 +86,8 @@ def protocol_for(manifest: dict, override: str | None = None,
 
     --db_protocol (override) wins; then the manifest's "protocol"; then
     what releases built before the field existed already say. A release
-    scored over its records' span, or called by the gap rule, is
-    nemabiome ITS2's protocol - span scoring is what the gap rule is
+    scored over its records' span, or called by the gap or tiered rule,
+    is nemabiome ITS2's protocol - span scoring is what those rules are
     measured over, so --db_calling_rule gap on a V4 release has always
     meant span scoring too, and still does. Everything else is vespa V4.
     ValueError for a name this pipeline does not carry."""
@@ -89,7 +95,7 @@ def protocol_for(manifest: dict, override: str | None = None,
         str(manifest.get("protocol") or "")
     if not name:
         name = "nemits2" if (scores_over_reference(manifest) or calling_rule(
-            manifest, rule_override) == "gap") else "vespa_v4"
+            manifest, rule_override) in SPAN_RULES) else "vespa_v4"
     if name not in PROTOCOLS:
         raise ValueError(
             f"protocol '{name}' is not one this pipeline carries "

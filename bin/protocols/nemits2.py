@@ -1,16 +1,18 @@
 """
-nemits2: nemabiome-its2-refdb releases, ITS2 - span scoring and the gap
-rule.
+nemits2: nemabiome-its2-refdb releases, ITS2 - span scoring, the gap rule
+and its tentative tier.
 
 An ITS2 record stops where the ~47-base 28S stretch before NC2 starts,
 and many records are partial, so a read always runs past its record.
 Each candidate record minimap2 proposes is therefore scored exactly over
 the record's own span, the query's overhang free (span_scores), and the
-call follows the release's calling rule - the gap rule, by default: a
-species needs >= 99% identity AND the best record of any other species
->= 4 edits further off over the same span (span_call). Every call says
-how close it came: the tied species and their identity, the nearest
-other species and how many edits further (nearest, next).
+call follows the release's calling rule. The gap rule: a species needs
+>= 99% identity AND the best record of any other species >= 4 edits
+further off over the same span (span_call). The tiered rule, the
+default: the gap rule's calls, plus a species named at >= 98% with the
+same gap, flagged tentative, with the gap rule's own call beside it.
+Every call says how close it came: the tied species and their identity,
+the nearest other species and how many edits further (nearest, next).
 
 On Illumina the release's windows count record bases, and R2 opens with
 the 28S stretch, so R2's window takes that stretch too (tail: 130 + 83
@@ -59,6 +61,19 @@ GAP_EDITS = 4
 # match with another species 1 edit off was right 60% of the time, at 2-3
 # edits 91%; below 100% identity 2-3 edits stay too close.
 GAP_EXACT = 2
+# The tiered rule: the gap rule's species calls, plus tentative ones at
+# >= 98% identity with the same gap (the release's its2_classify.py
+# TENTATIVE_IDENTITY, and its recommended default). Half the present-
+# species reads the gap rule stops at genus have no other species within
+# 4 edits but are 1-3% from their own records - intraspecific variation.
+# In the release's leave-one-out the 98% tier raised right species calls
+# from 56% to 68% where the species is present, and wrong ones from 5.4%
+# to 9.0% where it is hidden: a read 1-2% from its own species looks the
+# same as one 1-2% from an unsampled sister, which is why the call is
+# flagged and the gap rule's call is kept beside it. On real data it
+# named the goat line of T. circumcincta and Oe. venulosum / Oe. radiatum
+# reads the gap rule left at genus.
+TENTATIVE_IDENTITY = 0.98
 # Span scoring. A record must be aligned over at least MIN_SPAN bases to
 # count as evidence at all (a 77-base fragment 32 edits off otherwise
 # outranks full-length records by identity); among equally identical
@@ -150,7 +165,8 @@ def span_scores(parts: list[tuple[str, str]], cands, refs: dict,
 def span_call(scores: list[tuple], tax, rule: str, floors: dict,
               gap_edits: int = GAP_EDITS, qlen: int = 0,
               min_species_span: int = MIN_SPAN,
-              gap_exact: int = GAP_EXACT) -> dict:
+              gap_exact: int = GAP_EXACT,
+              tentative_identity: float = TENTATIVE_IDENTITY) -> dict:
     """One query's call from its span scores (span_scores), in
     classify_hits()'s shape plus what the gap rule adds.
 
@@ -163,7 +179,11 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     contortus record and stopped at genus). The call is their LCA, cut
     back by the floors; under the gap rule a species also needs the
     nearest record of any OTHER species to be gap_edits further off over
-    the same span - or, for an exact match, gap_exact (0: never). A
+    the same span - or, for an exact match, gap_exact (0: never). The
+    tiered rule makes every call the gap rule makes, and also names a
+    species the gap rule stops at genus when the identity is at least
+    tentative_identity and the gap is as clear: that call is flagged
+    tentative, and the gap rule's own call is kept beside it. A
     shared record (its members name two species) counts
     as another species; an unnamed one (hybrid, cf., environmental) does
     not - counting three hybrid records once cut a cattle set's species
@@ -178,11 +198,13 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
 
     Adds: span and edits of the best record, gap (None unless the ties
     name exactly one species), next (record, edits further) for the
-    nearest other species, and ties (the tied records)."""
+    nearest other species, ties (the tied records), tentative, and the
+    gap rule's own call (gap_rule_depth, gap_rule_rank)."""
     ranks = ranks_of(tax)
     empty = {"rank": "", "depth": -1, "identity": 0.0, "coverage": 0.0,
              "best_hit": "", "near_hits": 0, "lca_depth": -1, "span": 0,
-             "edits": None, "gap": None, "next": None, "ties": []}
+             "edits": None, "gap": None, "next": None, "ties": [],
+             "tentative": False, "gap_rule_depth": -1, "gap_rule_rank": ""}
     scores = [x for x in scores if x[1] >= MIN_SPAN]
     if not scores:
         return empty
@@ -215,14 +237,20 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     k = ranks.index("species")
     clear = gap is not None and (
         gap >= gap_edits or (gap_exact > 0 and d0 == 0 and gap >= gap_exact))
-    if depth >= k and (sp0 < min_species_span or rule == "gap" and not clear):
+    if depth >= k and (sp0 < min_species_span or
+                       rule in ("gap", "tiered") and not clear):
         depth = k - 1
+    gap_depth, tentative = depth, False
+    if (rule == "tiered" and depth == k - 1 and lca >= k and clear
+            and sp0 >= min_species_span and ident >= tentative_identity):
+        depth, tentative = k, True
     return {"depth": depth, "rank": ranks[depth] if depth >= 0 else "",
             "identity": ident,
             "coverage": min(1.0, sp0 / qlen) if qlen else 1.0,
             "best_hit": best, "near_hits": len(tied), "lca_depth": lca,
             "span": sp0, "edits": d0, "gap": gap, "next": nxt,
-            "ties": tied}
+            "ties": tied, "tentative": tentative, "gap_rule_depth": gap_depth,
+            "gap_rule_rank": ranks[gap_depth] if gap_depth >= 0 else ""}
 
 
 def record_label(rid: str, tax) -> str:
@@ -265,17 +293,26 @@ def nearest_next(call: dict, tax) -> tuple[str, str]:
 
 
 def span_columns(call: dict, tax) -> dict:
-    """The columns a span-scored call adds to clusters.tsv."""
+    """The columns a span-scored call adds to clusters.tsv. Under the
+    tiered rule, tentative says the species was named only by its lower
+    identity floor, and gap_rule_rank / gap_rule_taxon are the gap rule's
+    own call - the confident one - beside it."""
     near, nxt = nearest_next(call, tax)
     gap = call.get("gap")
+    lin = tax.get(call.get("best_hit", ""), {})
+    gd = call.get("gap_rule_depth", call.get("depth", -1))
     return {"span": call.get("span") or "",
             "edits": "" if call.get("edits") is None else call["edits"],
             "gap": "" if gap is None else gap,
             "nearest": near, "next": nxt,
-            "grade": tax.get(call.get("best_hit", ""), {}).get("grade", "")}
+            "grade": lin.get("grade", ""),
+            "tentative": "yes" if call.get("tentative") else "",
+            "gap_rule_rank": call.get("gap_rule_rank", call.get("rank", "")),
+            "gap_rule_taxon": lin.get(ranks_of(tax)[gd], "") if gd >= 0 else ""}
 
 
-SPAN_COLUMNS = ["span", "edits", "gap", "nearest", "next", "grade"]
+SPAN_COLUMNS = ["span", "edits", "gap", "nearest", "next", "grade",
+                "tentative", "gap_rule_rank", "gap_rule_taxon"]
 
 
 MERGE_MIN_OVERLAP = 20
@@ -316,7 +353,8 @@ def merge_pair(s1: str, q1: str, s2: str, q2: str):
 
 class Nemits2(Protocol):
     name = "nemits2"
-    title = "nemabiome-its2-refdb, ITS2: span scoring and the gap rule"
+    title = ("nemabiome-its2-refdb, ITS2: span scoring, the gap rule and "
+             "its tentative tier")
     read_types = {
         "single_long_noisy": "reference-guided consensus per group, each "
                              "candidate record scored over its span",
@@ -327,7 +365,7 @@ class Nemits2(Protocol):
                                 "candidate record scored over its span",
     }
     not_supported: dict = {}
-    calling_rules = ("gap", "floors")
+    calling_rules = ("tiered", "gap", "floors")
     required_files = ("refdb.fasta", "taxonomy.tsv",
                       "resolution_nanopore.tsv")
     extra_columns = tuple(SPAN_COLUMNS)
@@ -350,12 +388,16 @@ class Nemits2(Protocol):
     def calling(self, args, manifest, tax):
         rule = super().calling(args, manifest, tax)[0]
         return rule, parse_floors(
-            args.gap_floors if rule == "gap" else args.floors, ranks_of(tax))
+            args.gap_floors if rule in ("gap", "tiered") else args.floors,
+            ranks_of(tax))
 
     def calling_settings(self, rule, args):
+        gapped = rule in ("gap", "tiered")
         return {"score_over": "reference span", "calling_rule": rule,
-                "gap_edits": args.gap_edits if rule == "gap" else None,
-                "gap_exact": args.gap_exact if rule == "gap" else None,
+                "gap_edits": args.gap_edits if gapped else None,
+                "gap_exact": args.gap_exact if gapped else None,
+                "tentative_identity": args.tentative_identity
+                if rule == "tiered" else None,
                 "min_span": MIN_SPAN, "min_species_span": args.min_species_span,
                 "span_slack": SPAN_SLACK}
 
@@ -374,7 +416,8 @@ class Nemits2(Protocol):
             calls[k] = span_call(
                 span_scores([(cons, "whole")], cands[k], recs),
                 ctx.tax, ctx.rule, ctx.floors, ctx.args.gap_edits,
-                len(cons), ctx.args.min_species_span, ctx.args.gap_exact)
+                len(cons), ctx.args.min_species_span, ctx.args.gap_exact,
+                ctx.args.tentative_identity)
         return calls
 
     def tail(self, manifest, read_length=None):
@@ -449,7 +492,7 @@ class Nemits2(Protocol):
             calls[k] = span_call(
                 span_scores(parts, cands[k], recs, tail), tax, rule,
                 floors, args.gap_edits, scorable, args.min_species_span,
-                args.gap_exact)
+                args.gap_exact, args.tentative_identity)
         return calls, 0
 
 

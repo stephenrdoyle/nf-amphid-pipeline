@@ -120,7 +120,7 @@ never imports another protocol.
 | protocol | release | classification | calling rules |
 |---|---|---|---|
 | `vespa_v4` | vespa-18s-refdb, 18S V4 | LCA over minimap2 hits within `--db_lca_margin`, cut back by identity floors per rank | `floors` |
-| `nemits2` | nemabiome-its2-refdb, ITS2 | each candidate record scored over its own span, query overhang free; LCA of the ties | `gap` (default), `floors` |
+| `nemits2` | nemabiome-its2-refdb, ITS2 | each candidate record scored over its own span, query overhang free; LCA of the ties | `tiered` (default), `gap`, `floors` |
 
 ### Which protocol a release gets
 
@@ -128,7 +128,8 @@ never imports another protocol.
 2. else the release's `manifest.json` `"protocol"`;
 3. else inferred from what manifests already say: a release scored over
    its records' span (`"score_over": "reference span"`), or one called by
-   the gap rule (manifest `calling_rule`, or `--db_calling_rule gap`), is
+   the gap or tiered rule (manifest `calling_rule`, or `--db_calling_rule
+   gap` / `tiered`), is
    `nemits2`; everything else `vespa_v4`. So every release built before
    the field existed runs exactly as before.
 
@@ -359,6 +360,9 @@ in its order. Only `nemits2` declares any:
 | `nearest` | the tied species and their identity ("Haemonchus contortus 99.6%") |
 | `next` | the nearest other species and how many edits further ("Haemonchus placei +2"), or "none close" |
 | `grade` | the best record's grade (complete, partial…) |
+| `tentative` | `yes` when the species was named only by the tiered rule's lower floor (its label is "<species> (tentative)") |
+| `gap_rule_rank` | the gap rule's own call, beside a tiered one: its rank… |
+| `gap_rule_taxon` | …and taxon (the same as `rank` / `taxon` unless the call is tentative) |
 
 ### `<sample>.taxa.tsv`
 
@@ -402,8 +406,9 @@ across runs: `run_id`, `sample_id`, `sample_type`, `rank`, `taxon`,
 `limit_basis`, `misassign_expected`, `misassign_excess`, `identity`,
 `clusters`, `lineage`, `group`, `group_reads`, `group_share`,
 `primer_fit`, `margin`, `rank_meaning`, `database_version`; then
-`nearest`, `next` and `grade` where the clusters carry them (a
-span-scored protocol), from each call's largest cluster.
+`nearest`, `next`, `grade`, `tentative`, `gap_rule_rank` and
+`gap_rule_taxon` where the clusters carry them (a span-scored
+protocol), from each call's largest cluster.
 
 ---
 
