@@ -53,6 +53,12 @@ from protocols import Protocol, scores_over_reference  # noqa: E402
 # or per-family limits did no better on held-out species.
 GAP_FLOORS = {"species": 0.99, "genus": 0.97, "family": 0.95}
 GAP_EDITS = 4
+# ... or an exact match to the record (0 edits over its span) with the
+# nearest other species >= 2 edits further off: the release's own
+# classifier (its2_classify.py GAP_EXACT). In its leave-one-out an exact
+# match with another species 1 edit off was right 60% of the time, at 2-3
+# edits 91%; below 100% identity 2-3 edits stay too close.
+GAP_EXACT = 2
 # Span scoring. A record must be aligned over at least MIN_SPAN bases to
 # count as evidence at all (a 77-base fragment 32 edits off otherwise
 # outranks full-length records by identity); among equally identical
@@ -143,7 +149,8 @@ def span_scores(parts: list[tuple[str, str]], cands, refs: dict,
 
 def span_call(scores: list[tuple], tax, rule: str, floors: dict,
               gap_edits: int = GAP_EDITS, qlen: int = 0,
-              min_species_span: int = MIN_SPAN) -> dict:
+              min_species_span: int = MIN_SPAN,
+              gap_exact: int = GAP_EXACT) -> dict:
     """One query's call from its span scores (span_scores), in
     classify_hits()'s shape plus what the gap rule adds.
 
@@ -156,7 +163,8 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     contortus record and stopped at genus). The call is their LCA, cut
     back by the floors; under the gap rule a species also needs the
     nearest record of any OTHER species to be gap_edits further off over
-    the same span. A shared record (its members name two species) counts
+    the same span - or, for an exact match, gap_exact (0: never). A
+    shared record (its members name two species) counts
     as another species; an unnamed one (hybrid, cf., environmental) does
     not - counting three hybrid records once cut a cattle set's species
     calls from 87% to 35%. With no other species among the candidates,
@@ -193,8 +201,9 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     ident = 1 - d0 / sp0
     depth = apply_floors(lca, ident, floors, ranks)
     k = ranks.index("species")
-    if depth >= k and (sp0 < min_species_span or rule == "gap" and (
-            gap is None or gap < gap_edits)):
+    clear = gap is not None and (
+        gap >= gap_edits or (gap_exact > 0 and d0 == 0 and gap >= gap_exact))
+    if depth >= k and (sp0 < min_species_span or rule == "gap" and not clear):
         depth = k - 1
     return {"depth": depth, "rank": ranks[depth] if depth >= 0 else "",
             "identity": ident,
@@ -334,6 +343,7 @@ class Nemits2(Protocol):
     def calling_settings(self, rule, args):
         return {"score_over": "reference span", "calling_rule": rule,
                 "gap_edits": args.gap_edits if rule == "gap" else None,
+                "gap_exact": args.gap_exact if rule == "gap" else None,
                 "min_span": MIN_SPAN, "min_species_span": args.min_species_span,
                 "span_slack": SPAN_SLACK}
 
@@ -352,7 +362,7 @@ class Nemits2(Protocol):
             calls[k] = span_call(
                 span_scores([(cons, "whole")], cands[k], recs),
                 ctx.tax, ctx.rule, ctx.floors, ctx.args.gap_edits,
-                len(cons), ctx.args.min_species_span)
+                len(cons), ctx.args.min_species_span, ctx.args.gap_exact)
         return calls
 
     def tail(self, manifest, read_length=None):
@@ -426,7 +436,8 @@ class Nemits2(Protocol):
                 len(x) - tail
             calls[k] = span_call(
                 span_scores(parts, cands[k], recs, tail), tax, rule,
-                floors, args.gap_edits, scorable, args.min_species_span)
+                floors, args.gap_edits, scorable, args.min_species_span,
+                args.gap_exact)
         return calls, 0
 
 

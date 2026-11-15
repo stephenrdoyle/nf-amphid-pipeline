@@ -250,11 +250,16 @@ to 1 of 602. It was enabled on what was measured:
     | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | 0.014 / 0.078 | 0.010 / 0.064 | |
     | unclustered reads | 4,233 | 4,238 | 4,319 | 5,369 | |
 
-    What still differs: 0.65% of reads are in a consensus identical to an
-    ASV that `classify_asvs.py` names to species and the gap rule here
-    leaves at genus - its2_classify.py names an exact match species when
-    the next species is 2 or more edits off (GAP_EXACT), which the
-    nemits2 protocol does not.
+    The gap rule then took the release classifier's exact-match clause
+    (`GAP_EXACT`, `--db_gap_exact 2`: an exact match to its record is a
+    species with the next species 2 or more edits off; before, 0.65% of
+    reads were in a consensus identical to an ASV that
+    `classify_asvs.py` named and the gap rule here left at genus). It is
+    the protocol's rule, so it applies to every read type; it changes no
+    call on the fixtures. On S-BSST527: species 97.07% -> 97.78%,
+    identical sequences called differently from DADA2's 18 (2,884 reads)
+    -> 2 (26 reads), per-sample Bray-Curtis median 0.010 -> 0.0098 and
+    worst sample 0.317 -> 0.100, wrong-species reads 5.
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
