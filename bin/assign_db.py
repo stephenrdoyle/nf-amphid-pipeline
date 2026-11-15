@@ -399,6 +399,11 @@ HOMOPOLYMER_MERGE = {"single_long_accurate": (4, 4.0)}
 # ... and how far (edits) a smaller consensus may be from the larger one
 # whose run lengths correct_homopolymer gives it; 0: no correction.
 HOMOPOLYMER_REACH = {"single_long_accurate": 8}
+# Dropping consensus sequences no read supports (unsupported), per read
+# type: (fraction of the sample's best-supported exact-read rate, binomial
+# p below which a consensus falls short of it). Only where reads are
+# accurate enough for a real sequence to be read exactly by many of them.
+EXACT_SUPPORT = {"single_long_accurate": (1 / 3, 1e-3)}
 
 
 def runs(seq: str) -> tuple[str, list[int]]:
@@ -551,6 +556,47 @@ def correct_homopolymer(clusters: list[dict], max_edits: int,
         else:
             out.append(c)
     return out
+
+
+def exact_reads(reads_fa: str, seqs: list[str]) -> Counter:
+    """Per consensus (by index), the reads that are it exactly: the read,
+    trimmed at its primers as the consensus was, begins with it (a read
+    runs on past a consensus cut to its record's span). A read that begins
+    with two counts to the longer."""
+    by_len: dict[int, dict[str, int]] = defaultdict(dict)
+    for k, q in enumerate(seqs):
+        by_len[len(q)].setdefault(q, k)
+    lens = sorted(by_len, reverse=True)
+    out: Counter = Counter()
+    for _q, seq in read_fasta(reads_fa):
+        for n in lens:
+            k = by_len[n].get(seq[:n])
+            if k is not None:
+                out[k] += 1
+                break
+    return out
+
+
+def unsupported(counts: Counter, exact: Counter, frac: float,
+                p: float) -> set[int]:
+    """The consensus sequences too few of whose reads are them exactly.
+
+    A sequence in the sample is read exactly by some share of its reads -
+    the run's accuracy, which the sample's largest consensus measures. A
+    consensus built from reads that share errors (noisy reads that one
+    database record fits best, their errors falling where its alleles
+    differ) is read exactly by almost none: on S-BSST527 (RSII CCS) 3% of
+    their reads against 40%. One is dropped when its exact reads are
+    improbably few (binomial, below p) at frac of the largest's rate. A
+    small consensus cannot fall that short, so it stays."""
+    if not counts:
+        return set()
+    top = max(counts, key=lambda k: (counts[k], -k))
+    rate = frac * exact.get(top, 0) / counts[top]
+    if rate <= 0:
+        return set()
+    return {k for k, n in counts.items()
+            if n and 1 - binom_sf(exact.get(k, 0) + 1, n, rate) < p}
 
 
 # --------------------------------------------------------------------------
@@ -932,6 +978,12 @@ def main(argv=None) -> int:
                     "differences (0: never). Default by read type: "
                     + ", ".join(f"{k} {v}" for k, v in
                                 HOMOPOLYMER_REACH.items()) + ", else 0")
+    ap.add_argument("--exact-support", type=float,
+                    help="drop a consensus whose reads are it exactly far "
+                    "less often than this fraction of the sample's largest "
+                    "consensus' rate (0: never). Default by read type: "
+                    + ", ".join(f"{k} {v[0]:.3g}" for k, v in
+                                EXACT_SUPPORT.items()) + ", else 0")
     ap.add_argument("--homopolymer-merge-ratio", type=float,
                     help="...when the larger has at least this many times "
                     "its reads. Default by read type: "
@@ -987,6 +1039,10 @@ def main(argv=None) -> int:
         hp_edits = args.homopolymer_merge_edits
     if args.homopolymer_merge_ratio is not None:
         hp_ratio = args.homopolymer_merge_ratio
+    support = EXACT_SUPPORT.get(args.read_type)
+    if args.exact_support is not None:
+        support = (args.exact_support, 1e-3) if args.exact_support > 0 \
+            else None
     hp_reach = HOMOPOLYMER_REACH.get(args.read_type, 0) \
         if args.homopolymer_correct_reach is None \
         else args.homopolymer_correct_reach
@@ -998,6 +1054,7 @@ def main(argv=None) -> int:
     tmp = tempfile.mkdtemp(prefix=f"assign_db_{sid}_", dir=args.outdir)
     clusters: list[dict] = []
     hp_merges = hp_corrected = 0
+    dropped = {"sequences": 0, "reads": 0}
     # Per read, only the alignment score of its primary database hit: the
     # one field used later (recruitment, below). A deep well holds millions
     # of these, so a full hit record each was the bulk of its memory.
@@ -1063,20 +1120,35 @@ def main(argv=None) -> int:
         # Count every read against the final set.
         # Each read is decided on its first primary hit as it streams
         # past; only the ids already decided are kept.
-        counts: Counter = Counter()
-        seen: set[str] = set()
-        if clusters:
-            cfa = os.path.join(tmp, "consensus.fa")
-            write_fasta(cfa, ((f"c{k}", c["consensus"])
-                              for k, c in enumerate(clusters)))
-            for a in mm.map(cfa, rfa, extra=("--secondary=no",)):
-                if a["tp"] != "P" or a["q"] in seen:
-                    continue
-                seen.add(a["q"])
-                own = db_score.get(a["q"])
-                if own is not None and own - a["AS"] > args.recruit_margin:
-                    continue
-                counts[int(a["t"][1:])] += 1
+        def count(clusters: list[dict]) -> Counter:
+            counts: Counter = Counter()
+            seen: set[str] = set()
+            if clusters:
+                cfa = os.path.join(tmp, "consensus.fa")
+                write_fasta(cfa, ((f"c{k}", c["consensus"])
+                                  for k, c in enumerate(clusters)))
+                for a in mm.map(cfa, rfa, extra=("--secondary=no",)):
+                    if a["tp"] != "P" or a["q"] in seen:
+                        continue
+                    seen.add(a["q"])
+                    own = db_score.get(a["q"])
+                    if own is not None and \
+                            own - a["AS"] > args.recruit_margin:
+                        continue
+                    counts[int(a["t"][1:])] += 1
+            return counts
+        counts = count(clusters)
+        # A consensus no read supports is dropped, and its reads counted
+        # again against the rest.
+        if support:
+            exact = exact_reads(rfa, [c["consensus"] for c in clusters])
+            drop = unsupported(counts, exact, *support)
+            if drop:
+                dropped = {"sequences": len(drop),
+                           "reads": sum(counts[k] for k in drop)}
+                clusters = [c for k, c in enumerate(clusters)
+                            if k not in drop]
+                counts = count(clusters)
         n_clustered = sum(counts.values())
         fate["clustered"] = n_clustered
         fate["unclustered"] = n_reads - n_clustered
@@ -1184,6 +1256,7 @@ def main(argv=None) -> int:
         **({"homopolymer_merges": hp_merges} if hp_edits > 0 else {}),
         **({"homopolymer_corrected": hp_corrected}
            if hp_edits > 0 and hp_reach > 0 else {}),
+        **({"unsupported_dropped": dropped} if support else {}),
         "settings": {**st.as_dict(), "floors": floors,
                      "lca_margin": args.lca_margin,
                      "recruit_margin": args.recruit_margin,
@@ -1193,6 +1266,9 @@ def main(argv=None) -> int:
                          **({"homopolymer_correct_reach": hp_reach}
                             if hp_reach > 0 else {})}
                         if hp_edits > 0 else {}),
+                     **({"exact_support": {"fraction": support[0],
+                                           "p": support[1]}}
+                        if support else {}),
                      **proto.calling_settings(rule, args)},
         "rank_reached": dict(Counter(r["rank"] or "none" for r in rows)),
     }

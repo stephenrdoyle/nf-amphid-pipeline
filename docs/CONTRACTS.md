@@ -141,11 +141,18 @@ not call by the calling rule asked for, or lacks a release file it reads
 
 | | `paired_short` | `single_long_noisy` | `single_long_accurate` |
 |---|---|---|---|
-| `vespa_v4` | two fixed windows, denoised, pair floors | reference-guided consensus, nanopore floors | the same consensus route and floors |
-| `nemits2` | overlapping mates merged, else two windows (R2 with its 28S stretch), span-scored | consensus carrying the 28S stretch, span-scored | the same consensus route, span-scored, gap rule |
+| `vespa_v4` | two fixed windows, denoised, pair floors | reference-guided consensus, nanopore floors | the consensus route plus three steps (below), same floors |
+| `nemits2` | overlapping mates merged, else two windows (R2 with its 28S stretch), span-scored | consensus carrying the 28S stretch, span-scored | the consensus route plus three steps (below), span-scored, gap rule |
 
-`single_long_accurate` takes the consensus route unchanged. It was
-enabled on what was measured:
+`single_long_accurate` takes the consensus route with three steps of its
+own, none of which runs for `single_long_noisy`: homopolymer-length
+copies of a larger consensus are absorbed (`merge_homopolymer`), a
+smaller consensus takes a larger one's run lengths and keeps its
+substitutions (`correct_homopolymer`), and a consensus no read supports
+exactly is dropped (`unsupported`). All three were added after S-BSST527
+(below); on the simulated HiFi benchmark they change no call - every row
+of the floors grid is the same, and spurious clusters fall from 3 of 604
+to 1 of 602. It was enabled on what was measured:
 
 - **vespa_v4: the floors, on simulated HiFi reads.** The leave-out
   benchmark the floors come from (`tests/bench_db_floors.py`, vespa
@@ -216,15 +223,38 @@ enabled on what was measured:
     (without this, one consensus identical to an ASV, TTT where a 6x
     larger neighbour had TT, was corrected away).
 
-    | S-BSST527 | before | merge | + correct | DADA2 |
-    |---|---|---|---|---|
-    | clustered reads named to species | 94.55% | 94.90% | 96.36% | 99.28% |
-    | *Haemonchus* at genus, study-wide (paper filter) | 4.09% | 3.75% | 2.26% | 0.03% |
-    | *H. contortus*, study-wide | 60.81% | 61.15% | 62.63% | 64.49% |
-    | reads naming another species than the nearest ASV | 5 | 5 | 5 | |
-    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | 92.02% | |
-    | sample-ASV pairs with an identical consensus | 1604 | 1604 | 1611 (7 gained, none lost) | |
-    | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | 0.014 / 0.078 | |
+    Most of what was left above species was then not a sequence in the
+    sample at all: a consensus of noisy reads that one database record
+    fits best because their errors fall where its alleles differ (61% of
+    those reads are in a consensus that is exactly two of the sample's
+    ASVs spliced together). A real sequence is read exactly by about 40%
+    of its reads in this run; these by 3%. DADA2 never builds them: it
+    filters such reads (maxEE 2) or explains them as errors of a more
+    abundant ASV. So, for `single_long_accurate`, a consensus whose
+    exact reads are improbably few (binomial, p < 0.001) at a third of
+    the sample's largest consensus' rate is dropped and its reads counted
+    again against the rest (`unsupported`; "+ support" below: 115
+    consensus sequences, 10,077 reads). The two sample-ASV pairs this
+    loses are sequences DADA2 did not find in those samples at all - a
+    consensus equal by chance to another sample's ASV, read exactly by
+    1-3% of its reads.
+
+    | S-BSST527 | before | merge | + correct | + support | DADA2 |
+    |---|---|---|---|---|---|
+    | clustered reads named to species | 94.55% | 94.90% | 96.36% | 97.07% | 99.28% |
+    | *Haemonchus* at genus, study-wide (paper filter) | 4.09% | 3.75% | 2.26% | 1.57% | 0.03% |
+    | *H. contortus*, study-wide | 60.81% | 61.15% | 62.63% | 63.26% | 64.49% |
+    | reads naming another species than the nearest ASV | 5 | 5 | 5 | 5 | |
+    | clustered reads in a consensus identical to an ASV | 91.59% | 92.05% | 92.02% | 93.01% | |
+    | sample-ASV pairs with an identical consensus | 1604 | 1604 | 1611 | 1609 | |
+    | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | 0.014 / 0.078 | 0.010 / 0.064 | |
+    | unclustered reads | 4,233 | 4,238 | 4,319 | 5,369 | |
+
+    What still differs: 0.65% of reads are in a consensus identical to an
+    ASV that `classify_asvs.py` names to species and the gap rule here
+    leaves at genus - its2_classify.py names an exact match species when
+    the next species is 2 or more edits off (GAP_EXACT), which the
+    nemits2 protocol does not.
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
