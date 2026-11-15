@@ -1034,6 +1034,22 @@ same genus. The set the rule is for, the Cameroon *Necator* (PRJEB64582),
 was deposited without primers and cannot be run through amphid's
 primer-anchored route.
 
+**The release's lineage (2026-11-15).** `taxonomy.tsv`'s `lineage`
+(v0.1.3 on) holds a line within a species - the *Teladorsagia
+circumcincta* goat line, which Francis & Šlapeta (2023) found in goats
+and not in sheep on shared pasture - or a genus-level record's informal
+name ("*Necator* sp. type II"): 50 records in v0.2.4. A span-scored call
+whose tied best records all carry the same one reports it
+(`release_lineage` in `clusters.tsv` and `db_calls.tsv`; `lineage`
+already names the ranks' path), whatever rank the call stops at, as the
+release's scorer does (`its2_classify.py` `lineage()`). A species or
+genus call says it in its label too, "*Teladorsagia circumcincta* (goat
+line)" or "(tentative; goat line)", so such calls are rows of their own
+and are never pooled with the species' other calls. On PRJNA936713 2x250
+(v0.2.4), 12.5% of pairs carry it, all the goat line: 99.6% of
+*Teladorsagia* pairs in the goats (10 of 20 goat samples), none in the
+sheep.
+
 ### 12.5 Checked against the database's own results (v0.1.0)
 
 **Agreement with the reference classifier.** On amphid's own sequences,

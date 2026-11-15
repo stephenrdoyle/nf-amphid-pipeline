@@ -405,7 +405,10 @@ Report the tiered call; read a tentative one as species where the host's
 parasites are well sampled (livestock) and as genus where sister species
 may be missing from the database (wildlife).
 Each call then carries `nearest`, `next`, `gap`, `grade`, `span`,
-`tentative`, `gap_rule_rank` and `gap_rule_taxon`:
+`tentative`, `gap_rule_rank`, `gap_rule_taxon` and `release_lineage`
+(the release's line within a species, "goat line", or a genus-level
+record's informal name, "Necator sp. type II", when every nearest record
+carries it; said in the label too, so such calls are rows of their own):
 "Cooperia; nearest Cooperia oncophora 100%; next Cooperia surnabada +1"
 is a genus call because a sister is one edit away, not because nothing
 is close. Give the NC1/NC2 primers (`assets/primers_nemabiome_its2.tsv`)
