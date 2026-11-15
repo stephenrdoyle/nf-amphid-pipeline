@@ -1590,13 +1590,16 @@ RECORD_FIELDS = ("species_status", "grade", "coverage")
 
 class Taxonomy(dict):
     """id -> {rank: name}, which is what every caller indexes, plus the
-    release's rank columns as `ranks` and, for shared records, the
-    species their members name (`shared`)."""
+    release's rank columns as `ranks`, for shared records the species
+    their members name (`shared`), and for a record contained exactly in
+    a record of another species, or containing one, those records
+    (`contained`)."""
 
     def __init__(self, ranks: list[str]):
         super().__init__()
         self.ranks = ranks
         self.shared: dict[str, list[str]] = {}
+        self.contained: dict[str, list[str]] = {}
 
 
 def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
@@ -1604,7 +1607,9 @@ def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
     RECORD_FIELDS too where the release has them. The ranks are read from
     the header (ranks_in), so PR2 and NCBI releases both load; a
     members.tsv beside the table gives what each shared record's members
-    name."""
+    name. contained_in and contains (nemabiome-its2-refdb v0.2.2 on: the
+    records of another species identical to this one wherever both have
+    sequence) go to `contained`, both directions together."""
     with open_text(path) as fh:
         rdr = csv.DictReader(fh, delimiter="\t")
         ranks = ranks_in(rdr.fieldnames or [], manifest) or RANKS
@@ -1615,6 +1620,10 @@ def load_taxonomy(path: str, manifest: dict | None = None) -> Taxonomy:
             for k in extra:
                 rec[k] = (r.get(k) or "").strip()
             out[r["id"]] = rec
+            near = [c for k in ("contained_in", "contains")
+                    for c in (r.get(k) or "").split(";") if c.strip()]
+            if near:
+                out.contained[r["id"]] = sorted({c.strip() for c in near})
     members = os.path.join(os.path.dirname(path), "members.tsv")
     shared = {i for i, r in out.items() if r.get("species_status") == "shared"}
     if shared and os.path.exists(members):

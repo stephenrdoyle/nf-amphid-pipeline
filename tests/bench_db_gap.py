@@ -25,11 +25,11 @@ protocol's own call is scored:
 
 A call deeper than that, or naming anything wrong at any rank down to it,
 is WRONG - unless its best hit is identical to the source wherever both
-have sequence (one record contained exactly in the other: 147 record
-pairs of 54 species pairs in v0.2.0, none in livestock strongylids),
-which is INDISTINGUISHABLE: no classifier can tell that held-out species
-from the one named, and with both in the database the gap rule stops at
-genus.
+have sequence (one record contained exactly in the other: 151 record
+pairs of 57 species pairs in v0.2.2, none in livestock strongylids; the
+release flags them in contained_in / contains), which is
+INDISTINGUISHABLE: no classifier can tell that held-out species from the
+one named, and with both in the database the gap rule stops at genus.
 
   python3 tests/bench_db_gap.py --release <nemits2 release> \\
       --workdir /tmp/gap --samples 150 [--families Strongylidae,...]
@@ -111,8 +111,15 @@ def prepare(rel: str, work: str, rng: random.Random, n_genera: int,
         for i, s in seqs.items():
             if i not in out:
                 fh.write(f">{i}\n{s}\n")
-    for f in ("taxonomy.tsv", "members.tsv", "resolution_nanopore.tsv",
-              "manifest.json"):
+    # The taxonomy holds only the records left in: a held-out record
+    # named in a kept one's contained_in / contains is not in the
+    # database, as a species missing from a real one is not.
+    with open(os.path.join(rel, "taxonomy.tsv")) as src, \
+            open(os.path.join(lo, "taxonomy.tsv"), "w") as fh:
+        for n, line in enumerate(src):
+            if n == 0 or line.split("\t", 1)[0] not in out:
+                fh.write(line)
+    for f in ("members.tsv", "resolution_nanopore.tsv", "manifest.json"):
         dst = os.path.join(lo, f)
         if os.path.exists(os.path.join(rel, f)) and not os.path.exists(dst):
             os.symlink(os.path.join(os.path.abspath(rel), f), dst)

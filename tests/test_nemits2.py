@@ -405,6 +405,35 @@ def test_span_call() -> None:
           c["rank"] == "genus" and its2.nearest_next(c, tax)[1] ==
           "Haemonchus shared: contortus / placei +1",
           str(its2.nearest_next(c, tax)))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "taxonomy.tsv")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\t".join(["id"] + al.NCBI_RANKS + [
+                "species_status", "contained_in", "contains"]) + "\n")
+            for rid, cin, cs in (("a", "b", ""), ("b", "", "a;c"),
+                                 ("c", "b", ""), ("d", "", "")):
+                fh.write("\t".join([rid] + LINEAGE + [
+                    "Trichostrongylidae", "Haemonchus", f"Haemonchus {rid}",
+                    "named", cin, cs]) + "\n")
+        got = al.load_taxonomy(path).contained
+    check("contained_in and contains load as one list per record",
+          got == {"a": ["b"], "b": ["a", "c"], "c": ["b"]}, str(got))
+    tax.contained.update({"full": ["sis"], "sis": ["part"]})
+    c = its2.span_call([(0, 240, "full"), (6, 240, "sis")], tax, "gap", g)
+    check("a record the release flags as contained in another species' "
+          "record is 0 edits from it, however the read's ends differ",
+          c["rank"] == "genus" and c["gap"] == 0
+          and its2.nearest_next(c, tax)[1] == "Haemonchus placei +0",
+          str(c))
+    c = its2.span_call([(0, 240, "sis"), (6, 240, "part")], tax, "gap", g)
+    check("... not when the flagged record is of the same species",
+          c["rank"] == "species", str(c))
+    tax.contained.update({"full": ["gone"]})
+    del tax.contained["sis"]
+    c = its2.span_call([(0, 240, "full"), (6, 240, "sis")], tax, "gap", g)
+    check("... nor when it is not in the database (held out)",
+          c["rank"] == "species" and c["gap"] == 6, str(c))
+    tax.contained.clear()
     c = its2.span_call([(3, 240, "full"), (20, 240, "sis")], tax, "gap", g)
     check("species needs 99% identity too (3 edits in 240 is 98.75%)",
           c["rank"] == "genus", str(c["rank"]))

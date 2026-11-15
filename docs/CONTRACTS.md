@@ -281,6 +281,22 @@ to 1 of 602. It was enabled on what was measured:
     | strongylids, nanopore_hac | 93.3% -> 97.2% | 5.7% -> 5.7% | 2.3% -> 2.3% |
     | strongylids, nanopore_sup | 93.5% -> 97.3% | 5.7% -> 5.7% | 2.3% -> 2.3% |
 
+    From nemits2 v0.2.2 the release flags those pairs itself
+    (`contained_in` / `contains` in `taxonomy.tsv`: 151 record pairs of
+    57 species pairs), and the gap rule takes a flagged record as 0
+    edits from the other species, as the release's margin does: a read
+    matching the shorter record and differing from the longer only where
+    the shorter has no sequence is no evidence for the shorter's
+    species. Only records in the database count (the benchmark's
+    leave-out copy now holds only the records left in, so a held-out
+    record cannot be seen through a flag). The whole-release run on
+    v0.2.2, with and without the flags on the same reads, gives the
+    table above unchanged: of 2,640 calls, 26 differ, 24 of them already
+    at genus (the gap 1 -> 0) and 2, both from one 5-read consensus of
+    *Aphelenchoides besseyi* reads named *A. oryzae*, from a wrong
+    species to genus. The fixtures carry no flags, so no fixture output
+    changes.
+
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the

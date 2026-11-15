@@ -881,7 +881,11 @@ byte-identical to the code before this change.
   There is no `rank_names.tsv`, and none is needed: the ranks are real.
 - **Record columns.** `species_status` (`named` / `shared` / `unnamed`),
   `grade` and `coverage` are kept beside the ranks. For a shared record,
-  the species its members name are read from `members.tsv`.
+  the species its members name are read from `members.tsv`. From v0.2.2,
+  `contained_in` and `contains` name the records of another species a
+  record is identical to wherever both have sequence (one a few bases
+  shorter at an end); they are kept on the taxonomy (`contained`) for the
+  gap rule (12.4).
 - **Synthesis** places calls in organism groups by rank name for an NCBI
   release (phylum Nematoda is a helminth). Pass `--db_host_clade
   Chordata`: Craniata is PR2's name.
@@ -932,8 +936,15 @@ under 99%.
 span: species at >= 99% identity AND the nearest record of any other
 species >= 4 edits further off over the same span; genus >= 97%, family
 >= 95%. A `shared` record counts as another species, an `unnamed` one
-(hybrids, cf., environmental) does not. The V4 floors stay the rule for
-vespa. Each span-scored call adds `span`, `edits`, `gap`, `nearest`
+(hybrids, cf., environmental) does not. An exact match to its record
+needs only 2 edits (`--db_gap_exact`, as the release's classifier). A
+record the release flags as contained in a record of another species,
+or containing one (`contained_in` / `contains`, v0.2.2 on), is 0 edits
+from that species whatever the read shows: a read that matches the
+shorter record and differs from the longer only where the shorter has
+no sequence says nothing about the shorter's species there, and the
+release's own margin for the pair is 0. With an older release the rule
+is as before. The V4 floors stay the rule for vespa. Each span-scored call adds `span`, `edits`, `gap`, `nearest`
 ("Cooperia oncophora 100.0%"), `next` ("Cooperia surnabada +1", or "none
 close") and `grade` to `clusters.tsv`; synthesis carries `nearest`,
 `next` and `grade` into `db_calls.tsv`.

@@ -168,7 +168,13 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     as another species; an unnamed one (hybrid, cf., environmental) does
     not - counting three hybrid records once cut a cattle set's species
     calls from 87% to 35%. With no other species among the candidates,
-    the gap is the whole span.
+    the gap is the whole span. A tied record the release flags as
+    contained exactly in a record of another species, or containing one
+    (tax.contained), is 0 edits from that species: the two are identical
+    wherever both have sequence, so a read that differs from the longer
+    one only where the shorter has no sequence is no evidence for the
+    shorter's species (the release's margin is 0 too). Only records in
+    the database count.
 
     Adds: span and edits of the best record, gap (None unless the ties
     name exactly one species), next (record, edits further) for the
@@ -196,6 +202,12 @@ def span_call(scores: list[tuple], tax, rule: str, floors: dict,
     gap = None
     if len(species) == 1 and "" not in species:
         gap = nxt[1] if nxt else sp0 - d0
+        flagged = sorted({c for _d, _s, t in ties
+                          for c in getattr(tax, "contained", {}).get(t, ())
+                          if c in tax and tax[c].get("species")
+                          and tax[c]["species"] not in species})
+        if flagged and gap > 0:
+            gap, nxt = 0, (flagged[0], 0)
     tied = sorted(c for _d, _s, c in ties)
     lca = lca_depth(tied, tax)
     ident = 1 - d0 / sp0
