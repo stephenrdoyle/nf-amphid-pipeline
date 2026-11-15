@@ -1,0 +1,9 @@
+run_id	platform	sample_id	index_i7	index_i5	sample_type
+DB03	pacbio	BLANK-01	TAAGGCGA	CTCTCTAT	neg_extraction
+DB03	pacbio	NTC-01	AGGCAGAA	CTCTCTAT	neg_ntc
+DB03	pacbio	S01	GGACTCCT	CTCTCTAT	unknown
+DB03	pacbio	S02	CTCTCTAC	CTCTCTAT	unknown
+DB03	pacbio	S03	AAGAGGCA	CTCTCTAT	unknown
+DB03	pacbio	S04	TAAGGCGA	GTAAGGAG	unknown
+DB03	pacbio	S05	AGGCAGAA	GTAAGGAG	unknown
+DB03	pacbio	S06	GGACTCCT	GTAAGGAG	unknown

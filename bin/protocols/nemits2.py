@@ -23,7 +23,9 @@ AT-repeat stutter of an Oesophagostomum ITS2 (two bases) fell under the
 99% a species call needs.
 
 Read types: single_long_noisy (nanopore consensus, carrying the 28S
-stretch) and paired_short. Not single_long_accurate yet.
+stretch), paired_short, and single_long_accurate (PacBio HiFi or CCS:
+the same consensus route, checked on S-BSST527 against DADA2 ASVs of the
+same reads before it was taken; docs/CONTRACTS.md).
 
 Standard-library Python plus minimap2.
 """
@@ -300,12 +302,10 @@ class Nemits2(Protocol):
         "paired_short": "overlapping mates merged, others two windows "
                         "(R2 with its 28S stretch), scored over each "
                         "record's span",
+        "single_long_accurate": "the consensus route, as nanopore's, each "
+                                "candidate record scored over its span",
     }
-    not_supported = {
-        "single_long_accurate": "not validated yet - the gap rule was "
-                                "measured on consensus and Illumina "
-                                "sequences, not PacBio reads",
-    }
+    not_supported: dict = {}
     calling_rules = ("gap", "floors")
     required_files = ("refdb.fasta", "taxonomy.tsv",
                       "resolution_nanopore.tsv")

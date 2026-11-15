@@ -169,8 +169,13 @@ def run(args) -> int:
                         m, _s, _i = sim.apply_errors(rng, m, model)
                         fh.write(f"@{t}|{cat}|{n}\n{m}\n+\n{'5' * len(m)}\n")
                         n += 1
+            # PacBio reads are run as the pipeline runs them: the same
+            # consensus route, declared single_long_accurate.
+            rt = ("single_long_accurate"
+                  if args.error_model.startswith("pacbio")
+                  else "single_long_noisy")
             with contextlib.redirect_stdout(io.StringIO()):
-                adb.main(["--reads", fq, *common])
+                adb.main(["--reads", fq, "--read-type", rt, *common])
             os.remove(fq)
         truth = {t: cat for t, cat in taxa}
         with open(os.path.join(out, f"{sid}.clusters.tsv")) as fh:

@@ -164,10 +164,10 @@ required field as missing.
 | column | required | meaning |
 |---|---|---|
 | `run_id` | yes | must match a `run_id` in the run manifest |
-| `platform` | yes | `illumina`, `nanopore`, or `predemultiplexed` (database mode, §2.10) |
+| `platform` | yes | `illumina`, `nanopore`, or in database mode `predemultiplexed` (§2.10) or `pacbio` (§2.11) |
 | `sample_id` | yes | unique within the run |
-| `index_i7` | yes | i7 index sequence or name (may be blank on a predemultiplexed run) |
-| `index_i5` | yes | i5 index sequence or name (may be blank on a predemultiplexed run) |
+| `index_i7` | yes | i7 index sequence or name (may be blank on a predemultiplexed run). PacBio: the reverse tag (§2.11) |
+| `index_i5` | yes | i5 index sequence or name (may be blank on a predemultiplexed run). PacBio: the forward tag (§2.11) |
 | `sample_type` | yes | `unknown`, `neg_extraction`, `neg_ntc`, `mock`, `pos_control` |
 | `subject_id` | no | who the library came from. Groups replicates with no metadata file needed; also the join key for a subject-keyed `--metadata`. Defaults to `sample_id` |
 | `file_prefix` | no | overrides filename matching for Illumina and predemultiplexed file resolution |
@@ -212,9 +212,9 @@ results afterwards with `--comparison`.
 | column | required | meaning |
 |---|---|---|
 | `run_id` | yes | matches the samplesheet |
-| `platform` | yes | `illumina`, `nanopore`, or `predemultiplexed` (database mode, §2.10) |
-| `path` | yes | Illumina or predemultiplexed: directory of per-sample FASTQ. Nanopore: MinKNOW run folder, or a pooled FASTQ |
-| `read_type` | no | predemultiplexed only: `single_long_noisy` (nanopore reads; the default) or `single_long_accurate` (PacBio HiFi). Illumina is always `paired_short`, nanopore `single_long_noisy` |
+| `platform` | yes | `illumina`, `nanopore`, or in database mode `predemultiplexed` (§2.10) or `pacbio` (§2.11) |
+| `path` | yes | Illumina or predemultiplexed: directory of per-sample FASTQ. Nanopore: MinKNOW run folder, or a pooled FASTQ. PacBio: the library's FASTQ or unaligned BAM, or a directory of them |
+| `read_type` | no | predemultiplexed only: `single_long_noisy` (nanopore reads; the default) or `single_long_accurate` (PacBio HiFi). Illumina is always `paired_short`, nanopore `single_long_noisy`, PacBio `single_long_accurate` |
 | `barcode_repeats` | no | tandem copies of each index (1 or 2). Defaults to the assay config |
 | `dna_input_ng` | no | DNA input, for the quantification chain |
 | `lot_*` | no | any column starting `lot_` is recorded as reagent provenance |
@@ -443,12 +443,132 @@ plate position, and the misassignment model and plate tests leave it
 out. With `--input_dir`, use `--platform predemultiplexed`; the reads are
 then taken as `single_long_noisy`.
 
-**Read types today.** Both protocols take `single_long_noisy` (nanopore)
-and `paired_short` (Illumina). Neither takes `single_long_accurate` yet:
-the floors and the gap rule have not been checked on PacBio reads, so
-pre-flight refuses it rather than call them unvalidated. A built-in
-PacBio adapter (symmetric-tag demultiplexing, and lima on Linux) is the
-next step.
+**Read types.** Both protocols take all three: `single_long_noisy`
+(nanopore), `paired_short` (Illumina) and `single_long_accurate` (PacBio
+HiFi, through the same consensus route as nanopore's; §2.11 says what
+was measured before it was enabled). A PacBio library that is not yet
+demultiplexed is a `pacbio` run (§2.11).
+
+### 2.11 PacBio libraries (`platform` `pacbio`)
+
+Database mode demultiplexes a PacBio amplicon library itself. A run is
+one library - one pool of tagged samples - and its `path` is the
+library's CCS or HiFi reads: a FASTQ (gzipped or not) or an unaligned BAM
+(`hifi_reads.bam`), or a directory of them (the library's SMRT cells),
+read as one. Each read is
+
+```
+[forward tag] forward primer ... insert ... rc(reverse primer) [rc(reverse tag)]
+```
+
+in either orientation. The tags go in the samplesheet's index columns:
+
+| column | holds |
+|---|---|
+| `index_i5` | the **forward tag**, 5'->3' as it sits just before the forward primer |
+| `index_i7` | the **reverse tag**, 5'->3' on the reverse primer's strand, just before that primer |
+
+```
+run_id  platform  sample_id   index_i7    index_i5    sample_type
+pool1   pacbio    R0719V      GACATAGTCA  GACATAGTCT  unknown
+pool1   pacbio    R0720V      GACGATCAGC  GACGATCAGA  unknown
+```
+
+```
+run_id  platform  path                     dna_input_ng
+pool1   pacbio    /data/S-BSST527/pool1    
+```
+
+A symmetric design gives a sample one tag at both ends (S-BSST527's
+two differ only at the base next to the primer); a combinatorial one
+reuses tags across samples in pairs. Either way a sample is its
+(forward, reverse) pair, declared once; pre-flight refuses a sample
+without both tags and a pair declared twice. `read_type` may be left
+blank: a PacBio run is always `single_long_accurate`.
+
+**Only the run's own tags are matched.** A SMRT cell shared between
+projects carries other libraries' tags - a quarter of every S-BSST527
+file is tags that another pool's list declares - and matching against
+every pool would hand those reads to the wrong samples. Several pools
+sequenced together are several runs, one invocation each (§2.3).
+
+**Plate position** comes from `--index_map` as on any platform: a sample
+whose forward tag is an i5 there and reverse tag an i7 has its well
+(row from the i5, column from the i7). A library's own tags usually are
+not, and then the wells have no position - a pre-flight note says so,
+and the misassignment model and plate tests leave them out. On a
+symmetric design a read can only reach another sample's well with both
+tags misread to that sample's, so cross-talk shows as reads on tag pairs
+no sample has (tier C), not as misassignment.
+
+**The built-in demultiplexer** (`bin/demux_pacbio.py`, the default,
+standard-library Python, any machine):
+
+| step | rule |
+|---|---|
+| orient | the best forward primer (`--primers`, <= 3 edits) within the first 40 bases; if there is none the read is turned round and searched again |
+| reverse primer | reverse-complemented, <= 3 edits, within the last 40 bases, after the forward one. Either primer missing: no primers |
+| tags | the up-to-12 bases outside each primer, matched to the run's tags at that end by edit distance, the tag's end held to the primer. Where the read ends inside the flank, up to three missing tag bases are free (five must be there). A match is <= `--pacbio_tag_max_edits` (2) and strictly closer than any other tag; a tie matches neither |
+| call | both tags a declared pair: assigned. Both tags matched, a pair no sample has: chimeric. One tag only, or none: below |
+| write | `demux/reads/<sample>.fastq.gz`: forward primer to reverse primer, tags off, forward primer first. The protocol cuts the primers as it does nanopore's |
+
+The window, primer and tag tolerances and the flank can be set in an
+optional `"pacbio"` section of the assay JSON (`primer_window`,
+`primer_max_edits`, `tag_max_edits`, `tag_flank`);
+`--pacbio_tag_max_edits` overrides its tag tolerance.
+
+It is a port of the script that demultiplexed S-BSST527 for
+nemabiome-its2-refdb, made fast (exact primers by string search, others
+by bit-parallel alignment, each distinct tag flank scored once): a
+242,327-read pool takes 28 s on one core and 14 s on six, where the
+script took about six minutes per pool on seven workers. It agrees with
+that script on 99.96% of reads (30,000 checked); the rest have an indel
+in the forward primer's first bases, which the two place a base apart,
+moving the tag flank with it.
+
+What happened to every read is in `demux/demux_summary.json`, in
+nanopore's tiers, so the accounting and the read funnel read it
+unchanged:
+
+| tier | reason | meaning |
+|---|---|---|
+| A | `assigned` | both tags match a samplesheet pair |
+| B | `one_end_only` | one tag only: the other end unreadable, two tags equally close, or not this run's |
+| C | `pair_not_declared` | both tags this run's, a pair no sample has: a chimera, or a misread tag |
+| D | `no_primers` | a primer missing: a dimer, an off-target product or a truncated read |
+| D | `no_tag` | primers found, neither tag this run's: usually another library on the cell |
+
+There is no tier E: CCS has already removed the SMRTbell adapters.
+`forward_end` and `reverse_end` count why each end did or did not match,
+and `tag_edits` the mean edits per end for each sample's reads.
+`demux/index_matrix.tsv` holds the reads on every forward x reverse tag
+pair seen together, as nanopore's does.
+
+**lima** (`--pacbio_demux lima`): PacBio's demultiplexer instead, on
+Linux only - there is no macOS build, so the workflow refuses it on a
+Mac before starting. `lima` must be on the `PATH` (or `-profile conda`,
+which takes bioconda's lima 2.9.0). The run's tags are written as lima
+barcodes, one per distinct tag; lima runs with `--hifi-preset SYMMETRIC`
+when every sample has one tag at both ends and `ASYMMETRIC` otherwise,
+and `--split-named`, once per input file; and its per-pair output is
+read back (`demux_pacbio.py --from-lima`) into the same reads, summary
+and matrix as the built-in route. lima's fates map onto the tiers as: a
+declared pair, assigned; an undeclared pair, chimeric; reads under its
+minimum end score, one end only; every other read it did not output,
+unmatched. lima's own summary rides along under `"lima"`. lima does not
+look for primers, so what the built-in route counts as no primers
+reaches assignment and is counted there (`no_primer`). The read-back is
+tested on lima-shaped output; lima itself has not been run by these
+tests, which run on macOS.
+
+**What to expect.** On S-BSST527 (RSII CCS, 158 samples, nemabiome
+ITS2 v0.2.0) the calls agree with a DADA2 analysis of the same reads:
+per-sample compositions differ by a median Bray-Curtis of 0.024, and
+study-wide species shares are within 0.4 points but for *Haemonchus
+contortus*, of which 4.1% of reads stop at genus - consensus sequences
+of small groups of reads that share homopolymer indels, safe but less
+resolved. On simulated HiFi, vespa's floors make the same calls as on
+nanopore. docs/CONTRACTS.md (Read types) has the measurements.
 
 ---
 
@@ -462,7 +582,7 @@ next step.
 | `--samplesheet` | — | samplesheet CSV (required) |
 | `--runs` | — | run manifest TSV; one of this or `--input_dir` |
 | `--input_dir` | — | single-run shortcut; requires `--platform` |
-| `--platform` | — | `illumina`, `nanopore` or `predemultiplexed` (database mode); only with `--input_dir` |
+| `--platform` | — | `illumina`, `nanopore`, or `predemultiplexed` or `pacbio` (database mode); only with `--input_dir` |
 | `--run_id` | `RUN01` | run id when using `--input_dir` |
 | `--primers` | — | PCR1 primers TSV; **required** |
 | `--metadata` | — | grouping metadata TSV, keyed on `subject_id` **or** `sample_id` |
@@ -517,6 +637,13 @@ On the real MinION run this affected 41.6% of reads.
 |---|---|---|
 | `--max_mismatch` | `1` | barcode matching tolerance |
 | `--include_failed` | `false` | also use `fastq_fail` reads |
+
+### 3.5.1 Demultiplexing (PacBio)
+
+| parameter | default | meaning |
+|---|---|---|
+| `--pacbio_demux` | `builtin` | `builtin` (`bin/demux_pacbio.py`, any machine) or `lima` (PacBio's lima, Linux only; refused on macOS). §2.11 |
+| `--pacbio_tag_max_edits` | `null` | edits a tag may differ by and still match (strictly closer than every other tag at its end); `null` takes the assay's `"pacbio"` section, else 2 |
 
 ### 3.6 Assignment
 
@@ -648,6 +775,7 @@ week's results; delete it, or use a fresh one.
 | `test_ont` | nanopore fixtures, end to end, with a real 4-way split fan-out |
 | `test_db` | database mode on nanopore: a miniature release, held-out taxa, a hidden haplotype (`python3 tests/make_db_fixture.py` first) |
 | `test_db_il` | database mode on Illumina 2x150: the same release and samples as `test_db`, as read pairs |
+| `test_pacbio` | database mode on PacBio: the same release and samples as `test_db`, as one tagged HiFi library across a FASTQ and a BAM cell, with other libraries' tags, chimeras, truncated reads and dimers (`python3 tests/make_pacbio_fixture.py` first) |
 | `farm` | no-op, kept so existing commands still work |
 | `singularity` / `docker` / `conda` | enable that engine |
 | `debug` | echo hostnames, keep work directories |
@@ -682,11 +810,12 @@ reproducibility choice, not a dependency.
     split_summary.json          read funnel starts here
     parts/                      per-shard statistics
     file_report.json            which input files were used and excluded
-  demux/                        nanopore only
+  demux/                        nanopore and PacBio
     reads/                      one FASTQ per sample
-    assignments.tsv             per-read outcome
+    assignments.tsv             per-read outcome (nanopore)
     demux_summary.json          the tier breakdown
     index_matrix.tsv            observed i7 x i5 grid, unclaimed pairs marked
+                                (PacBio: reverse x forward tag)
   prep/                         Illumina only
     <sample>.prep.json
   assign/                       panel mode
