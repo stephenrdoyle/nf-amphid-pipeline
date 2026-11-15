@@ -295,7 +295,10 @@ to 1 of 602. It was enabled on what was measured:
     at genus (the gap 1 -> 0) and 2, both from one 5-read consensus of
     *Aphelenchoides besseyi* reads named *A. oryzae*, from a wrong
     species to genus. The fixtures carry no flags, so no fixture output
-    changes.
+    changes. On S-BSST527 (four pools, `-profile field`) v0.2.2 with the
+    flags gives every one of the 2,621 consensus sequences the call
+    v0.2.0 gave it; the synthesis tables differ only in the release's
+    version: no consensus there ties with a flagged record.
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
