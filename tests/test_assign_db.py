@@ -243,6 +243,53 @@ def test_merge() -> None:
                                           for x in m]))
 
 
+def test_homopolymer_merge() -> None:
+    print("\nabsorbing homopolymer-length variants (single_long_accurate)")
+    he = adb.homopolymer_edits
+    check("run lengths only: counted as indels",
+          he("ACCGTTTA", "ACCCGTA") == 3 and he("ACGT", "AACGT") == 1
+          and he("ACGT", "ACGT") == 0)
+    check("a substitution, or a run that vanishes, is not a homopolymer "
+          "difference", he("ACGT", "ACCT") is None
+          and he("ACGT", "AGT") is None)
+    rng = random.Random(9)
+    a = rand(rng, 300)
+    runs_at = [i for i in range(1, 299) if a[i] == a[i - 1]]
+
+    def stretch(s, at, k):          # lengthen the run at `at` by k
+        return s[:at] + s[at] * k + s[at:]
+    hp2 = stretch(stretch(a, runs_at[20], 1), runs_at[5], 1)
+    hp5 = stretch(stretch(a, runs_at[20], 2), runs_at[5], 3)
+    sub = a[:100] + ("A" if a[100] != "A" else "C") + a[101:]
+    sub_hp = stretch(sub, runs_at[20], 1)
+
+    def cl(seq, n, tag):
+        return {"consensus": seq, "reads": [tag] * n, "origin": "group",
+                "merged": 0, "weight": float(n)}
+    m = adb.merge_homopolymer(
+        [cl(a, 200, "a"), cl(hp2, 20, "h"), cl(hp5, 10, "f"),
+         cl(sub, 20, "s"), cl(sub_hp, 5, "t")], 4, 4.0)
+    got = {x["consensus"]: (len(x["reads"]), x["merged"]) for x in m}
+    check("a variant 2 indels off at 1/10 the reads is absorbed and its "
+          "reads counted to the larger", got.get(a) == (220, 1)
+          and hp2 not in got, str(sorted(got.values())))
+    check("5 indels off is kept apart", hp5 in got)
+    check("a substitution is kept apart whatever its abundance", sub in got)
+    check("a homopolymer copy of a small haplotype joins that haplotype, "
+          "not the main one", got.get(sub) == (25, 1), str(got.get(sub)))
+    m = adb.merge_homopolymer([cl(a, 60, "a"), cl(hp2, 20, "h")], 4, 4.0)
+    check("a common run-length haplotype (ratio below 4) is kept", len(m) == 2)
+    # The ratio is over the reads a group stood for, not those drawn.
+    big, small = cl(a, 300, "a"), cl(hp2, 100, "h")
+    big["weight"], small["weight"] = 3000.0, 100.0
+    m = adb.merge_homopolymer([big, small], 4, 4.0)
+    check("the ratio is over whole groups, not the reads drawn from them",
+          len(m) == 1 and m[0]["weight"] == 3100.0)
+    m = adb.merge_close([cl(a, 10, "a"), cl(a[:150] + a[151:], 3, "d")], 1)
+    check("merge_close carries the weight of what it merges",
+          m[0]["weight"] == 13.0)
+
+
 def _tax():
     lin = {
         "A1": "E;S;D;SD;C;O;F1;G1;G1_a",
@@ -404,8 +451,13 @@ def _sample_reads(tmp, rng, species, comp, model, sid):
     return path
 
 
-def test_end_to_end() -> None:
-    print("\nend to end on the database fixture")
+def test_end_to_end(read_type: str = "single_long_noisy") -> None:
+    """The fixture's samples, as nanopore reads (single_long_noisy) or as
+    PacBio HiFi reads (single_long_accurate, where homopolymer-length
+    variants are absorbed: the hidden haplotype must survive it)."""
+    model_name = {"single_long_noisy": "nanopore_hac",
+                  "single_long_accurate": "pacbio_hifi"}[read_type]
+    print(f"\nend to end on the database fixture ({read_type})")
     mm2 = minimap2()
     if not mm2:
         print("  SKIP: minimap2 not found - database mode cannot be tested")
@@ -413,7 +465,7 @@ def test_end_to_end() -> None:
         return
     rng = random.Random(20261028)
     species = fx.build_tree(rng)
-    model = sim.ERROR_MODELS["nanopore_hac"]
+    model = sim.ERROR_MODELS[model_name]
     with tempfile.TemporaryDirectory() as tmp:
         rel = os.path.join(tmp, "release")
         man = fx.write_release(rel, species)
@@ -423,7 +475,8 @@ def test_end_to_end() -> None:
         for sid, _t, comp in fx.SAMPLES:
             fq = _sample_reads(tmp, rng, species, comp, model, sid)
             with contextlib.redirect_stdout(io.StringIO()):
-                adb.main(["--reads", fq, "--database", rel,
+                adb.main(["--reads", fq, "--read-type", read_type,
+                          "--database", rel,
                           "--primers", os.path.join(tmp, "primers.tsv"),
                           "--sample-id", sid, "--outdir", out,
                           "--minimap2", mm2])
@@ -494,6 +547,11 @@ def test_end_to_end() -> None:
             if sum(int(x["reads"]) for x in rows) != r["clustered"]:
                 ok = False
         check("read accounting closes in every sample", ok)
+        on = read_type == "single_long_accurate"
+        check(f"homopolymer merging {'runs' if on else 'does not run'} "
+              f"for {read_type}",
+              all(("homopolymer_merges" in js) == on
+                  for _c, _r, js in results.values()))
         check("every result carries the release version",
               all(js["database"]["version"] == man["version"]
                   and all(x["database_version"] == man["version"] for x in rows)
@@ -658,6 +716,7 @@ def main() -> int:
     test_binomial()
     test_linkage_signature()
     test_merge()
+    test_homopolymer_merge()
     test_lca_and_floors()
     test_floor_parsing()
     test_trim_reads()
@@ -665,6 +724,7 @@ def main() -> int:
     test_release_v080_columns()
     test_aligned_identity()
     test_end_to_end()
+    test_end_to_end("single_long_accurate")
     print(f"\n{'=' * 62}")
     print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

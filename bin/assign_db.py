@@ -49,7 +49,11 @@ So, per sample:
      signature, its reads form a new group, and both are resolved again.
   5. Merge consensus sequences within one edit of each other: groups that
      were one taxon split across near-identical references converge on
-     the same sequence.
+     the same sequence. For PacBio reads (single_long_accurate) also
+     absorb a consensus that differs from a much larger one only in the
+     lengths of a few homopolymer runs (merge_homopolymer): CCS errors
+     are homopolymer indels, reads that share one map to the same
+     database record, and that group's consensus copies the error.
   6. Count reads per consensus by mapping every read to the final set, so
      reads from groups too small for a consensus of their own are counted
      too - or left unclustered, if they fit their own database hit better
@@ -372,10 +376,71 @@ def merge_close(clusters: list[dict], max_edits: int) -> list[dict]:
                     <= max_edits:
                 m["reads"].extend(c["reads"])
                 m["merged"] += 1
+                if "weight" in m:
+                    m["weight"] += c["weight"]
                 break
         else:
             merged.append({**c, "reads": list(c["reads"]), "merged": 0})
     return merged
+
+
+# Absorbing homopolymer-length variants (merge_homopolymer), per read type:
+# (largest total run-length difference, least abundance ratio). Only
+# single_long_accurate, measured on S-BSST527 (RSII CCS, docs/CONTRACTS.md):
+# there, reads grouped by their primary hit share CCS homopolymer indels, so
+# a small group's consensus reproduces them. Nanopore consensus is untouched
+# - its homopolymer errors are spread over every read of a group, not
+# gathered into groups of their own, and its floors were set without this.
+HOMOPOLYMER_MERGE = {"single_long_accurate": (4, 4.0)}
+
+
+def runs(seq: str) -> tuple[str, list[int]]:
+    """A sequence as its run bases and run lengths: AAGCCC -> AGC, 2 1 3."""
+    bases, lens = [], []
+    for b in seq:
+        if bases and bases[-1] == b:
+            lens[-1] += 1
+        else:
+            bases.append(b)
+            lens.append(1)
+    return "".join(bases), lens
+
+
+def homopolymer_edits(a: str, b: str) -> int | None:
+    """The indels between a and b when they differ only in the lengths of
+    their homopolymer runs (a run never vanishes, no base changes); else
+    None. A run of one counts: A -> AA is a homopolymer indel."""
+    (ba, la), (bb, lb) = runs(a), runs(b)
+    if ba != bb:
+        return None
+    return sum(abs(x - y) for x, y in zip(la, lb))
+
+
+def merge_homopolymer(clusters: list[dict], max_edits: int,
+                      min_ratio: float) -> list[dict]:
+    """Absorb a consensus that differs from a much larger one only by
+    homopolymer-length indels: at most max_edits of them, and the larger
+    carrying at least min_ratio times its reads ("weight", the reads its
+    group stood for, not just those drawn to build it). Largest first,
+    against the survivors, so a variant joins the best-supported sequence
+    it is a copy of. A substitution keeps two sequences apart whatever their
+    abundance, and so does a ratio below min_ratio: a real haplotype
+    differing only in a run length survives when it is common enough."""
+    out: list[dict] = []
+    for c in sorted(clusters, key=lambda x: (-x["weight"], x["consensus"])):
+        for m in out:
+            if m["weight"] < min_ratio * c["weight"] or \
+                    abs(len(m["consensus"]) - len(c["consensus"])) > max_edits:
+                continue
+            e = homopolymer_edits(c["consensus"], m["consensus"])
+            if e is not None and e <= max_edits:
+                m["reads"].extend(c["reads"])
+                m["merged"] += c["merged"] + 1
+                m["weight"] += c["weight"]
+                break
+        else:
+            out.append(c)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -745,6 +810,17 @@ def main(argv=None) -> int:
     ap.add_argument("--no-split", action="store_true",
                     help="do not split groups into haplotypes")
     ap.add_argument("--merge-edits", type=int, default=1)
+    ap.add_argument("--homopolymer-merge-edits", type=int,
+                    help="absorb a consensus differing from a larger one "
+                    "only by this many homopolymer-length indels or fewer "
+                    "(0: never). Default by read type: "
+                    + ", ".join(f"{k} {v[0]}" for k, v in
+                                HOMOPOLYMER_MERGE.items()) + ", else 0")
+    ap.add_argument("--homopolymer-merge-ratio", type=float,
+                    help="...when the larger has at least this many times "
+                    "its reads. Default by read type: "
+                    + ", ".join(f"{k} {v[1]}" for k, v in
+                                HOMOPOLYMER_MERGE.items()))
     ap.add_argument("--lca-margin", type=float, default=0.005,
                     help="hits within this fraction of the best alignment "
                     "score take part in the LCA")
@@ -790,6 +866,11 @@ def main(argv=None) -> int:
                   max_reads=args.max_consensus_reads,
                   hap_min_frac=args.haplotype_min_frac,
                   merge_edits=args.merge_edits, split=not args.no_split)
+    hp_edits, hp_ratio = HOMOPOLYMER_MERGE.get(args.read_type, (0, 0.0))
+    if args.homopolymer_merge_edits is not None:
+        hp_edits = args.homopolymer_merge_edits
+    if args.homopolymer_merge_ratio is not None:
+        hp_ratio = args.homopolymer_merge_ratio
     mm = Minimap2(args.minimap2, args.threads)
 
     primers = load_primers(args.primers)
@@ -797,6 +878,7 @@ def main(argv=None) -> int:
     fate: Counter = Counter()
     tmp = tempfile.mkdtemp(prefix=f"assign_db_{sid}_", dir=args.outdir)
     clusters: list[dict] = []
+    hp_merges = 0
     # Per read, only the alignment score of its primary database hit: the
     # one field used later (recruitment, below). A deep well holds millions
     # of these, so a full hit record each was the bulk of its memory.
@@ -826,11 +908,15 @@ def main(argv=None) -> int:
         refseq = {i: s for i, s in read_fasta(db_fasta) if i in heads}
         rng = random.Random(f"{args.seed}:{sid}")
         chosen = []
+        # reads per read drawn: a group's consensus is built from at most
+        # max_reads of them, but stands for them all.
+        scale: dict[str, float] = {}
         for t in sorted(heads, key=lambda t: (-len(groups[t]), t)):
             qs = sorted(groups[t])
             if len(qs) > st.max_reads:
                 qs = sorted(rng.sample(qs, st.max_reads))
             chosen.append((t, qs))
+            scale[t] = len(groups[t]) / len(qs)
         # Only the reads that build a consensus come back into memory;
         # counting maps them all again from reads.fa.
         need = {q for _t, qs in chosen for q in qs}
@@ -841,8 +927,13 @@ def main(argv=None) -> int:
         for t, qs in chosen:
             for c in cb.resolve(qs, refseq[t]):
                 c["group"] = t
+                c["weight"] = len(c["reads"]) * scale[t]
                 built.append(c)
         clusters = merge_close(built, st.merge_edits)
+        if hp_edits > 0:
+            n_built = len(clusters)
+            clusters = merge_homopolymer(clusters, hp_edits, hp_ratio)
+            hp_merges = n_built - len(clusters)
 
         # Count every read against the final set.
         # Each read is decided on its first primary hit as it streams
@@ -964,10 +1055,15 @@ def main(argv=None) -> int:
                          "sequences": len(kept_joins),
                          "reads": sum(counts[k] for k in kept_joins)}},
         "minimap2_calls": mm.calls,
+        # Only where it ran, so other read types' summaries are unchanged.
+        **({"homopolymer_merges": hp_merges} if hp_edits > 0 else {}),
         "settings": {**st.as_dict(), "floors": floors,
                      "lca_margin": args.lca_margin,
                      "recruit_margin": args.recruit_margin,
                      "index_args": INDEX_ARGS,
+                     **({"homopolymer_merge_edits": hp_edits,
+                         "homopolymer_merge_ratio": hp_ratio}
+                        if hp_edits > 0 else {}),
                      **proto.calling_settings(rule, args)},
         "rank_reached": dict(Counter(r["rank"] or "none" for r in rows)),
     }
