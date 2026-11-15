@@ -382,11 +382,21 @@ def test_span_call() -> None:
     c = its2.span_call([(0, 240, "full"), (6, 240, "sis")], tax, "gap", g)
     check("species when the next species is >= 4 edits further off",
           c["rank"] == "species" and c["gap"] == 6, str(c))
-    c = its2.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "gap", g)
+    c = its2.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "gap", g,
+                      gap_exact=0)
     check("genus when it is closer, with how close",
           c["rank"] == "genus" and its2.nearest_next(c, tax) ==
           ("Haemonchus contortus 100.0%", "Haemonchus placei +2"),
           str(its2.nearest_next(c, tax)))
+    c = its2.span_call([(0, 240, "full"), (2, 240, "sis")], tax, "gap", g)
+    check("an exact match is species with the next species 2 edits off "
+          "(GAP_EXACT, as its2_classify.py)", c["rank"] == "species"
+          and c["gap"] == 2, str(c["rank"]))
+    c = its2.span_call([(0, 240, "full"), (1, 240, "sis")], tax, "gap", g)
+    check("... but not 1 edit off", c["rank"] == "genus")
+    c = its2.span_call([(1, 240, "full"), (4, 240, "sis")], tax, "gap", g)
+    check("one edit from its record, the gap must still be 4",
+          c["rank"] == "genus" and c["gap"] == 3, str(c))
     c = its2.span_call([(0, 240, "full"), (1, 240, "hyb")], tax, "gap", g)
     check("an unnamed record is not another species",
           c["rank"] == "species" and c["next"] is None, str(c))

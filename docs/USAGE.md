@@ -679,6 +679,7 @@ On the real MinION run this affected 41.6% of reads.
 | `--db_calling_rule` | `auto` | `floors` (the floors above) or `gap`: species only at >= 99% identity with the nearest other species `--db_gap_edits` further off over the same span. `auto` takes the release's: `gap` for a release scored over its records' span (ITS2), `floors` for V4. `vespa_v4` calls by floors only; `gap` on a V4 release with no declared protocol selects `nemits2`'s span scoring, as it always has |
 | `--db_gap_floors` | `species=0.99,genus=0.97,family=0.95` | identity floors under the gap rule |
 | `--db_gap_edits` | `4` | edits the nearest other species must be further off for a species call under the gap rule. A `shared` record counts as another species; an `unnamed` one does not |
+| `--db_gap_exact` | `2` | the same, for an exact match to its record (0 edits over the record's span), as the release's own classifier (`its2_classify.py`) calls: in its leave-one-out an exact match with another species 2-3 edits off was right 91% of the time, 1 edit off 60%. `0`: exact matches need `--db_gap_edits` too |
 | `--db_min_species_span` | `100` | record bases a span-scored species call must rest on |
 | `--db_primer_offset` | `0` | spacer bases a protocol puts before each primer: both Illumina windows are this much shorter, so every pair fills them (nemabiome NC1/NC2: `3`) |
 

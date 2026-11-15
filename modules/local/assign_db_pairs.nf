@@ -47,6 +47,7 @@ process ASSIGN_DB_PAIRS {
         --calling-rule ${params.db_calling_rule} \\
         --gap-floors '${params.db_gap_floors}' \\
         --gap-edits ${params.db_gap_edits} \\
+        --gap-exact ${params.db_gap_exact} \\
         --min-species-span ${params.db_min_species_span} \\
         --primer-offset ${params.db_primer_offset} \\
         --outdir assign_db

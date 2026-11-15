@@ -105,7 +105,8 @@ from ampseqlib import (  # noqa: E402
     release_version, write_assignment, write_fasta,
 )
 import protocols  # noqa: E402
-from protocols.nemits2 import GAP_EDITS, GAP_FLOORS, MIN_SPAN  # noqa: E402
+from protocols.nemits2 import (  # noqa: E402
+    GAP_EDITS, GAP_EXACT, GAP_FLOORS, MIN_SPAN)
 from protocols.vespa_v4 import DEFAULT_FLOORS  # noqa: E402
 
 CS = re.compile(r"(:\d+|\*[a-z][a-z]|\+[a-z]+|-[a-z]+)")
@@ -919,6 +920,10 @@ def add_calling_args(ap) -> None:
     ap.add_argument("--gap-edits", type=int, default=GAP_EDITS,
                     help="edits the nearest other species must be further "
                     "off for a species call under the gap rule")
+    ap.add_argument("--gap-exact", type=int, default=GAP_EXACT,
+                    help="under the gap rule, the edits the nearest other "
+                    "species must be further off for a species call on an "
+                    "exact match (0: exact matches need --gap-edits too)")
     ap.add_argument("--min-species-span", type=int, default=MIN_SPAN,
                     help="record bases a span-scored species call must rest "
                     f"on (default {MIN_SPAN}, the least any record must "

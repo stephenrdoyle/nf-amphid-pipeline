@@ -250,11 +250,36 @@ to 1 of 602. It was enabled on what was measured:
     | per-sample Bray-Curtis, median / 90th | 0.024 / 0.117 | 0.020 / 0.104 | 0.014 / 0.078 | 0.010 / 0.064 | |
     | unclustered reads | 4,233 | 4,238 | 4,319 | 5,369 | |
 
-    What still differs: 0.65% of reads are in a consensus identical to an
-    ASV that `classify_asvs.py` names to species and the gap rule here
-    leaves at genus - its2_classify.py names an exact match species when
-    the next species is 2 or more edits off (GAP_EXACT), which the
-    nemits2 protocol does not.
+    The gap rule then took the release classifier's exact-match clause
+    (`GAP_EXACT`, `--db_gap_exact 2`: an exact match to its record is a
+    species with the next species 2 or more edits off; before, 0.65% of
+    reads were in a consensus identical to an ASV that
+    `classify_asvs.py` named and the gap rule here left at genus). It is
+    the protocol's rule, so it applies to every read type; it changes no
+    call on the fixtures. On S-BSST527: species 97.07% -> 97.78%,
+    identical sequences called differently from DADA2's 18 (2,884 reads)
+    -> 2 (26 reads), per-sample Bray-Curtis median 0.010 -> 0.0098 and
+    worst sample 0.317 -> 0.100, wrong-species reads 5.
+
+    No nanopore NC1/NC2 run was at hand (nor, as far as a search of ENA
+    and the literature found, is one public), so the clause was measured
+    on nanopore consensus sequences by a leave-out simulation instead
+    (`tests/bench_db_gap.py`: v0.2.0 with 100 species and 30 genera held
+    out, or, for the strongylid families, 60 and 8; 300 samples each;
+    `--gap-exact` 0 and 2 on the same reads). Every call it changed was a
+    species in the database named to species instead of genus; no
+    held-out species or genus was called differently, so wrong calls did
+    not move. A held-out species named a sister whose record it contains
+    exactly (identical wherever both have sequence: 54 species pairs in
+    v0.2.0, mostly plant parasites and ascaridoids, none in livestock
+    strongylids) is counted apart, as indistinguishable - with both in
+    the database the gap rule stops such a pair at genus:
+
+    | sources | in database: species, 0 -> 2 | species held out: wrong (+ indistinguishable) | genus held out: wrong |
+    |---|---|---|---|
+    | whole release, nanopore_hac | 82.0% -> 90.8% | 3.7% (+1.3%), unchanged | 0.3% -> 0.3% |
+    | strongylids, nanopore_hac | 93.3% -> 97.2% | 5.7% -> 5.7% | 2.3% -> 2.3% |
+    | strongylids, nanopore_sup | 93.5% -> 97.3% | 5.7% -> 5.7% | 2.3% -> 2.3% |
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
