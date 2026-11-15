@@ -198,7 +198,8 @@ One record per clusters.tsv row, in its order:
 
 ### `<sample>.assign_db.json`
 
-At least: `sample_id`, `mode` (`"database"`), `database` {version,
+At least: `sample_id`, `mode` (`"database"`), `protocol` (the
+protocol that made the calls: `vespa_v4`, `nemits2`), `database` {version,
 name, path}, `minimap2`, `elapsed_s`, `reads`, `reads_note`, `clusters`
 (rows in clusters.tsv), `haplotype_splits`, `chimeras` {sequences, reads,
 within_genus_kept}, `settings`, `rank_reached`.

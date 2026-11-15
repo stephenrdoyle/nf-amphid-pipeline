@@ -276,6 +276,8 @@ def test_contract_b(fixtures: dict, mm2: str, tmp: str) -> dict:
                 check(f"{tag}: assign_db.json has every required key",
                       all(k in js for k in al.ASSIGN_SUMMARY_KEYS),
                       str(sorted(set(al.ASSIGN_SUMMARY_KEYS) - set(js))))
+                check(f"{tag}: assign_db.json names the protocol",
+                      js["protocol"] == name, str(js.get("protocol")))
                 r = js["reads"]
                 check(f"{tag}: the read fates are there and balance",
                       all(k in r for k in al.ASSIGN_READ_FATES)

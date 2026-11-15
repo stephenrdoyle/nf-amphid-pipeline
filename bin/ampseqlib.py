@@ -2728,8 +2728,8 @@ TAXA_COLUMNS = ["sample_id", "rank", "taxon", "label", "reads",
                 "database_version"]
 # <sample>.assign_db.json: at least these keys; "reads" at least
 # ASSIGN_READ_FATES, which balance (docs/CONTRACTS.md).
-ASSIGN_SUMMARY_KEYS = ["sample_id", "mode", "database", "minimap2",
-                       "elapsed_s", "reads", "reads_note", "clusters",
+ASSIGN_SUMMARY_KEYS = ["sample_id", "mode", "protocol", "database",
+                       "minimap2", "elapsed_s", "reads", "reads_note", "clusters",
                        "haplotype_splits", "chimeras", "settings",
                        "rank_reached"]
 ASSIGN_READ_FATES = ["reads_in", "no_primer", "too_short", "clustered",

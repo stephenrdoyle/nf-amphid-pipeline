@@ -703,7 +703,8 @@ reproducibility choice, not a dependency.
                                 taxon, identity, best hit, consensus
     <sample>.taxa.tsv           reads per taxon at the rank reached
     <sample>.consensus.fasta
-    <sample>.assign_db.json     read accounting, settings, release version
+    <sample>.assign_db.json     read accounting, settings, release version,
+                                protocol (vespa_v4 or nemits2)
   synthesis/                    in database mode:
     db_calls.tsv                one row per sample x taxon at the rank
                                 reached: share, call, limit, reads expected
