@@ -1006,6 +1006,34 @@ apart (DADA2 folds them into one ASV) are named: *Oe. venulosum* reads
 called tentatively fell from 5.9% to 0.3% of pairs, now called by the
 gap rule.
 
+**Informal records after the named ones (2026-11-15).** From v0.2.0 the
+release carries 737 records known only by informal "Genus sp. X" names
+(`species_status` `unnamed`, every source named so; `Taxonomy.informal`,
+read from `members.tsv` as the release's `informal_records()`, the same
+737). As the release's scorer (`score_named_first`), a query is called
+against the named records first, and against the informal ones too only
+where that call stops above genus, the deeper call kept (both judged by
+the gap rule; `named_first_call`). They place reads no named record
+reaches - the gorilla "*Necator* sp." - and, scored alongside the named
+ones, a larva's "Genus sp." record identical to a named species' variant
+took reads of that species to genus.
+
+On the release's leave-one-out (v0.2.4, informal records among the
+candidates), amphid and the release's scorer give the same outcome on
+98.8% of queries (gap rule), 98.7% (tiered). Present species named
+right, read whole: gap rule 58.1% with informal records scored alongside,
+58.4% after the named ones (the release's scorer 58.6%); tiered 69.0%,
+69.5% (69.7%); at 2x150 60.2 -> 60.8% (61.3%), tiered 69.0 -> 69.7%
+(70.2%). Missing species placed in the right genus, read whole, rise
+from 20.9% with no informal records to 25.0% with them (the release's
+scorer 19.2% -> 23.3%), with no more wrong genera. On real data no call
+changed: PRJNA1524548 2x250 and the zoo antelopes (PRJNA1137257, 2x150)
+give the same rank and taxon for every sequence; the reads the
+informal *Macropostrongylus* record took now take a named record of the
+same genus. The set the rule is for, the Cameroon *Necator* (PRJEB64582),
+was deposited without primers and cannot be run through amphid's
+primer-anchored route.
+
 ### 12.5 Checked against the database's own results (v0.1.0)
 
 **Agreement with the reference classifier.** On amphid's own sequences,

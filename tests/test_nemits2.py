@@ -563,6 +563,43 @@ def test_repeats() -> None:
           c["rank"] == "species" and c["gap"] == 6, str(c))
 
 
+def test_informal() -> None:
+    print("\ninformal \"Genus sp.\" records, after the named ones")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "taxonomy.tsv")
+        with open(path, "w") as fh:
+            fh.write("\t".join(["id"] + al.NCBI_RANKS + ["species_status"]) + "\n")
+            for rid, sp, st in (("n", "Necator americanus", "named"),
+                                ("i", "", "unnamed"), ("h", "", "unnamed")):
+                fh.write("\t".join([rid] + LINEAGE + ["Ancylostomatidae",
+                                                      "Necator", sp, st]) + "\n")
+        with open(os.path.join(tmp, "members.tsv"), "w") as fh:
+            fh.write("id\tsource\taccession\tlabel\trole\n")
+            for rid, sp in (("n", "Necator americanus"), ("i", "Necator sp. type II"),
+                            ("i", "Necator sp. 1 AB-2019"),
+                            ("h", "Necator americanus x Necator sp.")):
+                fh.write(f"{rid}\tx\tA1\t" + ";".join(
+                    LINEAGE + ["Ancylostomatidae", "Necator", sp]) + "\tkept\n")
+        tax = al.load_taxonomy(path)
+    check("a record whose sources are all \"Genus sp. X\" is informal; a "
+          "hybrid is not", tax.informal == {"i"}, str(tax.informal))
+    g = its2.GAP_FLOORS
+    c = its2.named_first_call([(1, 240, "n"), (0, 240, "i")], tax, "gap", g)
+    check("a read 1 edit from a named species and identical to an informal "
+          "record of its genus is that species: named records first",
+          c["rank"] == "species" and c["best_hit"] == "n", str(c))
+    c = its2.span_call([(1, 240, "n"), (0, 240, "i")], tax, "gap", g)
+    check("... scored alongside, the informal record would take it to genus",
+          c["rank"] == "genus" and c["best_hit"] == "i", str(c))
+    c = its2.named_first_call([(40, 240, "n"), (2, 240, "i")], tax, "gap", g)
+    check("a read no named record reaches is placed by an informal record",
+          c["rank"] == "genus" and c["best_hit"] == "i", str(c))
+    c = its2.named_first_call([(40, 240, "n")], tax, "gap", g)
+    check("... and without one stops where the named records leave it",
+          c["best_hit"] == "n" and c["rank"] not in ("species", "genus"),
+          str(c))
+
+
 def test_primers_and_merging() -> None:
     print("\nprimers behind a spacer, and merging mates")
     ps = al.PrimerSet(fwd=[("NC1", NC1)], rev=[("NC2", NC2)], max_edits=3)
@@ -844,6 +881,7 @@ def main() -> int:
     test_span_distances()
     test_span_call()
     test_repeats()
+    test_informal()
     test_primers_and_merging()
     test_groups()
     test_preflight()
