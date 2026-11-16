@@ -441,6 +441,21 @@ across runs: `run_id`, `sample_id`, `sample_type`, `rank`, `taxon`,
 `gap_rule_taxon` and `release_lineage` where the clusters carry them (a span-scored
 protocol), from each call's largest cluster.
 
+### `synthesis/unplaced_its2.fasta`, `synthesis/not_its2.fasta`
+
+Written by a protocol that declares `unplaced_fasta` (`nemits2`): what
+stayed above family, in the two groups the release's notes for amphid
+(section 7) ask for. Unplaced ITS2 is a cluster with a database hit
+whose call stopped below the family floor ("unclassified, NN% to X");
+not ITS2-like a cluster with no hit; chimeras are neither. One record
+per sequence across the run, most reads first:
+`>unplaced_its2_NNNN reads=N libraries=K nearest=Genus_species
+identity=I next=Genus_species+E` (`not_its2_NNNN` carries only reads and
+libraries). `db_wells.tsv` then adds `unplaced_its2_fraction` and
+`not_its2_fraction` before `database_version`, and `db_run_qc.json`
+`marker` and `unplaced` {group: sequences, reads, share, file,
+meaning}. Other protocols write neither file and none of these fields.
+
 ---
 
 ## Layer 3: shared

@@ -1004,6 +1004,25 @@ than 3 edits from any - a median 7 reads each, almost all under 0.1% of
 their sample: real variants, errors in one window, or pairs joined in
 the unread gap. They do not change the calls.
 
+**What stays above family, saved (2026-11-16).** As the release's notes
+ask (section 7), synthesis splits what stayed above family into unplaced
+ITS2 (a database hit, but the call stopped below the family floor) and
+not ITS2-like (no hit), gives each well's share of each
+(`unplaced_its2_fraction`, `not_its2_fraction` in `db_wells.tsv`) and
+the run's (`unplaced` in `db_run_qc.json`), and writes each group's
+sequences to `unplaced_its2.fasta` and `not_its2.fasta`, one record per
+sequence across the run with its reads, libraries, nearest record,
+identity and next species. The report shows both columns in place of
+"unclassified", and an ITS2 run's report and tables say "relative ITS2
+abundance", not 18S (`Protocol.marker`). On the zoo antelopes
+(PRJNA1137257, 13 samples, 2x150, v0.2.4, end to end): 5.7% of clustered
+reads not ITS2-like (809 sequences; the release's notes measured 8% on
+DADA2 ASVs) and 0.4% unplaced ITS2 (284 sequences). The largest unplaced
+ITS2 sequences are pairs whose read 1 is *Haemonchus* and read 2
+*Trichostrongylus* - chimeras joined in the unread gap, which the
+release's notes also found in this set and which amphid's chimera
+check did not catch here.
+
 ### 12.4 Calling: the gap rule
 
 Under the gap rule (`--db_calling_rule gap`; the tiered rule below,

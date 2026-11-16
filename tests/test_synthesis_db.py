@@ -916,6 +916,68 @@ def test_tentative_species() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_unplaced() -> None:
+    print("\nnemits2: what stays above family, saved in its two groups")
+    tmp = tempfile.mkdtemp()
+    try:
+        hc = cluster("S1", 1, "hc", 600)
+        far = cluster("S1", 2, "hc", 300, rank="order",
+                      label="unclassified, 91% to Haemonchus")
+        far["consensus"] = "ACGTACGTAC"
+        none = cluster("S1", 3, "hc", 100, rank="order",
+                       label="unclassified, no database hit")
+        none["best_hit"], none["consensus"] = "", "TTTTGGGG"
+        far2 = cluster("S2", 1, "hc", 50, rank="order",
+                       label="unclassified, 92% to Haemonchus")
+        far2["consensus"] = "ACGTACGTAC"
+        args = write_case(tmp, {"S1": [hc, far, none], "S2": [far2]},
+                          {"S1": "unknown", "S2": "unknown"})
+        for sid in ("S1", "S2"):
+            path = os.path.join(tmp, "assign_db", f"{sid}.clusters.tsv")
+            with open(path) as fh:
+                rows = list(csv.DictReader(fh, delimiter="\t"))
+            with open(path, "w") as fh:
+                w = csv.DictWriter(fh, list(rows[0]) + ["nearest", "next"],
+                                   delimiter="\t", lineterminator="\n")
+                w.writeheader()
+                for r in rows:
+                    w.writerow({**r, "nearest": "Haemonchus contortus 91.0%"
+                                if r["best_hit"] else "",
+                                "next": "Haemonchus placei +3" if r["best_hit"]
+                                else ""})
+        calls, w, qc = run(args + ["--protocol", "nemits2"])
+        out = os.path.join(tmp, "synthesis")
+        its2 = open(os.path.join(out, "unplaced_its2.fasta")).read().split("\n")
+        not_its2 = open(os.path.join(out, "not_its2.fasta")).read().split("\n")
+        check("unplaced ITS2 is saved once per sequence across the run, with "
+              "its reads, libraries, nearest record and next species",
+              its2[0] == ">unplaced_its2_0001 reads=350 libraries=2 "
+              "nearest=Haemonchus_contortus identity=100.0 "
+              "next=Haemonchus_placei+3" and its2[1] == "ACGTACGTAC",
+              str(its2[:2]))
+        check("a sequence with no database hit is saved apart, as not "
+              "ITS2-like", not_its2[:2] == [">not_its2_0001 reads=100 libraries=1",
+                                            "TTTTGGGG"], str(not_its2[:2]))
+        check("each well's unclassified share is split into the two groups",
+              w["S1"]["unplaced_its2_fraction"] == "0.3000"
+              and w["S1"]["not_its2_fraction"] == "0.1000", str(w["S1"]))
+        check("the run's shares are in the run QC, with the marker",
+              qc["unplaced"]["unplaced_its2"]["reads"] == 350
+              and qc["unplaced"]["not_its2"]["sequences"] == 1
+              and qc["marker"] == "ITS2"
+              and qc["unit"].startswith("relative ITS2 abundance"),
+              str(qc.get("unplaced")))
+        rpath = os.path.join(tmp, "r.html")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rep.main(["--synthesis-dir", out, "--out", rpath])
+        html = open(rpath).read()
+        check("the report names ITS2, not 18S, and shows both groups",
+              "relative ITS2 abundance" in html and "18S" not in html
+              and "not ITS2-like" in html and "unplaced_its2.fasta" in html)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     test_calls()
     test_no_blanks_and_cohort()
@@ -925,6 +987,7 @@ def main() -> int:
     test_read_funnel()
     test_v080_margin_and_ranks()
     test_tentative_species()
+    test_unplaced()
     test_family_labels_pool()
     test_misassignment_blank()
     test_misassignment_real_contamination()

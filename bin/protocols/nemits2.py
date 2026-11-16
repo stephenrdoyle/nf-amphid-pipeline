@@ -627,6 +627,10 @@ class Nemits2(Protocol):
     }
     not_supported: dict = {}
     calling_rules = ("tiered", "gap", "floors")
+    marker = "ITS2"
+    # The release's notes for amphid, section 7: what stays above family
+    # is two things, saved apart so unplaced ITS2 can be taken further.
+    unplaced_fasta = True
     required_files = ("refdb.fasta", "taxonomy.tsv",
                       "resolution_nanopore.tsv")
     extra_columns = tuple(SPAN_COLUMNS)

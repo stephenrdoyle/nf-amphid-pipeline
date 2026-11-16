@@ -513,9 +513,10 @@ def build(args) -> str:
         f"with minimap2 {esc(qc.get('minimap2', ''))}. Primers "
         f"<code>{esc((pr.get('forward') or {}).get('sequence', ''))}</code> / "
         f"<code>{esc((pr.get('reverse') or {}).get('sequence', ''))}</code>.</p>")
+    mk = qc.get("marker", "18S")
     P.append(
-        "<p><b>Every number here is relative 18S abundance</b> - a share of "
-        "reads - and never organisms or copies. 18S copy number varies by "
+        f"<p><b>Every number here is relative {mk} abundance</b> - a share of "
+        f"reads - and never organisms or copies. {mk} copy number varies by "
         "orders of magnitude between taxa, and this protocol has no "
         "quantification standards to correct for it.</p>")
 
@@ -898,22 +899,47 @@ def build(args) -> str:
     # -- off-target --------------------------------------------------------
     off = [g for g, _c, _l in GROUP_STYLE if g not in TARGET]
     P.append("<h2 id='offtarget'>Off-target</h2>")
+    # A release whose protocol saves what stays above family (nemits2)
+    # splits "unclassified" into its two groups, each also in a FASTA.
+    unp = qc.get("unplaced") or {}
+    if unp:
+        unc_cols = [(g, unp[g]["meaning"]) for g in ("unplaced_its2", "not_its2")
+                    if g in unp]
+        unc_note = (
+            " What stayed above family is in two groups: <i>unplaced "
+            f"{esc(mk)}</i> aligns to records but none is within family range "
+            "- most often a taxon the database lacks, its nearest record "
+            f"saying roughly where it sits; <i>not {esc(mk)}-like</i> has no "
+            "database hit at all - primer dimers, chimeras, off-target "
+            "products. Run-wide: " + "; ".join(
+                f"{esc(v['meaning'])} {100 * v['share']:.2f}% of clustered "
+                f"reads in {v['sequences']} sequence"
+                f"{'' if v['sequences'] == 1 else 's'} "
+                f"(<code>synthesis/{esc(v['file'])}</code>)"
+                for g, v in unp.items()) + ".")
+    else:
+        unc_cols = [("unclassified", "unclassified")]
+        unc_note = ""
     P.append(
         "<p>What else the primers amplified, as shares of each well's "
-        "classified reads, from the PR2 lineage each call reached; host is "
+        f"classified reads, from the {'PR2 ' if mk == '18S' else ''}lineage "
+        "each call reached; host is "
         f"<code>{esc(qc.get('settings', {}).get('host_clade', ''))}</code>. "
         "<i>Unassigned</i> stopped too high in the tree to place; "
         "<i>unclassified</i> is consensus that cleared no identity floor down "
-        "to family - most often a taxon the database does not hold.</p>")
+        "to family - most often a taxon the database does not hold."
+        + unc_note + "</p>")
     rows = []
     for w in wells:
         rows.append(f"<tr><td>{esc(w['sample_id'])}</td>"
                     + "".join(f"<td class='num'>{pct(w.get(g + '_fraction'))}</td>"
                               for g in off)
-                    + f"<td class='num'>{pct(w['unclassified_fraction'])}</td></tr>")
+                    + "".join(f"<td class='num'>{pct(w.get(g + '_fraction'))}</td>"
+                              for g, _l in unc_cols) + "</tr>")
     P.append("<div class='scroll'><table><thead><tr><th>sample</th>"
              + "".join(f"<th class='num'>{GROUP_LABEL[g]}</th>" for g in off)
-             + "<th class='num'>unclassified</th></tr></thead><tbody>"
+             + "".join(f"<th class='num'>{esc(l)}</th>" for _g, l in unc_cols)
+             + "</tr></thead><tbody>"
              + "".join(rows) + "</tbody></table></div>")
 
     # -- rank reached -----------------------------------------------------
