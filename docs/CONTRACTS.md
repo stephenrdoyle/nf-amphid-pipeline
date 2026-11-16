@@ -337,6 +337,44 @@ to 1 of 602. It was enabled on what was measured:
     leaves at genus. Every other species' study-wide share is within 0.4
     points of DADA2's under either rule.
 
+    **Grouping tied reads (2026-11-16).** Run on v0.2.4, which drops 9
+    records none of them sheep parasites, the same reads gave slightly
+    worse figures (98.31% to species, *Haemonchus* at genus 1.01%), and
+    475 consensus sequences (15,347 reads, 3.5%) were built differently.
+    About 8% of these reads score exactly as well on several records,
+    and minimap2 breaks such a tie by the index's order: dropping
+    unrelated records moved 133 of one sample's 3,037 reads to another
+    group. For `single_long_accurate` a read is now grouped under the
+    record, among those tied for its best score, that most of the
+    sample's reads tie on (`group_ties`; minimap2 reports up to 50 hits
+    per read to see them; `assign_db.py --group-ties 0` turns it off,
+    and `assign_db.json` records `group_ties`). The ASVs keep the
+    classification above; amphid runs `assign_db.py` alone on the
+    pipeline's demultiplexed reads, which reproduces the pipeline's
+    output:
+
+    | S-BSST527, tiered | primary hit, v0.2.2 | v0.2.4 | most-tied record, v0.2.2 | v0.2.4 |
+    |---|---|---|---|---|
+    | clustered reads named to species | 98.44% | 98.31% | 98.90% | 98.90% |
+    | *Haemonchus* at genus, study-wide, paper filter | 0.91% | 1.01% | 0.50% | 0.50% |
+    | *H. contortus*, study-wide | 63.90% | 63.80% | 64.24% | 64.25% |
+    | per-sample Bray-Curtis, median / 90th | 0.0050 / 0.038 | 0.0063 / 0.038 | 0.0044 / 0.025 | 0.0043 / 0.029 |
+    | reads naming another species than the nearest ASV | 5 | 5 | 5 | 5 |
+    | reads on a v0.2.2 consensus v0.2.4 does not build | | 3.50% | | 0.45% |
+
+    It also gathers reads that share a CCS homopolymer error - which tie
+    on records of their own - back with their sequence's other reads.
+    What it costs: a haplotype that ties a commoner record joins that
+    record's group, and where they differ only in run lengths the split
+    does not part them. One such *Cyathostomum* haplotype, 13% of
+    HRG14-084 and kept by DADA2 at genus, is now counted as
+    *C. catinatum* (that sample's Bray-Curtis 0.017 -> 0.116). Grouping
+    by the whole set of tied records kept it but rebuilt the error groups
+    (98.16% to species, *Haemonchus* at genus 1.13%, 2.4x the time), and
+    giving only sets of 5+ reads their own group did no better (97.97%,
+    1.30%, 3.1x). Most-tied costs 1.2x the assignment time.
+    `single_long_noisy` is unchanged, byte for byte.
+
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the
   resolution cost should be smaller there; it has not been measured on
   such a run.

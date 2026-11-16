@@ -406,6 +406,43 @@ HOMOPOLYMER_REACH = {"single_long_accurate": 8}
 # p below which a consensus falls short of it). Only where reads are
 # accurate enough for a real sequence to be read exactly by many of them.
 EXACT_SUPPORT = {"single_long_accurate": (1 / 3, 1e-3)}
+# Grouping reads whose best alignment score ties several database records
+# (group_ties), per read type: how many hits minimap2 reports per read
+# (-N), so the tied records can be seen; 0: group by the primary hit.
+# Accurate reads tie often - a read of a sequence that several records
+# share over the amplicon scores equally on each - and minimap2 breaks a
+# tie by the index's order, so a release that removed nine unrelated
+# records regrouped a twentieth of S-BSST527's H. contortus reads and
+# built different consensus sequences from them.
+GROUP_TIES = {"single_long_accurate": 50}
+
+
+def group_ties(ties: dict[str, set[str]]) -> dict[tuple[str, ...],
+                                                  list[str]]:
+    """Reads grouped under the record tied for their best score that most
+    of the sample's reads tie on, then the smallest id; each group keyed
+    by its record, as a group of the primary hit is.
+
+    A read's tied set is what minimap2 reported, which can be incomplete,
+    but the record most reads share stays the same when the release or
+    the reported set shifts a little: on S-BSST527, v0.2.2 against
+    v0.2.4, reads on a consensus that changed fell from 3.5% to 0.45%.
+    It also gathers reads that share a CCS homopolymer error, and so tie
+    on records of their own, back with their sequence's other reads,
+    where a group of their own built a consensus with the error: species
+    calls rose from 98.3% to 98.9% of reads.
+
+    The cost: a haplotype that ties a commoner record goes into that
+    record's group, and where it differs only by homopolymer lengths the
+    split does not part them (a Cyathostomum haplotype, 13% of one
+    S-BSST527 sample, DADA2 keeps it). Keeping every set with enough reads
+    a group of its own kept that haplotype but rebuilt the error groups -
+    98.0% species, and three times as slow."""
+    pop: Counter = Counter(t for ts in ties.values() for t in ts)
+    groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for q, ts in ties.items():
+        groups[(min(ts, key=lambda t: (-pop[t], t)),)].append(q)
+    return groups
 
 
 def runs(seq: str) -> tuple[str, list[int]]:
@@ -1043,6 +1080,13 @@ def main(argv=None) -> int:
                     "consensus' rate (0: never). Default by read type: "
                     + ", ".join(f"{k} {v[0]:.3g}" for k, v in
                                 EXACT_SUPPORT.items()) + ", else 0")
+    ap.add_argument("--group-ties", type=int,
+                    help="group a read whose best score ties several "
+                    "database records under the one tied for most reads, "
+                    "seeing up to this many hits per read (0: group by "
+                    "minimap2's primary hit). Default by read type: "
+                    + ", ".join(f"{k} {v}" for k, v in GROUP_TIES.items())
+                    + ", else 0")
     ap.add_argument("--homopolymer-merge-ratio", type=float,
                     help="...when the larger has at least this many times "
                     "its reads. Default by read type: "
@@ -1114,6 +1158,8 @@ def main(argv=None) -> int:
         hp_cap = hp_edits
     if args.homopolymer_merge_ratio is not None or hp_edits > 0:
         hp_cap_ratio = hp_ratio
+    n_ties = GROUP_TIES.get(args.read_type, 0) \
+        if args.group_ties is None else args.group_ties
     mm = Minimap2(args.minimap2, args.threads)
 
     primers = load_primers(args.primers)
@@ -1136,25 +1182,40 @@ def main(argv=None) -> int:
             for q, seq in iter_trimmed(args.reads, primers, fate):
                 fh.write(f">{q}\n{seq}\n")
                 n_reads += 1
-        groups: dict[str, list[str]] = defaultdict(list)
-        if n_reads:
+        groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
+        if n_reads and n_ties > 0:
+            # minimap2 writes a read's primary before its secondaries.
+            ties: dict[str, set[str]] = {}
+            for a in mm.map(index, rfa, preset=INDEX_ARGS,
+                            extra=("-N", str(n_ties))):
+                q = a["q"]
+                if a["tp"] == "P":
+                    if q not in db_score:
+                        db_score[q] = a["AS"]
+                        ties[q] = {a["t"]}
+                elif a["tp"] == "S" and q in ties and a["AS"] == db_score[q]:
+                    ties[q].add(a["t"])
+            groups = group_ties(ties)
+            del ties
+        elif n_reads:
             for a in mm.map(index, rfa, preset=INDEX_ARGS,
                             extra=("--secondary=no",)):
                 if a["tp"] == "P" and a["q"] not in db_score:
                     db_score[a["q"]] = a["AS"]
-                    groups[a["t"]].append(a["q"])
+                    groups[(a["t"],)].append(a["q"])
         fate["unmapped"] = n_reads - len(db_score)
 
         # Consensus per group large enough to have one. The reference
-        # sequence is the starting draft; the database is read once, for
-        # just the records that head a group.
+        # sequence (the first of its key) is the starting draft; the
+        # database is read once, for just the records that head a group.
         heads = {t for t, qs in groups.items() if len(qs) >= st.min_reads}
-        refseq = {i: s for i, s in read_fasta(db_fasta) if i in heads}
+        need = {t[0] for t in heads}
+        refseq = {i: s for i, s in read_fasta(db_fasta) if i in need}
         rng = random.Random(f"{args.seed}:{sid}")
         chosen = []
         # reads per read drawn: a group's consensus is built from at most
         # max_reads of them, but stands for them all.
-        scale: dict[str, float] = {}
+        scale: dict[tuple[str, ...], float] = {}
         for t in sorted(heads, key=lambda t: (-len(groups[t]), t)):
             qs = sorted(groups[t])
             if len(qs) > st.max_reads:
@@ -1169,10 +1230,10 @@ def main(argv=None) -> int:
         cb = ConsensusBuilder(mm, reads, tmp, st)
         built = []
         for t, qs in chosen:
-            for c in cb.resolve(qs, refseq[t]):
-                c["group"] = t
+            for c in cb.resolve(qs, refseq[t[0]]):
+                c["group"] = t[0]
                 c["weight"] = len(c["reads"]) * scale[t]
-                c["known"] = refseq[t] in c["consensus"]
+                c["known"] = refseq[t[0]] in c["consensus"]
                 built.append(c)
         clusters = merge_close(built, st.merge_edits)
         n_built = len(clusters)
@@ -1339,6 +1400,7 @@ def main(argv=None) -> int:
                              "homopolymer_correct_ratio": hp_cap_ratio}
                             if hp_edits <= 0 else {})}
                         if hp_reach > 0 else {}),
+                     **({"group_ties": n_ties} if n_ties > 0 else {}),
                      **({"exact_support": {"fraction": support[0],
                                            "p": support[1]}}
                         if support else {}),
