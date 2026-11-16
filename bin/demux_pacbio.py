@@ -49,13 +49,8 @@ found by str.find and only an inexact one by Myers' bit-parallel
 alignment (ampseqlib.find_anchor_cost), and each distinct tag flank -
 most flanks are a tag exactly - is scored once per process.
 
-  --write-lima-barcodes FASTA   writes the run's tags as a lima barcode
-                                FASTA and the pair table lima's output is
-                                read back through, then stops;
-  --from-lima DIR               reads lima's output (--split-named, FASTQ
-                                or BAM, per input file) instead of reads,
-                                and writes the same outputs. lima runs on
-                                Linux only (no macOS build).
+Reads already split by PacBio's lima (SMRT Link, a sequencing centre)
+need no demultiplexing: they are a predemultiplexed run (USAGE.md 2.10).
 
 Reads: FASTQ (gzipped or not) or unaligned BAM (PacBio's hifi_reads.bam),
 as files or directories of them, read as one library.
@@ -71,7 +66,6 @@ import gzip
 import io
 import json
 import os
-import re
 import struct
 import sys
 import time
@@ -443,8 +437,7 @@ class SampleWriter:
 def summarise(run_id: str, samples: list[dict], reasons: Counter,
               ends: dict, orient: Counter, grid: Counter, edits: dict,
               writer: SampleWriter, files: list[dict], settings: dict,
-              outdir: str, demultiplexed_by: str, native: dict | None = None
-              ) -> dict:
+              outdir: str, demultiplexed_by: str) -> dict:
     total = sum(reasons.values())
     tiers = Counter()
     for r, n in reasons.items():
@@ -486,107 +479,11 @@ def summarise(run_id: str, samples: list[dict], reasons: Counter,
         "reads_written_balanced": writer.written == assigned,
         "per_sample": per_sample,
     }
-    if native is not None:
-        summary["lima"] = native
     return summary
 
 
 def write_reads(outdir: str):
     return SampleWriter(os.path.join(outdir, "reads"))
-
-
-# --------------------------------------------------------------------------
-# lima
-# --------------------------------------------------------------------------
-
-
-def lima_barcodes(samples: list[dict]) -> tuple[list[tuple[str, str]], dict]:
-    """The run's tags as lima barcodes: one per distinct sequence, at
-    either end, named t001...; and {(name, name): sample}, the pair
-    sorted, since lima names a pair by its barcodes' order in the FASTA."""
-    seqs = sorted({s["index_i5"] for s in samples}
-                  | {s["index_i7"] for s in samples})
-    name = {q: f"t{k:03d}" for k, q in enumerate(seqs, 1)}
-    pairs = {tuple(sorted((name[s["index_i5"]], name[s["index_i7"]]))):
-             s["sample_id"] for s in samples}
-    return [(name[q], q) for q in seqs], pairs
-
-
-def lima_preset(samples: list[dict]) -> str:
-    """SYMMETRIC when every sample has one tag at both ends, else
-    ASYMMETRIC (lima's --hifi-preset)."""
-    return ("SYMMETRIC" if all(s["index_i5"] == s["index_i7"]
-                               for s in samples) else "ASYMMETRIC")
-
-
-LIMA_OUT = re.compile(r"^(?P<prefix>.+)\.(?P<a>[^.]+)--(?P<b>[^.]+)"
-                      r"\.(?P<ext>fastq|fq|bam)(?:\.gz)?$")
-
-
-def parse_lima_summary(path: str) -> dict:
-    """lima's .lima.summary as {label: count}: 'ZMWs input (A) : 1000'."""
-    out = {}
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            m = re.match(r"^\s*([^:(]+?)\s*(?:\([A-Z]\))?\s*:\s*(\d+)", line)
-            if m:
-                out[m.group(1)] = int(m.group(2))
-    return out
-
-
-def from_lima(lima_dir: str, samples: list[dict], writer: SampleWriter):
-    """Read lima's per-pair outputs back as the samples they belong to.
-
-    Returns (reasons, grid, files, native): the fates as this script's
-    reasons - a declared pair assigned, an undeclared one
-    pair_not_declared, reads lima held below its end-score threshold
-    one_end_only (one barcode end too weak to call), and every other read
-    lima did not output no_tag - and lima's own summaries verbatim."""
-    _bcs, pairs = lima_barcodes(samples)
-    by_name = {}
-    for q, nm in ((q, n) for n, q in _bcs):
-        by_name[nm] = q
-    reasons, grid = Counter(), Counter()
-    files, summ = [], {}
-    names = sorted(os.listdir(lima_dir))
-    for f in names:
-        if f.endswith(".lima.summary"):
-            for k, v in parse_lima_summary(os.path.join(lima_dir, f)).items():
-                summ[k] = summ.get(k, 0) + v
-    for f in names:
-        m = LIMA_OUT.match(f)
-        if not m or m.group("a") not in by_name or m.group("b") not in by_name:
-            continue
-        a, b = m.group("a"), m.group("b")
-        sample = pairs.get(tuple(sorted((a, b))))
-        n = 0
-        for name, seq, qual in open_any(os.path.join(lima_dir, f)):
-            n += 1
-            if sample:
-                writer.add(sample, f"@{name}\n{seq}\n+\n{qual}\n")
-        reasons["assigned" if sample else "pair_not_declared"] += n
-        # The pair as forward and reverse tag, where the samplesheet says
-        # which end each belongs to.
-        qa, qb = by_name[a], by_name[b]
-        i5s = {s["index_i5"] for s in samples}
-        key = (qa, qb) if qa in i5s else (qb, qa)
-        grid[key] += n
-        files.append({"path": f, "format": m.group("ext"), "reads": n})
-    total = next((v for k, v in summ.items() if "input" in k.lower()), None)
-    out = sum(reasons.values())
-    if total is None:
-        total = out
-    weak = next((v for k, v in summ.items()
-                 if "end score" in k.lower()), 0)
-    weak = min(weak, max(0, total - out))
-    reasons["one_end_only"] += weak
-    reasons["no_tag"] += max(0, total - out - weak)
-    native = {"summary": summ,
-              "fate_mapping": "declared pair -> assigned; undeclared pair "
-                              "-> chimeric; below lima's min end score -> "
-                              "one end only; every other read lima did not "
-                              "output -> unmatched"}
-    return reasons, grid, files, native
 
 
 # --------------------------------------------------------------------------
@@ -596,7 +493,7 @@ def from_lima(lima_dir: str, samples: list[dict], writer: SampleWriter):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("--reads", nargs="+",
+    ap.add_argument("--reads", nargs="+", required=True,
                     help="the library's FASTQ or BAM files, or directories")
     ap.add_argument("--samplesheet", required=True)
     ap.add_argument("--run-id", required=True)
@@ -616,11 +513,6 @@ def main(argv=None) -> int:
     ap.add_argument("--tag-flank", dest="tag_flank", type=int,
                     help="bases outside each primer read for its tag "
                     f"(default {CONSTRUCT['tag_flank']})")
-    ap.add_argument("--write-lima-barcodes", metavar="FASTA",
-                    help="write the run's tags as lima barcodes (and "
-                    "FASTA.preset, the --hifi-preset), then stop")
-    ap.add_argument("--from-lima", metavar="DIR",
-                    help="read lima's --split-named output instead of reads")
     args = ap.parse_args(argv)
     t0 = time.time()
 
@@ -628,14 +520,6 @@ def main(argv=None) -> int:
     if not samples:
         raise SystemExit(f"no samples for run '{args.run_id}' in the "
                          "samplesheet")
-    if args.write_lima_barcodes:
-        bcs, _pairs = lima_barcodes(samples)
-        with open(args.write_lima_barcodes, "w", encoding="utf-8") as fh:
-            fh.writelines(f">{n}\n{q}\n" for n, q in bcs)
-        with open(args.write_lima_barcodes + ".preset", "w",
-                  encoding="utf-8") as fh:
-            fh.write(lima_preset(samples) + "\n")
-        return 0
     cfg = construct(args.assay, args)
     primers = load_primers(args.primers)
     fwd = [p for _n, p in primers.fwd]
@@ -647,77 +531,64 @@ def main(argv=None) -> int:
     settings = {**cfg, "tags_forward": len({s["index_i5"] for s in samples}),
                 "tags_reverse": len({s["index_i7"] for s in samples})}
 
-    if args.from_lima:
-        reasons, grid, files, native = from_lima(args.from_lima, samples,
-                                                 writer)
-        writer.close()
-        summary = summarise(args.run_id, samples, reasons,
-                            {"i5": {}, "i7": {}}, Counter(), grid, {},
-                            writer, files,
-                            {"preset": lima_preset(samples)},
-                            args.outdir, "lima, read back by demux_pacbio.py",
-                            native)
-    else:
-        if not args.reads:
-            raise SystemExit("--reads is required (or --from-lima)")
-        paths = read_files(args.reads)
-        if not paths:
-            raise SystemExit(f"no FASTQ or BAM under {' '.join(args.reads)}")
-        m = Matcher(samples, fwd, rev, cfg)
-        reasons, orient, grid = Counter(), Counter(), Counter()
-        ends = {"i5": Counter(), "i7": Counter()}
-        edits: dict = defaultdict(lambda: [0, 0])
-        per_file = Counter()
-        pool = (Pool(args.threads, _init_worker, (samples, fwd, rev, cfg))
-                if args.threads > 1 else None)
-        try:
-            # imap keeps the batches' order, so each batch's calls pair
-            # with the batch held back here; only sequences cross to the
-            # workers.
-            held = deque()
+    paths = read_files(args.reads)
+    if not paths:
+        raise SystemExit(f"no FASTQ or BAM under {' '.join(args.reads)}")
+    m = Matcher(samples, fwd, rev, cfg)
+    reasons, orient, grid = Counter(), Counter(), Counter()
+    ends = {"i5": Counter(), "i7": Counter()}
+    edits: dict = defaultdict(lambda: [0, 0])
+    per_file = Counter()
+    pool = (Pool(args.threads, _init_worker, (samples, fwd, rev, cfg))
+            if args.threads > 1 else None)
+    try:
+        # imap keeps the batches' order, so each batch's calls pair
+        # with the batch held back here; only sequences cross to the
+        # workers.
+        held = deque()
 
-            def feed():
-                for b in batches(paths):
-                    held.append(b)
-                    yield b[1]
-            calls_of = (pool.imap(_classify_batch, feed(), chunksize=1)
-                        if pool else
-                        ([m.classify(q) for q in b] for b in feed()))
-            for calls in calls_of:
-                names, seqs, quals, fi = held.popleft()
-                per_file[fi] += len(seqs)
-                for name, seq, qual, c in zip(names, seqs, quals, calls):
-                    (reason, sample, s1, e2, turned, k5, k7, d5, d7,
-                     why5, why7) = c
-                    reasons[reason] += 1
-                    if reason == "no_primers":
-                        continue
-                    orient["reverse" if turned else "forward"] += 1
-                    ends["i5"][why5] += 1
-                    ends["i7"][why7] += 1
-                    if k5 is not None and k7 is not None:
-                        grid[(m.i5[k5], m.i7[k7])] += 1
-                    if not sample:
-                        continue
-                    seq = seq.upper()
-                    if turned:
-                        seq, qual = revcomp(seq), qual[::-1]
-                    writer.add(sample, f"@{name}\n{seq[s1:e2]}\n+\n"
-                                       f"{qual[s1:e2]}\n")
-                    edits[sample][0] += d5
-                    edits[sample][1] += d7
-        finally:
-            if pool:
-                pool.close()
-                pool.join()
-        writer.close()
-        files = [{"path": os.path.basename(p),
-                  "format": "bam" if p.lower().endswith(BAM_SUFFIXES)
-                  else "fastq", "reads": per_file.get(k, 0)}
-                 for k, p in enumerate(paths)]
-        summary = summarise(args.run_id, samples, reasons, ends, orient,
-                            grid, edits, writer, files, settings,
-                            args.outdir, "amphid (demux_pacbio.py)")
+        def feed():
+            for b in batches(paths):
+                held.append(b)
+                yield b[1]
+        calls_of = (pool.imap(_classify_batch, feed(), chunksize=1)
+                    if pool else
+                    ([m.classify(q) for q in b] for b in feed()))
+        for calls in calls_of:
+            names, seqs, quals, fi = held.popleft()
+            per_file[fi] += len(seqs)
+            for name, seq, qual, c in zip(names, seqs, quals, calls):
+                (reason, sample, s1, e2, turned, k5, k7, d5, d7,
+                 why5, why7) = c
+                reasons[reason] += 1
+                if reason == "no_primers":
+                    continue
+                orient["reverse" if turned else "forward"] += 1
+                ends["i5"][why5] += 1
+                ends["i7"][why7] += 1
+                if k5 is not None and k7 is not None:
+                    grid[(m.i5[k5], m.i7[k7])] += 1
+                if not sample:
+                    continue
+                seq = seq.upper()
+                if turned:
+                    seq, qual = revcomp(seq), qual[::-1]
+                writer.add(sample, f"@{name}\n{seq[s1:e2]}\n+\n"
+                                   f"{qual[s1:e2]}\n")
+                edits[sample][0] += d5
+                edits[sample][1] += d7
+    finally:
+        if pool:
+            pool.close()
+            pool.join()
+    writer.close()
+    files = [{"path": os.path.basename(p),
+              "format": "bam" if p.lower().endswith(BAM_SUFFIXES)
+              else "fastq", "reads": per_file.get(k, 0)}
+             for k, p in enumerate(paths)]
+    summary = summarise(args.run_id, samples, reasons, ends, orient,
+                        grid, edits, writer, files, settings,
+                        args.outdir, "amphid (demux_pacbio.py)")
 
     with open(os.path.join(args.outdir, "demux_summary.json"), "w",
               encoding="utf-8") as fh:

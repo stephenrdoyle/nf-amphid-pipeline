@@ -554,22 +554,13 @@ and `tag_edits` the mean edits per end for each sample's reads.
 `demux/index_matrix.tsv` holds the reads on every forward x reverse tag
 pair seen together, as nanopore's does.
 
-**lima** (`--pacbio_demux lima`): PacBio's demultiplexer instead, on
-Linux only - there is no macOS build, so the workflow refuses it on a
-Mac before starting. `lima` must be on the `PATH` (or `-profile conda`,
-which takes bioconda's lima 2.9.0). The run's tags are written as lima
-barcodes, one per distinct tag; lima runs with `--hifi-preset SYMMETRIC`
-when every sample has one tag at both ends and `ASYMMETRIC` otherwise,
-and `--split-named`, once per input file; and its per-pair output is
-read back (`demux_pacbio.py --from-lima`) into the same reads, summary
-and matrix as the built-in route. lima's fates map onto the tiers as: a
-declared pair, assigned; an undeclared pair, chimeric; reads under its
-minimum end score, one end only; every other read it did not output,
-unmatched. lima's own summary rides along under `"lima"`. lima does not
-look for primers, so what the built-in route counts as no primers
-reaches assignment and is counted there (`no_primer`). The read-back is
-tested on lima-shaped output; lima itself has not been run by these
-tests, which run on macOS.
+**Reads lima has already split** (SMRT Link, or a sequencing centre's
+delivery) need no demultiplexing here: run them as `predemultiplexed`
+(§2.10) with `read_type` `single_long_accurate`, `file_prefix` set to
+lima's `<movie>.<bc>--<bc>` names. amphid does not run lima itself. On
+S-BSST527 it lost a third of a pool's reads to tags that differ only at
+the base next to the primer, which this demultiplexer handles, and
+lima has no macOS build to test against.
 
 **What to expect.** On S-BSST527 (RSII CCS, 158 samples, nemabiome
 ITS2 v0.2.0) the calls agree with a DADA2 analysis of the same reads:
@@ -658,7 +649,6 @@ On the real MinION run this affected 41.6% of reads.
 
 | parameter | default | meaning |
 |---|---|---|
-| `--pacbio_demux` | `builtin` | `builtin` (`bin/demux_pacbio.py`, any machine) or `lima` (PacBio's lima, Linux only; refused on macOS). §2.11 |
 | `--pacbio_tag_max_edits` | `null` | edits a tag may differ by and still match (strictly closer than every other tag at its end); `null` takes the assay's `"pacbio"` section, else 2 |
 
 ### 3.6 Assignment

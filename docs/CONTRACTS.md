@@ -36,7 +36,7 @@ what it writes against this document and against the column lists in
 | `illumina` | split per sample by the sequencer | `paired_short` | pre-flight resolves each sample's R1/R2 by `file_prefix` |
 | `nanopore` | as a flow cell's FASTQs | `single_long_noisy` | `split_concatemers.py`, then `demux_ont.py` on the construct the assay JSON describes |
 | `predemultiplexed` | already split per sample, by lima, Dorado or a sequencing centre | `single_long_noisy` (default) or `single_long_accurate` | pre-flight resolves each sample's FASTQ(s) by `file_prefix`, like Illumina but one read per molecule |
-| `pacbio` | as a library's CCS/HiFi FASTQ or BAM | `single_long_accurate` | `demux_pacbio.py` on the samplesheet's tags (`index_i5` forward, `index_i7` reverse), or lima on Linux read back by it (`--pacbio_demux`) |
+| `pacbio` | as a library's CCS/HiFi FASTQ or BAM | `single_long_accurate` | `demux_pacbio.py` on the samplesheet's tags (`index_i5` forward, `index_i7` reverse); reads lima already split are `predemultiplexed` |
 
 `predemultiplexed` and `pacbio` are database mode only. Its samples are found under the
 run's `path` as `<prefix>.fastq.gz` (or `.fq.gz`, `.fastq`, `.fq`),
@@ -95,7 +95,7 @@ What every adapter hands the protocol layer, for each run:
    does not have is left out, not zero. Synthesis reads the accounting,
    not a platform's own files: `native` carries the detail a shared fate
    cannot (nanopore's end reasons, combination grid, basecaller;
-   PacBio's reasons, per-end matches, tag edits, lima's summary), and
+   PacBio's reasons, per-end matches, tag edits), and
    the read funnel and plate QC are built from it.
 4. **Plate positions**, where the platform has them: from the index map,
    the i5 giving the row and the i7 the column (`file_resolution.tsv`

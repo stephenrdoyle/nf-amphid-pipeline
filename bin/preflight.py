@@ -71,7 +71,7 @@ SAMPLE_TYPES = {"unknown", "neg_extraction", "neg_ntc", "mock", "pos_control"}
 # (lima, Dorado, a sequencing centre), resolved like Illumina but one
 # read per molecule; database mode only. pacbio: a library's CCS/HiFi
 # reads, demultiplexed here by the tags the samplesheet gives
-# (bin/demux_pacbio.py, or lima); database mode only.
+# (bin/demux_pacbio.py); database mode only.
 PLATFORMS = {"illumina", "nanopore", "predemultiplexed", "pacbio"}
 # The read type each platform delivers (contract A). A predemultiplexed
 # run says which in runs.tsv's read_type column; single_long_noisy when

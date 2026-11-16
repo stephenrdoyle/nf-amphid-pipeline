@@ -69,7 +69,6 @@ def helpMessage() {
       --expected_tag     Override the assay's control tag sequence
       --db_protocol      Database mode: the protocol to run (vespa_v4,
                          nemits2; default: the release's)
-      --pacbio_demux     PacBio: builtin (default) or lima (Linux only)
       --outdir           Results directory (default: ./results)
     """.stripIndent()
 }
@@ -111,24 +110,6 @@ workflow {
     }
     if (params.platform in ['predemultiplexed', 'pacbio'] && !params.reference_database) {
         problems << "--platform ${params.platform} is database mode only (--reference_database)"
-    }
-    if (!(params.pacbio_demux in ['builtin', 'lima'])) {
-        problems << "--pacbio_demux must be builtin or lima (got '${params.pacbio_demux}')"
-    }
-    // lima has no macOS build. Refused here, where it can be said
-    // plainly, rather than as "lima: command not found" in a task.
-    if (params.pacbio_demux == 'lima' &&
-            System.getProperty('os.name').toLowerCase().contains('mac')) {
-        problems << "--pacbio_demux lima: lima runs on Linux only (there is no macOS build). " +
-                    "Run on the farm, or use the built-in demultiplexer (--pacbio_demux builtin)"
-    }
-    // A flag. Compared as text, never by truthiness: from Nextflow 26.04
-    // every command-line parameter arrives as a string, so a bare
-    // --spiked may be 'true' rather than true, and --spiked false is the
-    // string 'false' - truthy in Groovy, so it would quietly mean spiked.
-    // Anything but true or false (e.g. --spiked yes) is refused.
-    if (!(params.spiked.toString().toLowerCase() in ['true', 'false'])) {
-        problems << "--spiked is a flag: give it with no value (got '${params.spiked}')"
     }
     // The test profiles run on simulated reads, which are generated rather
     // than committed - so a fresh clone has none. Without this check the
