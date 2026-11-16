@@ -576,6 +576,46 @@ def fold_indel_variants(centroids: list, alpha: float,
     return [(centroids[k][0], centroids[k][1], size[k]) for k in kept], folded
 
 
+# Chimeras joined in the unread gap of a window pair: read 1 from one
+# worm, read 2 from another. The de novo check (assign_db.chimera_scan)
+# finds one only when both parents are in the sample, at least twice as
+# abundant and the same shape; on the zoo antelopes (PRJNA1137257) it
+# missed some even with more candidate parents. So a pair whose call
+# falls under the family floor has each window scored alone: if each is
+# at least GAP_CHIMERA_IDENTITY to records of DIFFERENT genera (over at
+# least GAP_CHIMERA_SPAN record bases), it is a join in the gap and is
+# counted as a chimera, not named and not saved as unplaced ITS2. A
+# pair that only one window places stays as it is: a parent the database
+# lacks cannot be told from a real, unfamiliar sequence.
+GAP_CHIMERA_IDENTITY, GAP_CHIMERA_SPAN = 0.97, 60
+
+
+def window_best(part: tuple, cands, recs: dict, tail: int, repeats: bool):
+    """(identity, record) of one window's best record scored alone over
+    its span, or None."""
+    sc = [x for x in span_scores([part], cands, recs, tail, repeats)
+          if x[1] >= GAP_CHIMERA_SPAN]
+    if not sc:
+        return None
+    d, sp, c = max(sc, key=lambda x: (1 - x[0] / x[1], x[1], x[2]))[:3]
+    return 1 - d / sp, c
+
+
+def gap_chimera(x: str, y: str, call: dict, cands, recs: dict, tax,
+                floors: dict, tail: int, repeats: bool):
+    """((R1 identity, record), (R2 identity, record)) when a window pair
+    is a join in the unread gap (GAP_CHIMERA_IDENTITY), else None."""
+    if not y or call.get("identity", 0) >= floors.get("family", 0.95):
+        return None
+    a = window_best((x, "start"), cands, recs, tail, repeats)
+    b = window_best((revcomp(y), "end"), cands, recs, tail, repeats)
+    if not a or not b or min(a[0], b[0]) < GAP_CHIMERA_IDENTITY:
+        return None
+    ga = tax.get(a[1], {}).get("genus", "")
+    gb = tax.get(b[1], {}).get("genus", "")
+    return (a, b) if ga and gb and ga != gb else None
+
+
 MERGE_MIN_OVERLAP = 20
 MERGE_MAX_MISMATCH = 0.05
 
@@ -628,6 +668,12 @@ class Nemits2(Protocol):
     not_supported: dict = {}
     calling_rules = ("tiered", "gap", "floors")
     marker = "ITS2"
+    # Chimeras (assign_db_pairs): the parents candidates lifted from 6,
+    # since amphid keeps many variants per sample and six slots filled
+    # with one parent's; a parent named above genus judged by its best
+    # record's genus; and joins in the gap found window by window.
+    chimera_max_parents = 50
+    chimera_parents_by_best_hit = True
     # The release's notes for amphid, section 7: what stays above family
     # is two things, saved apart so unplaced ITS2 can be taken further.
     unplaced_fasta = True
@@ -799,6 +845,11 @@ class Nemits2(Protocol):
                             repeats=not args.no_repeats), tax, rule,
                 floors, args.gap_edits, scorable, args.min_species_span,
                 args.gap_exact, args.tentative_identity)
+            if not args.no_chimera_check:
+                gc = gap_chimera(x, y, calls[k], cands[k], recs, tax, floors,
+                                 tail, not args.no_repeats)
+                if gc:
+                    calls[k]["gap_chimera"] = gc
         return calls, 0
 
 
