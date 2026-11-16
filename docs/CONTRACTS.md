@@ -173,7 +173,7 @@ to 1 of 602. It was enabled on what was measured:
   consensus is more often exact, and the floors treat it as they treat
   a nanopore one. (A held-out genus taking a confamilial's name is the
   floors' known limit on any platform, REFERENCE_DATABASE.md §11.3.)
-- **nemits2: the gap rule, on S-BSST527** (Halvarsson & Höglund 2021:
+- **nemits2: the gap and tiered rules, on S-BSST527** (Halvarsson & Höglund 2021:
   158 sheep larval cultures, NC1/NC2, PacBio RSII CCS in four pools,
   914,810 reads; nemabiome-its2-refdb v0.2.0). Compared with
   nemabiome-its2-refdb's own analysis of the same reads (its
@@ -302,6 +302,35 @@ to 1 of 602. It was enabled on what was measured:
     version: no consensus there ties with a flagged record.
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
+
+    **Under the tiered rule (2026-11-16).** The figures above are the gap
+    rule's. Since the tiered rule became the default for a release
+    scored over its records' span, the four pools were run again
+    (`-profile field`, v0.2.2) with every change since: the tiered rule,
+    repeat-aware scoring, informal records after the named ones, the
+    release's lineage. The ASVs were classified again with the release's
+    current `classify_asvs.py` on the same release. The gap rule's call,
+    which each tiered call carries beside it, reproduces the figures
+    above (97.79% to species, Bray-Curtis median 0.0098, the same 2
+    identical sequences called differently), so the other changes moved
+    nothing here and what differs is the rule:
+
+    | S-BSST527, v0.2.2 | gap rule | tiered |
+    |---|---|---|
+    | clustered reads named to species (DADA2) | 97.79% (99.28%) | 98.44% (99.32%) |
+    | *Haemonchus* at genus, study-wide, paper filter (DADA2) | 1.57% (0.03%) | 0.91% (0.00%) |
+    | *H. contortus*, study-wide (DADA2) | 63.25% (64.49%) | 63.90% (64.53%) |
+    | identical sequences called differently from DADA2's | 2 (26 reads) | 1 (22 reads) |
+    | per-sample Bray-Curtis, median / 90th / max | 0.0098 / 0.052 / 0.100 | 0.0047 / 0.038 / 0.075 |
+    | taxa at >= 1% of a sample in amphid only | 63 | 42 |
+    | reads naming another species than the nearest ASV | 5 | 5 |
+
+    The tentative tier names 2,848 reads (0.65% of clustered) to
+    species, mostly *H. contortus* consensus sequences 98-99% to their
+    records; the one identical sequence still called differently is a
+    *Cylicostephanus goldi* consensus (22 reads) that `classify_asvs.py`
+    leaves at genus. Every other species' study-wide share is within 0.4
+    points of DADA2's under either rule.
 
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the
   resolution cost should be smaller there; it has not been measured on
