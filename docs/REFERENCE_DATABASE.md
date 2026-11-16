@@ -286,7 +286,9 @@ So `bin/assign_db.py`, per sample:
 
 1. trims reads at the primers (orienting them; the release's records
    are primer-trimmed inserts);
-2. maps them to the release and groups them by primary hit;
+2. maps them to the release and groups them by primary hit (PacBio
+   reads tied on several records: by the one most of the sample's reads
+   tie on, so a release's unrelated records do not regroup them);
 3. builds a reference-guided consensus per group of ≥5 reads: pile the
    reads on the hit via minimap2 `cs` tags, majority base per position
    (insertions where most spanning reads carry one), re-align to the

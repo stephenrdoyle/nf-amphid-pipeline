@@ -244,6 +244,25 @@ def test_merge() -> None:
                                           for x in m]))
 
 
+def test_group_ties() -> None:
+    print("\ngrouping reads whose best hit ties several records")
+    # r1-r3 tie on a and b (minimap2 named either primary), r4 on b and c.
+    ties = {"r1": {"a", "b"}, "r2": {"a", "b"}, "r3": {"a", "b"},
+            "r4": {"b", "c"}, "r5": {"d"}}
+    g = adb.group_ties(ties)
+    check("tied reads go to the record tied for most reads",
+          dict(g) == {("b",): ["r1", "r2", "r3", "r4"], ("d",): ["r5"]},
+          str(dict(g)))
+    g = adb.group_ties({"r1": {"b", "a"}, "r2": {"a", "b"}})
+    check("an even tie goes to the smallest id",
+          dict(g) == {("a",): ["r1", "r2"]}, str(dict(g)))
+    # A record dropped from the release that no read was grouped under
+    # leaves every group as it was.
+    g2 = adb.group_ties({q: ts - {"c"} for q, ts in ties.items()})
+    check("dropping a record no group used changes no group",
+          dict(g2) == dict(adb.group_ties(ties)), str(dict(g2)))
+
+
 def test_homopolymer_merge() -> None:
     print("\nabsorbing homopolymer-length variants (single_long_accurate)")
     he = adb.homopolymer_edits
@@ -618,6 +637,10 @@ def test_end_to_end(read_type: str = "single_long_noisy") -> None:
               f"for {read_type}",
               all(("homopolymer_merges" in js) == on
                   for _c, _r, js in results.values()))
+        check(f"reads {'are' if on else 'are not'} grouped by their tied "
+              f"records for {read_type}",
+              all(("group_ties" in js["settings"]) == on
+                  for _c, _r, js in results.values()))
         if on:
             # The correction with the merge turned off: it still runs, at
             # the read type's own cap and ratio, and says so.
@@ -804,6 +827,7 @@ def main() -> int:
     test_binomial()
     test_linkage_signature()
     test_merge()
+    test_group_ties()
     test_homopolymer_merge()
     test_exact_support()
     test_lca_and_floors()
