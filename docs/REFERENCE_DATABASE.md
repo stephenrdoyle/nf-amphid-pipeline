@@ -983,6 +983,27 @@ stutter or real variation among ITS2 copies, and folding them would hide
 the latter. The rest are sequences more than 3 edits from any more
 abundant one, and 1-3 substitution variants the abundance rule keeps.
 
+**At 2x150 (2026-11-16).** The same reads cut to 2x150, against the
+release's DADA2 ASVs at 2x150 (hybrid joining, which at this length is
+concatenation: 13 and 1,438 pairs merged). Read 2 inside 28S holds:
+PRJNA1524548 uses its 1.65 million such pairs, drops 4.0% as
+`no_primer`, and no sample is empty. The indel fold works on window
+pairs: sequences per sample 37 -> 28 on PRJNA936713 (DADA2 15) and 139
+-> 49 on PRJNA1524548 (DADA2 19), 6,021 and 89,777 reads folded, the
+species share unchanged or slightly up (gap rule 96.3 -> 96.4%, 93.5 ->
+93.8%). With the release's classifier on both:
+
+| 2x150 | species, gap: amphid / DADA2 | tiered: amphid / DADA2 | per-sample Bray-Curtis median (max) | amphid reads in a sequence DADA2 found |
+|---|---|---|---|---|
+| PRJNA936713 | 95.9 / 95.2% | 98.7 / 98.5% | 0.008 (0.049) | 96.4% |
+| PRJNA1524548 | 93.9 / 94.7% | 97.9 / 98.3% | 0.011 (0.066) | 98.2% |
+
+What amphid keeps beyond DADA2's ASVs at 2x150 is not indel variants
+but window pairs 1-3 substitutions from a more abundant one, or more
+than 3 edits from any - a median 7 reads each, almost all under 0.1% of
+their sample: real variants, errors in one window, or pairs joined in
+the unread gap. They do not change the calls.
+
 ### 12.4 Calling: the gap rule
 
 Under the gap rule (`--db_calling_rule gap`; the tiered rule below,
