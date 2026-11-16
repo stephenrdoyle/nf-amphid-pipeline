@@ -224,6 +224,11 @@ class Protocol:
     # Whether synthesis writes the sequences left above family to FASTA
     # (unplaced_its2.fasta, not_its2.fasta) and reports their shares.
     unplaced_fasta = False
+    # Pair chimeras (assign_db.chimera_scan, assign_db.parents_differ):
+    # candidate parents per sequence, and whether a parent named only
+    # above genus is judged by its best record's genus.
+    chimera_max_parents = 6
+    chimera_parents_by_best_hit = False
 
     # -- what it can run ------------------------------------------------
     def unsupported(self, read_type: str) -> str:

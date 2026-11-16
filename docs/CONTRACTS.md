@@ -361,7 +361,7 @@ These columns, in this order, from every protocol:
 | `rel_abundance` | reads over the sample's clustered reads, 6 decimals; blank when none |
 | `rank` | the rank the call reached; blank when none (or a chimera) |
 | `taxon` | the name at that rank |
-| `label` | what the report says: the taxon, or "unclassified, NN% to X", "X, unresolved below R", "chimera of A and B" |
+| `label` | what the report says: the taxon, or "unclassified, NN% to X", "X, unresolved below R", "chimera of A and B", "chimera across the gap: R1 NN% to X, R2 NN% to Y" (nemits2 window pairs) |
 | `identity` | identity to the best record, 4 decimals |
 | `coverage` | share of the query the best record's alignment covers, 3 decimals |
 | `lineage` | `;`-joined names down to the rank reached |
@@ -373,7 +373,7 @@ These columns, in this order, from every protocol:
 | `db_margin` | a species call's edits to the nearest other species, "large", or blank |
 | `origin` | `group`, `split…` (haplotype), `pair`, `pair_split`, `whole_insert` or `chimera` |
 | `merged` | consensus sequences merged into this one |
-| `chimera_of` | `A+B@breakpoint` for a chimera, with "within genus, kept" for one that is kept |
+| `chimera_of` | `A+B@breakpoint` for a chimera, with "within genus, kept" for one that is kept; `R1:<record>+R2:<record>@gap` for a join in the gap found window by window (nemits2) |
 | `length` | sequence length |
 | `database_version` | the release's version |
 | `consensus` | the sequence (a pair's gap as ten Ns) |
@@ -411,7 +411,9 @@ At least: `sample_id`, `mode` (`"database"`), `protocol` (the
 protocol that made the calls: `vespa_v4`, `nemits2`), `database` {version,
 name, path}, `minimap2`, `elapsed_s`, `reads`, `reads_note`, `clusters`
 (rows in clusters.tsv), `haplotype_splits`, `chimeras` {sequences, reads,
-within_genus_kept}, `settings`, `rank_reached`.
+within_genus_kept, and `across_gap` {sequences, reads} - of those
+counted, the joins in the gap found window by window - when there are
+any}, `settings`, `rank_reached`.
 
 `reads` holds at least `reads_in`, `no_primer`, `too_short`, `clustered`
 and `unclustered`, and they balance:

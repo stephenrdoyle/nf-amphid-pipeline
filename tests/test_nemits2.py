@@ -643,6 +643,55 @@ def test_indel_fold() -> None:
           "pushed out) is folded too", n == 40 and len(out) == 1, str(out))
 
 
+def test_gap_chimeras() -> None:
+    print("\nchimeras joined in the unread gap")
+    rng = random.Random(21)
+    tax = al.Taxonomy(al.NCBI_RANKS)
+    recs = {}
+    for rid, gen, sp in (("hc", "Haemonchus", "Haemonchus contortus"),
+                         ("ta", "Trichostrongylus", "Trichostrongylus axei"),
+                         ("tc", "Trichostrongylus", "Trichostrongylus colubriformis")):
+        tax[rid] = dict(zip(al.NCBI_RANKS, LINEAGE + ["Trichostrongylidae", gen, sp]),
+                        species_status="named", grade="complete")
+        recs[rid] = rand(rng, 240)
+    recs["tc"] = recs["ta"][:150] + rand(rng, 90)
+    x = recs["hc"][:127]                                   # R1: Haemonchus
+    yi = recs["ta"][-80:] + STRETCH[:40]                   # R2: T. axei, + 28S
+    y = al.revcomp(yi)
+    cands = list(recs)
+    call = its2.span_call(its2.span_scores([(x, "start"), (yi, "end")], cands,
+                                           recs, 40), tax, "gap", its2.GAP_FLOORS)
+    gc = its2.gap_chimera(x, y, call, cands, recs, tax, its2.GAP_FLOORS, 40, True)
+    check("a pair under the family floor whose windows are each close to a "
+          "different genus is a join in the gap",
+          call["identity"] < 0.95 and gc is not None
+          and (gc[0][1], gc[1][1]) == ("hc", "ta"), f"{call['identity']:.3f} {gc}")
+    xn = rand(rng, 127)
+    calln = its2.span_call(its2.span_scores([(xn, "start"), (yi, "end")], cands,
+                                            recs, 40), tax, "gap", its2.GAP_FLOORS)
+    check("... not when one window is close to nothing (a parent the database "
+          "lacks cannot be told from a real sequence)",
+          its2.gap_chimera(xn, y, calln, cands, recs, tax, its2.GAP_FLOORS, 40,
+                           True) is None)
+    xs = recs["tc"][:127]
+    calls = its2.span_call(its2.span_scores([(xs, "start"), (yi, "end")], cands,
+                                            recs, 40), tax, "gap", its2.GAP_FLOORS)
+    check("... nor when both windows are of one genus",
+          its2.gap_chimera(xs, y, calls, cands, recs, tax, its2.GAP_FLOORS, 40,
+                           True) is None)
+    above = {"best_hit": "ta", "depth": al.NCBI_RANKS.index("order"),
+             "lca_depth": al.NCBI_RANKS.index("order"), "identity": 0.96}
+    sp = {"best_hit": "hc", "depth": al.NCBI_RANKS.index("species"),
+          "lca_depth": al.NCBI_RANKS.index("species"), "identity": 1.0}
+    check("a de novo chimera's parent named only above genus is judged by its "
+          "best record's genus under nemits2, kept as possibly the same genus "
+          "otherwise", adb.parents_differ(sp, above, tax, True)
+          and not adb.parents_differ(sp, above, tax))
+    check("nemits2 lifts the chimera check's parent candidates",
+          its2.PROTOCOL.chimera_max_parents > 6
+          and its2.PROTOCOL.chimera_parents_by_best_hit)
+
+
 def test_primers_and_merging() -> None:
     print("\nprimers behind a spacer, and merging mates")
     ps = al.PrimerSet(fwd=[("NC1", NC1)], rev=[("NC2", NC2)], max_edits=3)
@@ -958,6 +1007,7 @@ def main() -> int:
     test_repeats()
     test_informal()
     test_indel_fold()
+    test_gap_chimeras()
     test_primers_and_merging()
     test_groups()
     test_preflight()

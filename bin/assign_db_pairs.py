@@ -497,13 +497,21 @@ def main(argv=None) -> int:
         for ks in shapes.values():
             found = adb.chimera_scan(
                 [centroids[k][0] + "|" + centroids[k][1] for k in ks],
-                [centroids[k][2] for k in ks], fixed=True)
+                [centroids[k][2] for k in ks], fixed=True,
+                max_parents=proto.chimera_max_parents)
             for q, (a, b, bp, *_r) in found.items():
                 chim[ks[q]] = (ks[a], ks[b], bp)
     # Only joins of two genera are excluded (assign_db.parents_differ).
     kept_joins = {k: v for k, v in chim.items()
-                  if not adb.parents_differ(calls[v[0]], calls[v[1]], tax)}
+                  if not adb.parents_differ(
+                      calls[v[0]], calls[v[1]], tax,
+                      proto.chimera_parents_by_best_hit)}
     chim = {k: v for k, v in chim.items() if k not in kept_joins}
+    # Joins in the unread gap the protocol found window by window
+    # (nemits2.gap_chimera): read 1 and read 2 each close to a different
+    # genus, the pair close to nothing.
+    gapc = {k: c["gap_chimera"] for k, c in calls.items()
+            if c.get("gap_chimera") and k not in chim}
     rows = []
     label_depth = ranks.index("family")
     for n, k in enumerate(order, 1):
@@ -549,6 +557,15 @@ def main(argv=None) -> int:
             chimera_of = f"{cid[a]}+{cid[b]}@{where}"
             taxon, label, d = "", f"chimera of {cid[a]} and {cid[b]}", -1
             call = {**call, "rank": ""}
+        elif k in gapc:
+            (ia, ra), (ib, rb) = gapc[k]
+            na = adb.nearest_name(tax.get(ra, {}), ranks) or ra
+            nb = adb.nearest_name(tax.get(rb, {}), ranks) or rb
+            chimera_of = f"R1:{ra}+R2:{rb}@gap"
+            taxon, d = "", -1
+            label = (f"chimera across the gap: R1 {100 * ia:.0f}% to {na}, "
+                     f"R2 {100 * ib:.0f}% to {nb}")
+            call = {**call, "rank": ""}
         rows.append({
             "sample_id": sid, "cluster": f"{sid}_p{n}", "reads": cnt,
             "rel_abundance": f"{cnt / total:.6f}" if total else "",
@@ -563,7 +580,8 @@ def main(argv=None) -> int:
             "db_resolution": resolution.get(call["best_hit"], ("",))[0],
             "db_margin": adb.margin_of(call["rank"], call["best_hit"],
                                        resolution),
-            "origin": ("chimera" if k in chim else "whole_insert" if not y
+            "origin": ("chimera" if k in chim or k in gapc
+                       else "whole_insert" if not y
                        else "pair_split" if call.get("split_mates") else "pair"),
             "merged": 0,
             "chimera_of": chimera_of,
@@ -601,11 +619,16 @@ def main(argv=None) -> int:
         "quality_filter_blind": len(qual_values) <= 2,
         "clusters": len(rows),
         "haplotype_splits": 0,
-        "chimeras": {"sequences": len(chim),
-                     "reads": sum(centroids[k][2] for k in chim),
+        "chimeras": {"sequences": len(chim) + len(gapc),
+                     "reads": sum(centroids[k][2] for k in list(chim) + list(gapc)),
                      "within_genus_kept": {
                          "sequences": len(kept_joins),
-                         "reads": sum(centroids[k][2] for k in kept_joins)}},
+                         "reads": sum(centroids[k][2] for k in kept_joins)},
+                     # of which joins in the gap found window by window
+                     **({"across_gap": {
+                         "sequences": len(gapc),
+                         "reads": sum(centroids[k][2] for k in gapc)}}
+                        if gapc else {})},
         "settings": {"window_r1": w1, "window_r2": w2, "max_ee": args.max_ee,
                      "min_size": args.min_size,
                      "max_diffs": args.max_diffs if args.max_diffs is not None

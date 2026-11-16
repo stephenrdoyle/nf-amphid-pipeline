@@ -95,6 +95,7 @@ import tempfile
 import time
 from collections import Counter, defaultdict
 from itertools import combinations
+from operator import add
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -709,23 +710,27 @@ def chimera_scan(seqs: list[str], abund: list[int], fixed: bool = False,
         single = max(sum(v) for v in vecs.values())
         if L - single <= max_model_diffs:
             continue            # explained by one parent: not a chimera
+        # Prefix sums (left parent) and suffix sums (right parent) once
+        # per candidate, breakpoints 1..L-1; each pair's best breakpoint
+        # is its first maximum, the first pair to reach the best wins.
+        pre, suf = {}, {}
+        for p in cand:
+            v = vecs[p]
+            run = [0]
+            for x in v:
+                run.append(run[-1] + x)
+            pre[p] = run[1:L]
+            suf[p] = [run[L] - c for c in run[1:L]]
         best = None
         for a in cand:
-            va = vecs[a]
-            pre = [0]
-            for x in va:
-                pre.append(pre[-1] + x)
+            pa = pre[a]
             for b in cand:
                 if a == b:
                     continue
-                vb = vecs[b]
-                suf = [0] * (L + 1)
-                for i in range(L - 1, -1, -1):
-                    suf[i] = suf[i + 1] + vb[i]
-                for i in range(1, L):
-                    sc = pre[i] + suf[i]
-                    if best is None or sc > best[0]:
-                        best = (sc, a, b, i)
+                tot = list(map(add, pa, suf[b]))
+                sc = max(tot)
+                if best is None or sc > best[0]:
+                    best = (sc, a, b, tot.index(sc) + 1)
         sc, a, b, i = best
         model_diffs = L - sc
         if model_diffs > max_model_diffs or sc - single < min_gain:
@@ -738,7 +743,8 @@ def chimera_scan(seqs: list[str], abund: list[int], fixed: bool = False,
     return found
 
 
-def parents_differ(call_a: dict, call_b: dict, tax: dict) -> bool:
+def parents_differ(call_a: dict, call_b: dict, tax: dict,
+                   by_best_hit: bool = False) -> bool:
     """Do a chimera's two parents belong to different genera (or higher)?
 
     Compared rank by rank down to genus, over the ranks BOTH parents were
@@ -755,8 +761,21 @@ def parents_differ(call_a: dict, call_b: dict, tax: dict) -> bool:
     close), the join is excluded. Nothing places either parent, so there
     is no genus to share, and on a real flow cell these were mostly joins
     between unplaced gut bacteria (decided 2026-10-29).
+
+    by_best_hit (a protocol's chimera_parents_by_best_hit; nemits2): a
+    parent named only above genus is judged by its best record's genus
+    instead. On ITS2 such a parent is most often another chimera or an
+    error copy of a known worm, "Rhabditida" only because its call fell
+    under the floors, and the rule above kept every Haemonchus x
+    Trichostrongylus join the check found in the zoo antelopes
+    (PRJNA1137257) because of it.
     """
     ranks = ranks_of(tax)
+    if by_best_hit:
+        ga = tax.get(call_a.get("best_hit", ""), {}).get("genus", "")
+        gb = tax.get(call_b.get("best_hit", ""), {}).get("genus", "")
+        if ga and gb:
+            return ga != gb
     lab_depth = ranks.index("family")
     if all(label_for(c, tax, lab_depth)[1].startswith("unclassified")
            for c in (call_a, call_b)):

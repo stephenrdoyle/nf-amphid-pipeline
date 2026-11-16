@@ -1023,6 +1023,47 @@ ITS2 sequences are pairs whose read 1 is *Haemonchus* and read 2
 release's notes also found in this set and which amphid's chimera
 check did not catch here.
 
+**Chimeras joined in the gap (2026-11-16).** The de novo check (11.6)
+missed them for two reasons. It took the 6 candidate parents sharing
+the most 8-mers, and with amphid's many variants per sample those six
+were often all variants of one parent. And the parents of most of the
+joins it did find were kept as "within genus": one parent stopped above
+genus (an "order Rhabditida" pair) counted as possibly the same genus.
+For nemits2 (`Protocol.chimera_max_parents`,
+`chimera_parents_by_best_hit`), three changes:
+
+- 50 candidate parents, not 6 (the pair search was rewritten so this
+  costs little);
+- a parent named above genus is judged by its best record's genus, so
+  a *Haemonchus* x "Rhabditida, 93% to *Trichostrongylus*" join counts
+  as two genera;
+- a window pair whose call falls under the family floor has each
+  window scored alone (`nemits2.gap_chimera`). When read 1 and read 2
+  are each >= 97% to records of different genera (over >= 60 record
+  bases), it is a join in the gap, counted as a chimera even with no
+  parent in the sample: `chimera_of` `R1:<record>+R2:<record>@gap`,
+  label "chimera across the gap: R1 NN% to X, R2 NN% to Y", `across_gap`
+  in the sample's `chimeras`. A pair that only one window places stays
+  unplaced: a parent the database lacks cannot be told from a real,
+  unfamiliar sequence.
+
+On the zoo antelopes (13 samples, 2x150, v0.2.4) unplaced ITS2 fell from
+0.40% to 0.30% of clustered reads, and reads counted as chimeras rose
+from 528 to 1,695 (86 of them found window by window). Almost all came
+from unplaced ITS2 (0.108% of reads), the rest, about 40 reads, from
+genus and family calls; the species and genus shares did not move
+(73.0%, 20.6%). Joins marked "within genus, kept", which are still
+named, rose from 79,078 to 108,909 reads. What remains unplaced (3,295
+reads, 286 sequences) is mostly 90-95% to *Trichostrongylus*,
+*Haemonchus* or *Cooperia*, with one window not close to any record: a
+real sequence the release lacks, or a join with such a parent; they
+stay in `unplaced_its2.fasta`. At 2x250 almost every pair merges, so
+there is little left to find: PRJNA936713 unchanged, PRJNA1524548 one
+*Macropostrongylus* genus call (23 reads) now a join of two genera.
+Run time over the 13 zoo samples rose 4% (7,759 to 8,050 s summed).
+V4 (vespa_v4) is unchanged: 6 parents, parents judged as before, no
+window check, output byte-identical.
+
 ### 12.4 Calling: the gap rule
 
 Under the gap rule (`--db_calling_rule gap`; the tiered rule below,
