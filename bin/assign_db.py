@@ -524,7 +524,8 @@ def correct_runs(a: str, b: str, band: int) -> tuple[str, int]:
 
 
 def correct_homopolymer(clusters: list[dict], max_edits: int,
-                        min_ratio: float, reach: int) -> list[dict]:
+                        min_ratio: float, reach: int,
+                        stats: Counter | None = None) -> list[dict]:
     """Undo, in a smaller consensus, the homopolymer-length indels that set
     it apart from the nearest much larger one (at least min_ratio times
     its reads, within reach edits), keeping its substitutions: a real
@@ -533,7 +534,11 @@ def correct_homopolymer(clusters: list[dict], max_edits: int,
     A "known" consensus - its group's database record, over the record's
     span - is left as it is: a run length a record carries is not a read
     error. (On S-BSST527 that kept a consensus identical to a DADA2 ASV
-    whose TTT a 6x larger neighbour had as TT.)"""
+    whose TTT a 6x larger neighbour had as TT.) The test is the record
+    found anywhere in the consensus, so where the record is partial, a
+    run outside its span is protected too: fewer corrections, never a
+    wrong one. stats["corrected"] counts every consensus corrected,
+    including those that then join one already present."""
     out: list[dict] = []
     for c in sorted(clusters, key=lambda x: (-x["weight"], x["consensus"])):
         q = c["consensus"]
@@ -549,6 +554,8 @@ def correct_homopolymer(clusters: list[dict], max_edits: int,
             if 0 < k <= max_edits:
                 c = {**c, "consensus": fixed,
                      "corrected": c.get("corrected", 0) + k}
+                if stats is not None:
+                    stats["corrected"] += 1
         same = next((m for m in out if m["consensus"] == c["consensus"]),
                     None)
         if same:
@@ -1024,7 +1031,10 @@ def main(argv=None) -> int:
     ap.add_argument("--homopolymer-correct-reach", type=int,
                     help="give a smaller consensus the run lengths of a "
                     "larger one within this many edits, keeping its other "
-                    "differences (0: never). Default by read type: "
+                    "differences (0: never). Independent of "
+                    "--homopolymer-merge-edits, but it takes the merge's "
+                    "ratio, and its cap on bases changed (the read type's "
+                    "default when the merge is off). Default by read type: "
                     + ", ".join(f"{k} {v}" for k, v in
                                 HOMOPOLYMER_REACH.items()) + ", else 0")
     ap.add_argument("--exact-support", type=float,
@@ -1095,6 +1105,15 @@ def main(argv=None) -> int:
     hp_reach = HOMOPOLYMER_REACH.get(args.read_type, 0) \
         if args.homopolymer_correct_reach is None \
         else args.homopolymer_correct_reach
+    # The correction's cap on bases changed and its ratio are the merge's;
+    # with the merge turned off they stay the read type's defaults, so
+    # --homopolymer-merge-edits 0 does not silently turn the correction
+    # off too.
+    hp_cap, hp_cap_ratio = HOMOPOLYMER_MERGE.get(args.read_type, (4, 4.0))
+    if hp_edits > 0:
+        hp_cap = hp_edits
+    if args.homopolymer_merge_ratio is not None or hp_edits > 0:
+        hp_cap_ratio = hp_ratio
     mm = Minimap2(args.minimap2, args.threads)
 
     primers = load_primers(args.primers)
@@ -1156,15 +1175,17 @@ def main(argv=None) -> int:
                 c["known"] = refseq[t] in c["consensus"]
                 built.append(c)
         clusters = merge_close(built, st.merge_edits)
+        n_built = len(clusters)
         if hp_edits > 0:
-            n_built = len(clusters)
             clusters = merge_homopolymer(clusters, hp_edits, hp_ratio)
-            hp_merges = n_built - len(clusters)
-            if hp_reach > 0:
-                clusters = correct_homopolymer(clusters, hp_edits, hp_ratio,
-                                               hp_reach)
-                hp_corrected = sum(1 for c in clusters if c.get("corrected"))
-                hp_merges = n_built - len(clusters)
+        if hp_reach > 0:
+            hp_stats: Counter = Counter()
+            clusters = correct_homopolymer(clusters, hp_cap, hp_cap_ratio,
+                                           hp_reach, hp_stats)
+            hp_corrected = hp_stats["corrected"]
+        # Every consensus absorbed: merged as a copy, or corrected into
+        # one already present.
+        hp_merges = n_built - len(clusters)
 
         # Count every read against the final set.
         # Each read is decided on its first primary hit as it streams
@@ -1302,19 +1323,22 @@ def main(argv=None) -> int:
                          "reads": sum(counts[k] for k in kept_joins)}},
         "minimap2_calls": mm.calls,
         # Only where it ran, so other read types' summaries are unchanged.
-        **({"homopolymer_merges": hp_merges} if hp_edits > 0 else {}),
-        **({"homopolymer_corrected": hp_corrected}
-           if hp_edits > 0 and hp_reach > 0 else {}),
+        **({"homopolymer_merges": hp_merges}
+           if hp_edits > 0 or hp_reach > 0 else {}),
+        **({"homopolymer_corrected": hp_corrected} if hp_reach > 0 else {}),
         **({"unsupported_dropped": dropped} if support else {}),
         "settings": {**st.as_dict(), "floors": floors,
                      "lca_margin": args.lca_margin,
                      "recruit_margin": args.recruit_margin,
                      "index_args": INDEX_ARGS,
                      **({"homopolymer_merge_edits": hp_edits,
-                         "homopolymer_merge_ratio": hp_ratio,
-                         **({"homopolymer_correct_reach": hp_reach}
-                            if hp_reach > 0 else {})}
+                         "homopolymer_merge_ratio": hp_ratio}
                         if hp_edits > 0 else {}),
+                     **({"homopolymer_correct_reach": hp_reach,
+                         **({"homopolymer_correct_cap": hp_cap,
+                             "homopolymer_correct_ratio": hp_cap_ratio}
+                            if hp_edits <= 0 else {})}
+                        if hp_reach > 0 else {}),
                      **({"exact_support": {"fraction": support[0],
                                            "p": support[1]}}
                         if support else {}),
