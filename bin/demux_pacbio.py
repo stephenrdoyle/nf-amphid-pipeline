@@ -500,23 +500,64 @@ def write_reads(outdir: str):
 # --------------------------------------------------------------------------
 
 
-def lima_barcodes(samples: list[dict]) -> tuple[list[tuple[str, str]], dict]:
-    """The run's tags as lima barcodes: one per distinct sequence, at
-    either end, named t001...; and {(name, name): sample}, the pair
-    sorted, since lima names a pair by its barcodes' order in the FASTA."""
-    seqs = sorted({s["index_i5"] for s in samples}
-                  | {s["index_i7"] for s in samples})
-    name = {q: f"t{k:03d}" for k, q in enumerate(seqs, 1)}
-    pairs = {tuple(sorted((name[s["index_i5"]], name[s["index_i7"]]))):
-             s["sample_id"] for s in samples}
-    return [(name[q], q) for q in seqs], pairs
+def near_symmetric(s: dict) -> bool:
+    """A sample whose two tags are one, or differ only at the base next to
+    the primer (S-BSST527's layout): lima cannot tell its two ends apart."""
+    a, b = s["index_i5"], s["index_i7"]
+    return a == b or (len(a) == len(b) and a[:-1] == b[:-1])
 
 
-def lima_preset(samples: list[dict]) -> str:
-    """SYMMETRIC when every sample has one tag at both ends, else
-    ASYMMETRIC (lima's --hifi-preset)."""
-    return ("SYMMETRIC" if all(s["index_i5"] == s["index_i7"]
-                               for s in samples) else "ASYMMETRIC")
+def lima_design(samples: list[dict]) -> dict:
+    """The run's tags as lima sees them: barcodes [(name, sequence)],
+    {(name, name): sample} (the pair sorted, as lima orders a pair by its
+    barcodes' order in the FASTA), the --hifi-preset, and each barcode's
+    (forward, reverse) tags for the matrix.
+
+    Symmetric: every sample's two tags are one, or differ only at the
+    primer-adjacent base. A tag pair one base apart is one barcode to
+    lima - ASYMMETRIC sent most such reads to a same-barcode pair and
+    dropped them (S-BSST527 on the farm: 15 of 59 samples lost) - so each
+    sample gets one barcode, its tag less that base where any sample's
+    two differ there, and lima runs SYMMETRIC. Asymmetric: no sample's
+    tags are near; one barcode per distinct tag, ASYMMETRIC. A run mixing
+    the two has no lima preset that keeps both: refused."""
+    near = [near_symmetric(s) for s in samples]
+    if all(near):
+        cut = any(s["index_i5"] != s["index_i7"] for s in samples)
+        seq = {s["sample_id"]: s["index_i5"][:-1] if cut else s["index_i5"]
+               for s in samples}
+        dup = [q for q, n in Counter(seq.values()).items() if n > 1]
+        if dup:
+            raise SystemExit(
+                f"--pacbio_demux lima: samples share the barcode "
+                f"{', '.join(dup)} once each pair's primer-adjacent base is "
+                "set aside, so lima cannot tell them apart; use "
+                "--pacbio_demux builtin")
+        order = sorted(set(seq.values()))
+        name = {q: f"t{k:03d}" for k, q in enumerate(order, 1)}
+        return {"barcodes": [(name[q], q) for q in order],
+                "pairs": {(name[seq[s["sample_id"]]],) * 2: s["sample_id"]
+                          for s in samples},
+                "preset": "SYMMETRIC",
+                "ends": {name[seq[s["sample_id"]]]:
+                         (s["index_i5"], s["index_i7"]) for s in samples}}
+    if any(near):
+        both = sorted(s["sample_id"] for s, n in zip(samples, near) if n)
+        raise SystemExit(
+            f"--pacbio_demux lima: {len(both)} sample(s) carry one tag at "
+            f"both ends ({', '.join(both[:5])}{'...' if len(both) > 5 else ''})"
+            " and the rest two different tags; lima's SYMMETRIC preset drops "
+            "the second kind and ASYMMETRIC the first. Use --pacbio_demux "
+            "builtin")
+    order = sorted({s["index_i5"] for s in samples}
+                   | {s["index_i7"] for s in samples})
+    name = {q: f"t{k:03d}" for k, q in enumerate(order, 1)}
+    return {"barcodes": [(name[q], q) for q in order],
+            "pairs": {tuple(sorted((name[s["index_i5"]],
+                                    name[s["index_i7"]]))): s["sample_id"]
+                      for s in samples},
+            "preset": "ASYMMETRIC",
+            "ends": {name[q]: (q, q) for q in order}}
 
 
 LIMA_OUT = re.compile(r"^(?P<prefix>.+)\.(?P<a>[^.]+)--(?P<b>[^.]+)"
@@ -542,10 +583,8 @@ def from_lima(lima_dir: str, samples: list[dict], writer: SampleWriter):
     pair_not_declared, reads lima held below its end-score threshold
     one_end_only (one barcode end too weak to call), and every other read
     lima did not output no_tag - and lima's own summaries verbatim."""
-    _bcs, pairs = lima_barcodes(samples)
-    by_name = {}
-    for q, nm in ((q, n) for n, q in _bcs):
-        by_name[nm] = q
+    design = lima_design(samples)
+    pairs, by_name = design["pairs"], design["ends"]
     reasons, grid = Counter(), Counter()
     files, summ = [], {}
     names = sorted(os.listdir(lima_dir))
@@ -565,12 +604,14 @@ def from_lima(lima_dir: str, samples: list[dict], writer: SampleWriter):
             if sample:
                 writer.add(sample, f"@{name}\n{seq}\n+\n{qual}\n")
         reasons["assigned" if sample else "pair_not_declared"] += n
-        # The pair as forward and reverse tag, where the samplesheet says
-        # which end each belongs to.
-        qa, qb = by_name[a], by_name[b]
+        # The pair as forward and reverse tag: where the samplesheet says
+        # which end a tag belongs to, so; a symmetric barcode stands for
+        # its sample's forward tag at one end and reverse at the other.
         i5s = {s["index_i5"] for s in samples}
-        key = (qa, qb) if qa in i5s else (qb, qa)
-        grid[key] += n
+        qa, qb = by_name[a][0], by_name[b][1]
+        if design["preset"] == "ASYMMETRIC" and qa not in i5s:
+            qa, qb = by_name[b][0], by_name[a][1]
+        grid[(qa, qb)] += n
         files.append({"path": f, "format": m.group("ext"), "reads": n})
     total = next((v for k, v in summ.items() if "input" in k.lower()), None)
     out = sum(reasons.values())
@@ -629,12 +670,12 @@ def main(argv=None) -> int:
         raise SystemExit(f"no samples for run '{args.run_id}' in the "
                          "samplesheet")
     if args.write_lima_barcodes:
-        bcs, _pairs = lima_barcodes(samples)
+        design = lima_design(samples)
         with open(args.write_lima_barcodes, "w", encoding="utf-8") as fh:
-            fh.writelines(f">{n}\n{q}\n" for n, q in bcs)
+            fh.writelines(f">{n}\n{q}\n" for n, q in design["barcodes"])
         with open(args.write_lima_barcodes + ".preset", "w",
                   encoding="utf-8") as fh:
-            fh.write(lima_preset(samples) + "\n")
+            fh.write(design["preset"] + "\n")
         return 0
     cfg = construct(args.assay, args)
     primers = load_primers(args.primers)
@@ -654,7 +695,7 @@ def main(argv=None) -> int:
         summary = summarise(args.run_id, samples, reasons,
                             {"i5": {}, "i7": {}}, Counter(), grid, {},
                             writer, files,
-                            {"preset": lima_preset(samples)},
+                            {"preset": lima_design(samples)["preset"]},
                             args.outdir, "lima, read back by demux_pacbio.py",
                             native)
     else:

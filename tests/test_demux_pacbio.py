@@ -289,24 +289,54 @@ def test_fixture(tmp: str) -> None:
 
 def test_lima(tmp: str) -> None:
     print("\nlima: barcodes out, its output read back")
+
+    def refused(tags) -> str:
+        try:
+            dp.lima_design(samples(tags))
+            return ""
+        except SystemExit as exc:
+            return str(exc)
+
+    # S-BSST527's layout: two tags one primer-adjacent base apart, and in
+    # the same pool samples with one tag at both ends. ASYMMETRIC lost
+    # every one of the latter and most of the former on the farm.
+    pool = TAGS + [("A5", "GATCGTACAG", "GATCGTACAG")]
+    design = dp.lima_design(samples(pool))
+    check("tags one primer-adjacent base apart, with same-tag samples in "
+          "the pool: SYMMETRIC", design["preset"] == "SYMMETRIC")
+    check("one barcode per sample: its tag less the primer-adjacent base",
+          [q for _n, q in design["barcodes"]]
+          == sorted(f[:-1] for _s, f, _r in pool))
+    name = {q: n for n, q in design["barcodes"]}
+    check("each sample is its barcode at both ends",
+          design["pairs"][(name[TAGS[0][1][:-1]],) * 2] == "A1"
+          and len(design["pairs"]) == 5)
     sym = [("S1", "ACGTACGTAC", "ACGTACGTAC"), ("S2", "TGCATGCATG", "TGCATGCATG")]
-    check("one tag at both ends for every sample: SYMMETRIC",
-          dp.lima_preset(samples(sym)) == "SYMMETRIC")
-    check("tags that differ at the ends: ASYMMETRIC",
-          dp.lima_preset(samples()) == "ASYMMETRIC")
-    bcs, pairs = dp.lima_barcodes(samples())
-    check("one barcode per distinct tag, either end",
-          len(bcs) == 8 and len({q for _n, q in bcs}) == 8)
-    name = {q: n for n, q in bcs}
-    check("each sample is the (sorted) pair of its two tags' names",
-          pairs[tuple(sorted((name[TAGS[0][1]], name[TAGS[0][2]])))] == "A1")
+    d0 = dp.lima_design(samples(sym))
+    check("one tag at both ends for every sample: SYMMETRIC, whole tags",
+          d0["preset"] == "SYMMETRIC"
+          and [q for _n, q in d0["barcodes"]] == ["ACGTACGTAC", "TGCATGCATG"])
+    combi = [("C1", "AAAACCCCGG", "TTTTGGGGAA"), ("C2", "AAAACCCCGG", "CCCCAAAATT"),
+             ("C3", "GGGGTTTTCC", "TTTTGGGGAA")]
+    d1 = dp.lima_design(samples(combi))
+    check("distinct tags at the two ends: ASYMMETRIC, one barcode per tag",
+          d1["preset"] == "ASYMMETRIC" and len(d1["barcodes"]) == 4)
+    check("a pool mixing the two is refused, naming the builtin route",
+          "builtin" in refused(combi + [("S1", "ACGTACGTAC", "ACGTACGTAC")]))
+    check("samples whose barcodes collide once the last base is set aside "
+          "are refused", "share the barcode" in refused(
+              [("D1", "ACGTACGTAC", "ACGTACGTAG"),
+               ("D2", "ACGTACGTAT", "ACGTACGTAT")]))
+    # The read-back, on the run's own four S-BSST527-like samples.
+    design = dp.lima_design(samples())
+    name = {q: n for n, q in design["barcodes"]}
+    n1 = name[TAGS[0][1][:-1]]
+    x1 = name[TAGS[1][1][:-1]]
 
     d = os.path.join(tmp, "lima")
     os.makedirs(d)
-    n1, n2 = name[TAGS[0][1]], name[TAGS[0][2]]
-    x1, x2 = name[TAGS[1][1]], name[TAGS[0][2]]
-    for f, k in ((f"part1.{n1}--{n2}.fastq", 6),     # A1, declared
-                 (f"part1.{min(x1, x2)}--{max(x1, x2)}.fastq", 2)):  # undeclared
+    for f, k in ((f"part1.{n1}--{n1}.fastq", 6),     # A1, declared
+                 (f"part1.{min(n1, x1)}--{max(n1, x1)}.fastq", 2)):  # undeclared
         with open(os.path.join(d, f), "w") as fh:
             for j in range(k):
                 fh.write(f"@{f}{j}\n{NC1 + INSERT}\n+\n{'~' * (len(NC1) + len(INSERT))}\n")
@@ -346,8 +376,8 @@ def test_lima(tmp: str) -> None:
     quiet(dp.main, ["--samplesheet", ss, "--run-id", "P1", "--primers", prim,
                     "--write-lima-barcodes", bc])
     check("--write-lima-barcodes writes the FASTA and the preset",
-          open(bc).read().count(">") == 8
-          and open(bc + ".preset").read().strip() == "ASYMMETRIC")
+          open(bc).read().count(">") == 4
+          and open(bc + ".preset").read().strip() == "SYMMETRIC")
 
 
 def main() -> int:

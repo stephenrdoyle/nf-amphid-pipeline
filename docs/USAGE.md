@@ -558,9 +558,19 @@ pair seen together, as nanopore's does.
 Linux only - there is no macOS build, so the workflow refuses it on a
 Mac before starting. `lima` must be on the `PATH` (or `-profile conda`,
 which takes bioconda's lima 2.9.0). The run's tags are written as lima
-barcodes, one per distinct tag; lima runs with `--hifi-preset SYMMETRIC`
-when every sample has one tag at both ends and `ASYMMETRIC` otherwise,
-and `--split-named`, once per input file; and its per-pair output is
+barcodes and lima runs with `--split-named`, once per input file:
+
+| the run's samples | lima barcodes | `--hifi-preset` |
+|---|---|---|
+| every sample's two tags are one, or differ only at the base next to the primer (S-BSST527) | one per sample: its tag, less that base where any sample's two differ there | `SYMMETRIC` |
+| no sample's two tags are that close | one per distinct tag, either end | `ASYMMETRIC` |
+| a mix of the two | refused: lima's presets keep one kind or the other | use `builtin` |
+
+Tags one base apart are one barcode to lima: given them separately with
+`ASYMMETRIC`, it called most such reads as the same barcode at both ends
+and dropped them, and dropped every sample with one tag at both ends
+outright (S-BSST527 pool 1 on the farm: 104,538 reads assigned against
+the built-in route's 158,958, 15 of 59 samples empty). Its per-pair output is
 read back (`demux_pacbio.py --from-lima`) into the same reads, summary
 and matrix as the built-in route. lima's fates map onto the tiers as: a
 declared pair, assigned; an undeclared pair, chimeric; reads under its
@@ -568,8 +578,8 @@ minimum end score, one end only; every other read it did not output,
 unmatched. lima's own summary rides along under `"lima"`. lima does not
 look for primers, so what the built-in route counts as no primers
 reaches assignment and is counted there (`no_primer`). The read-back is
-tested on lima-shaped output; lima itself has not been run by these
-tests, which run on macOS.
+tested on lima-shaped output; lima itself runs only on the farm, not in
+these tests, which run on macOS.
 
 **What to expect.** On S-BSST527 (RSII CCS, 158 samples, nemabiome
 ITS2 v0.2.0) the calls agree with a DADA2 analysis of the same reads:

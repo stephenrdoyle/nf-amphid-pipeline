@@ -22,9 +22,11 @@ process LIMA_PACBIO {
 
     script:
     // lima instead of the built-in demultiplexer: the run's tags written
-    // as lima barcodes (one per distinct tag), --hifi-preset SYMMETRIC
-    // when every sample carries one tag at both ends and ASYMMETRIC
-    // otherwise, one lima call per input file, and its per-pair outputs
+    // as lima barcodes with the preset that fits them (demux_pacbio.py
+    // lima_design: one barcode per sample and SYMMETRIC where each
+    // sample's two tags are one or differ only at the primer-adjacent
+    // base; one per tag and ASYMMETRIC where none are; a mix refused),
+    // one lima call per input file, and its per-pair outputs
     // read back as samples by demux_pacbio.py --from-lima, which writes
     // the same summary and matrix as the built-in route.
     """
