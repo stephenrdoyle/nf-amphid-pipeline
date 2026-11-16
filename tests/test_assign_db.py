@@ -28,6 +28,7 @@ import os
 import random
 import shutil
 import sys
+from collections import Counter
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -313,6 +314,12 @@ def test_homopolymer_merge() -> None:
     got = {x["consensus"]: (len(x["reads"]), x["merged"]) for x in m}
     check("corrected into a haplotype already there, it joins it",
           len(m) == 2 and got.get(sub) == (35, 1), str(got))
+    stats = Counter()
+    adb.correct_homopolymer(
+        [cl(a, 200, "a"), cl(sub, 30, "s"), cl(hap_hp, 5, "t")], 4, 4.0, 8,
+        stats)
+    check("a consensus corrected into one already there is still counted "
+          "as corrected", stats["corrected"] == 1, str(stats))
     known = {**cl(hap2_hp, 20, "h"), "known": True}
     m = adb.correct_homopolymer([cl(a, 200, "a"), known], 4, 4.0, 8)
     check("a consensus that is its database record keeps its run lengths",
@@ -611,6 +618,28 @@ def test_end_to_end(read_type: str = "single_long_noisy") -> None:
               f"for {read_type}",
               all(("homopolymer_merges" in js) == on
                   for _c, _r, js in results.values()))
+        if on:
+            # The correction with the merge turned off: it still runs, at
+            # the read type's own cap and ratio, and says so.
+            sid, _t, comp = fx.SAMPLES[2]
+            fq = _sample_reads(tmp, random.Random(5), species, comp, model,
+                               sid)
+            off = os.path.join(tmp, "merge_off")
+            with contextlib.redirect_stdout(io.StringIO()):
+                adb.main(["--reads", fq, "--read-type", read_type,
+                          "--database", rel,
+                          "--primers", os.path.join(tmp, "primers.tsv"),
+                          "--sample-id", sid, "--outdir", off,
+                          "--minimap2", mm2,
+                          "--homopolymer-merge-edits", "0"])
+            with open(os.path.join(off, f"{sid}.assign_db.json")) as fh:
+                st = json.load(fh)
+            check("--homopolymer-merge-edits 0 leaves the correction on",
+                  "homopolymer_corrected" in st
+                  and st["settings"].get("homopolymer_correct_reach") == 8
+                  and st["settings"].get("homopolymer_correct_cap") == 4
+                  and "homopolymer_merge_edits" not in st["settings"],
+                  str(st["settings"]))
         check("every result carries the release version",
               all(js["database"]["version"] == man["version"]
                   and all(x["database_version"] == man["version"] for x in rows)

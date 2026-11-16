@@ -150,7 +150,12 @@ own, none of which runs for `single_long_noisy`: homopolymer-length
 copies of a larger consensus are absorbed (`merge_homopolymer`), a
 smaller consensus takes a larger one's run lengths and keeps its
 substitutions (`correct_homopolymer`), and a consensus no read supports
-exactly is dropped (`unsupported`). All three were added after S-BSST527
+exactly is dropped (`unsupported`). The first two switch off apart
+(`assign_db.py --homopolymer-merge-edits 0`, `--homopolymer-correct-reach
+0`); the correction keeps the read type's cap and ratio when the merge is
+off. `assign_db.json` counts `homopolymer_merges` (every consensus
+absorbed, by either step) and `homopolymer_corrected` (every consensus
+corrected, including those that then joined another). All three were added after S-BSST527
 (below); on the simulated HiFi benchmark they change no call - every row
 of the floors grid is the same, and spurious clusters fall from 3 of 604
 to 1 of 602. It was enabled on what was measured:
