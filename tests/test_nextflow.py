@@ -436,9 +436,9 @@ def test_flags_exist() -> None:
             continue
         real = tool_flags(tool)
         # The tool's own command lines: each call of it and the lines it
-        # continues onto. A process that also runs another program
-        # (LIMA_PACBIO runs lima) has that program's flags in its body
-        # too, and they are not the tool's.
+        # continues onto. A process that also runs another program has
+        # that program's flags in its body too, and they are not the
+        # tool's.
         lines = p["body"].splitlines()
         cmd = []
         for i, ln in enumerate(lines):

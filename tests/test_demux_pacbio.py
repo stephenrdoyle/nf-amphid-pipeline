@@ -9,9 +9,7 @@ platform adapter.
   * every tier, on reads built for it, and the summary's accounting;
   * the PacBio fixture (tests/make_pacbio_fixture.py) read across a FASTQ
     and a BAM cell, one worker and several giving the same bytes;
-  * the unaligned BAM reader;
-  * lima: the barcodes and preset written for it, and its output read
-    back as the samples it belongs to.
+  * the unaligned BAM reader.
 
 Run: python3 tests/test_demux_pacbio.py
 """
@@ -287,69 +285,6 @@ def test_fixture(tmp: str) -> None:
     check("one worker or three: the same bytes", same)
 
 
-def test_lima(tmp: str) -> None:
-    print("\nlima: barcodes out, its output read back")
-    sym = [("S1", "ACGTACGTAC", "ACGTACGTAC"), ("S2", "TGCATGCATG", "TGCATGCATG")]
-    check("one tag at both ends for every sample: SYMMETRIC",
-          dp.lima_preset(samples(sym)) == "SYMMETRIC")
-    check("tags that differ at the ends: ASYMMETRIC",
-          dp.lima_preset(samples()) == "ASYMMETRIC")
-    bcs, pairs = dp.lima_barcodes(samples())
-    check("one barcode per distinct tag, either end",
-          len(bcs) == 8 and len({q for _n, q in bcs}) == 8)
-    name = {q: n for n, q in bcs}
-    check("each sample is the (sorted) pair of its two tags' names",
-          pairs[tuple(sorted((name[TAGS[0][1]], name[TAGS[0][2]])))] == "A1")
-
-    d = os.path.join(tmp, "lima")
-    os.makedirs(d)
-    n1, n2 = name[TAGS[0][1]], name[TAGS[0][2]]
-    x1, x2 = name[TAGS[1][1]], name[TAGS[0][2]]
-    for f, k in ((f"part1.{n1}--{n2}.fastq", 6),     # A1, declared
-                 (f"part1.{min(x1, x2)}--{max(x1, x2)}.fastq", 2)):  # undeclared
-        with open(os.path.join(d, f), "w") as fh:
-            for j in range(k):
-                fh.write(f"@{f}{j}\n{NC1 + INSERT}\n+\n{'~' * (len(NC1) + len(INSERT))}\n")
-    with open(os.path.join(d, "part1.lima.summary"), "w") as fh:
-        fh.write("ZMWs input                    (A) : 20\n"
-                 "ZMWs above all thresholds     (B) : 8 (40%)\n"
-                 "ZMWs below any threshold      (C) : 12 (60%)\n\n"
-                 "ZMW marginals for (C):\n"
-                 "Below min length                  : 0 (0%)\n"
-                 "Below min score                   : 9 (75%)\n"
-                 "Below min end score               : 3 (25%)\n")
-    open(os.path.join(d, "part1.lima.counts"), "w").write("IdxFirst\n")
-    ss = os.path.join(tmp, "lima_ss.tsv")
-    with open(ss, "w") as fh:
-        fh.write("run_id\tplatform\tsample_id\tindex_i7\tindex_i5\tsample_type\n")
-        for sid, f, r in TAGS:
-            fh.write(f"P1\tpacbio\t{sid}\t{r}\t{f}\tunknown\n")
-    prim = os.path.join(tmp, "primers.tsv")
-    out = os.path.join(tmp, "lima_out")
-    code = quiet(dp.main, ["--samplesheet", ss, "--run-id", "P1", "--primers",
-                           prim, "--from-lima", d, "--outdir", out])
-    js = json.load(open(os.path.join(out, "demux_summary.json")))
-    check("read back: runs", code == 0)
-    check("a declared pair's reads go to its sample",
-          js["per_sample"]["A1"] == 6 and os.path.exists(
-              os.path.join(out, "reads", "A1.fastq.gz")))
-    check("an undeclared pair's reads are chimeric; lima's end-score "
-          "rejects one end only; the rest unmatched; all of lima's input",
-          js["reasons"] == {"assigned": 6, "one_end_only": 3,
-                            "pair_not_declared": 2, "no_primers": 0,
-                            "no_tag": 9} and js["total_reads"] == 20,
-          str(js["reasons"]))
-    check("lima's own summary rides along, and says it was lima",
-          js["lima"]["summary"]["ZMWs input"] == 20
-          and js["demultiplexed_by"].startswith("lima"))
-    bc = os.path.join(tmp, "bc.fasta")
-    quiet(dp.main, ["--samplesheet", ss, "--run-id", "P1", "--primers", prim,
-                    "--write-lima-barcodes", bc])
-    check("--write-lima-barcodes writes the FASTA and the preset",
-          open(bc).read().count(">") == 8
-          and open(bc + ".preset").read().strip() == "ASYMMETRIC")
-
-
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="demux_pacbio_")
     try:
@@ -357,7 +292,6 @@ def main() -> int:
         test_tiers()
         test_main(tmp)
         test_fixture(tmp)
-        test_lima(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{'=' * 62}")

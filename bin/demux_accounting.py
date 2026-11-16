@@ -20,7 +20,7 @@ summaries, so a new platform needs only its adapter.
                     centre): as Illumina - nothing is known of what it
                     discarded.
   pacbio            demultiplexed here by the samplesheet's tags
-                    (demux_pacbio.py, or lima read back by it): every
+                    (demux_pacbio.py): every
                     fate but internal_adapter counted, from the same
                     tiers as nanopore's - CCS has removed the adapters,
                     so a read is one molecule and there is no tier E.
@@ -97,7 +97,7 @@ def accounting(run_id: str, platform: str, read_type: str,
         "run_id": run_id,
         "platform": platform,
         "read_type": read_type,
-        # The adapter's own word where it gives one (lima, on PacBio).
+        # The adapter's own word where it gives one.
         "demultiplexed_by": (demux or {}).get("demultiplexed_by")
         or DEMULTIPLEXED_BY.get(platform, platform),
         # Reads off the instrument, where the adapter saw them; on
