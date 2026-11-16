@@ -865,6 +865,11 @@ reproducibility choice, not a dependency.
     db_run_qc.json              release, blanks, internal adapter rates,
                                 the run's read funnel, its index
                                 misassignment rates, plate-position tests
+    unplaced_its2.fasta         ITS2 releases: sequences that align to
+                                records but none within family range,
+                                with reads, libraries, nearest, next
+    not_its2.fasta              ITS2 releases: sequences with no
+                                database hit at all
   synthesis/
     calls.tsv                   the results table
     calibration.tsv             per-well internal control
@@ -930,7 +935,18 @@ The groups are defined in docs/REFERENCE_DATABASE.md §11.4. And
 `near_3prime` means its share may be held down by the PCR.
 `db_wells.tsv` gives each well's funnel, reads and fractions per group,
 target-group richness and reads by rank reached; `db_prevalence.tsv`
-how many samples each taxon was detected in.
+how many samples each taxon was detected in. For an ITS2 release, what
+stayed above family is split in two, as the release's notes ask: unplaced
+ITS2 (it aligns to records, but none within family range - most often a
+nematode the database lacks) and not ITS2-like (no database hit at all:
+primer dimers, chimeras, off-target products). Each well's share of
+each is in `db_wells.tsv` (`unplaced_its2_fraction`,
+`not_its2_fraction`), the run's in `db_run_qc.json` (`unplaced`), and
+the sequences are in `unplaced_its2.fasta` and `not_its2.fasta`, one
+record per sequence across the run, to be taken further (BLAST, a tree,
+a request for references) without digging them out of the tables:
+
+    >unplaced_its2_0001 reads=188804 libraries=139 nearest=Libyostrongylus_douglassi identity=91.4 next=Libyostrongylus_dentatus+8
 
 ### Index misassignment and plate position (database mode)
 

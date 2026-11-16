@@ -219,6 +219,11 @@ class Protocol:
     # Synthesis hooks.
     host_clade = "Craniata"
     min_rel_abundance = 0.001
+    # The marker, as reports name it ("relative 18S abundance").
+    marker = "18S"
+    # Whether synthesis writes the sequences left above family to FASTA
+    # (unplaced_its2.fasta, not_its2.fasta) and reports their shares.
+    unplaced_fasta = False
 
     # -- what it can run ------------------------------------------------
     def unsupported(self, read_type: str) -> str:

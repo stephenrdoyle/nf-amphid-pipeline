@@ -1271,8 +1271,8 @@ def main(argv=None) -> int:
             "unmapped reads (no database hit) are counted within "
             "clustered or unclustered, depending on whether a consensus "
             "took them. rel_abundance in the cluster and taxon tables is "
-            "over clustered reads: relative 18S abundance, never organisms "
-            "or copies."),
+            f"over clustered reads: relative {proto.marker} abundance, never "
+            "organisms or copies."),
         "clusters": len(rows),
         "groups": len(heads),
         "haplotype_splits": cb.splits,

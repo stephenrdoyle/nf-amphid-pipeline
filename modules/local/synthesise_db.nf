@@ -21,6 +21,9 @@ process SYNTHESISE_DB {
     path "synthesis/db_wells.tsv"   , emit: wells
     path "synthesis/db_prevalence.tsv", emit: prevalence
     path "synthesis/db_run_qc.json" , emit: qc
+    // A protocol that saves what stays above family (nemits2): unplaced
+    // ITS2 and not-ITS2-like sequences, each to its own FASTA.
+    path "synthesis/*.fasta"        , emit: unplaced, optional: true
     path "versions.yml"             , emit: versions
 
     script:

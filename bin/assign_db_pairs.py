@@ -588,7 +588,8 @@ def main(argv=None) -> int:
             "Read pairs. reads_in = no_primer + too_short + low_quality + "
             "clustered + unclustered; whole_insert counts the pairs (within "
             "clustered or unclustered) whose insert was shorter than R1. "
-            "rel_abundance is over clustered pairs: relative 18S abundance."
+            "rel_abundance is over clustered pairs: relative "
+            f"{proto.marker} abundance."
             + proto.pair_note),
         # Pairs whose windows -x sr could not align end to end, mapped
         # again with softer penalties (SR_DIVERGENT).

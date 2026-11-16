@@ -301,6 +301,66 @@ def fragile_species(calls: list[dict]) -> list[dict]:
     return sorted(by.values(), key=lambda f: (-len(f["samples"]), f["taxon"]))
 
 
+# What stays above family, in two groups that mean different things (the
+# release's notes for amphid, section 7): unplaced ITS2 aligns to records
+# but none is within family range - a nematode the database lacks, its
+# nearest record saying roughly where it sits; not ITS2-like has no
+# database hit at all - primer dimers, chimeras, off-target products.
+UNPLACED = {"unplaced_its2": "unplaced ITS2", "not_its2": "not ITS2-like"}
+
+
+def unplaced_group(c: dict) -> str | None:
+    """Which UNPLACED group a cluster is in, or None: no database hit is
+    not ITS2-like; a hit, but a call below the family floor
+    ("unclassified, NN% to X"), is unplaced ITS2. Chimeras are neither."""
+    if c.get("origin") == "chimera" or not c["label"].startswith("unclassified"):
+        return None
+    return "unplaced_its2" if c.get("best_hit") else "not_its2"
+
+
+def write_unplaced(wells: dict, outdir: str) -> dict:
+    """Each UNPLACED group's sequences, one record per sequence across the
+    run, most reads first, to <group>.fasta, its header the reads, the
+    libraries it is in and, for unplaced ITS2, its nearest record, the
+    identity and the next species:
+
+        >unplaced_its2_0001 reads=188804 libraries=139 nearest=Libyostrongylus_douglassi identity=91.4 next=Libyostrongylus_dentatus+8
+
+    The sequence is the cluster's (the whole amplicon, 28S stretch
+    included; a pair's two windows joined by ten Ns). Returns
+    {group: {sequences, reads, file}}."""
+    seqs: dict = {g: {} for g in UNPLACED}
+    for sid, w in wells.items():
+        for c in w.clusters:
+            g = unplaced_group(c)
+            if g is None:
+                continue
+            e = seqs[g].setdefault(c["consensus"], {"reads": 0, "samples": set(),
+                                                    "c": c})
+            e["reads"] += int(c["reads"])
+            e["samples"].add(sid)
+            if int(c["reads"]) > int(e["c"]["reads"]):
+                e["c"] = c
+    out = {}
+    for g, recs in seqs.items():
+        name = f"{g}.fasta"
+        with open(os.path.join(outdir, name), "w", encoding="utf-8") as fh:
+            for k, (s, e) in enumerate(sorted(recs.items(),
+                                              key=lambda kv: (-kv[1]["reads"], kv[0])), 1):
+                c = e["c"]
+                head = f">{g}_{k:04d} reads={e['reads']} libraries={len(e['samples'])}"
+                if g == "unplaced_its2":
+                    near = (c.get("nearest") or "").rsplit(" ", 1)[0] or c.get("best_hit", "")
+                    nxt = (c.get("next") or "").replace(" +", "+")
+                    head += (f" nearest={near.replace(' ', '_')} "
+                             f"identity={100 * float(c.get('identity') or 0):.1f}"
+                             + (f" next={nxt.replace(' ', '_')}" if nxt else ""))
+                fh.write(f"{head}\n{s}\n")
+        out[g] = {"sequences": len(recs), "reads": sum(e["reads"] for e in recs.values()),
+                  "file": name}
+    return out
+
+
 def tentative_species(calls: list[dict]) -> list[dict]:
     """Detected species calls the tiered rule names but the gap rule does
     not (tentative: >= 98% to the species, no other species near), by
@@ -947,6 +1007,7 @@ def main(argv=None) -> int:
         [f"{g}_fraction" for g in GROUPS] + \
         [f"{g}_richness" for g in DETAIL_GROUPS] + \
         [f"rank_{r}" for r in ("species", "genus", "family", "above")] + \
+        [f"{g}_fraction" for g in (UNPLACED if proto.unplaced_fasta else ())] + \
         ["database_version"]
     wells_out = []
     for sid in sorted(wells):
@@ -985,6 +1046,9 @@ def main(argv=None) -> int:
                for g in DETAIL_GROUPS},
             **{f"rank_{k}": ranks[k] for k in ("species", "genus", "family",
                                                "above")},
+            # unclassified_fraction in its two groups (UNPLACED).
+            **({f"{g}_fraction": f"{sum(int(c['reads']) for c in w.clusters if unplaced_group(c) == g) / d:.4f}"
+                for g in UNPLACED} if proto.unplaced_fasta else {}),
             "database_version": version})
     with open(os.path.join(args.outdir, "db_wells.tsv"), "w",
               encoding="utf-8") as fh:
@@ -1091,8 +1155,8 @@ def main(argv=None) -> int:
     qc = {
         "run_id": args.run_id,
         "mode": "database",
-        "unit": "relative 18S abundance - never organisms or copies; 18S "
-                "copy number varies widely between taxa",
+        "unit": f"relative {proto.marker} abundance - never organisms or "
+                f"copies; {proto.marker} copy number varies widely between taxa",
         "database": {"version": version, "name": man.get("name", ""),
                      "primers": man.get("primers", {}),
                      "built": man.get("built", "")},
@@ -1181,6 +1245,14 @@ def main(argv=None) -> int:
             f"{c['sample_id']}: {c['rank']} {c['taxon']}" for c in calls
             if "near_3prime" in c["primer_fit"] and c["call"] == "detected"),
     }
+    if proto.unplaced_fasta:
+        # What stays above family, in its two groups, each to its own
+        # FASTA, with its share of the run's clustered reads.
+        qc["marker"] = proto.marker
+        total = sum(w.depth for w in wells.values()) or 1
+        qc["unplaced"] = {g: {**v, "share": round(v["reads"] / total, 6),
+                              "meaning": UNPLACED[g]}
+                          for g, v in write_unplaced(wells, args.outdir).items()}
     with open(os.path.join(args.outdir, "db_run_qc.json"), "w",
               encoding="utf-8") as fh:
         json.dump(qc, fh, indent=2)
