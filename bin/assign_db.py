@@ -223,6 +223,21 @@ def binom_sf(k: int, n: int, p: float) -> float:
     return tot
 
 
+def hypergeom_sf(k: int, n_pop: int, n_a: int, n_b: int) -> float:
+    """P(X >= k) for the overlap X of a set of n_a and a set of n_b drawn
+    independently from n_pop, summed in log space."""
+    def lc(n, r):
+        return math.lgamma(n + 1) - math.lgamma(r + 1) - math.lgamma(n - r + 1)
+    hi = min(n_a, n_b)
+    if k > hi:
+        return 0.0
+    if k <= max(0, n_a + n_b - n_pop):
+        return 1.0
+    base = lc(n_pop, n_b)
+    return min(1.0, sum(math.exp(lc(n_a, i) + lc(n_pop - n_a, n_b - i) - base)
+                        for i in range(k, hi + 1)))
+
+
 def in_homopolymer(ref: str, p: int) -> bool:
     return (p > 0 and ref[p - 1] == ref[p]) or \
         (p + 1 < len(ref) and ref[p + 1] == ref[p])
@@ -261,7 +276,18 @@ def signature(pu: Pileup, st: Settings) -> list[tuple[int, str]] | None:
     Two candidates are linked when at least min_cooccur reads spanning
     both carry both, and that is at least cooccur_ratio times what
     independence would give. Read errors are independent of each other;
-    a haplotype's differences are not. The largest connected set of
+    a haplotype's differences are not. The ratio cannot exceed 1 / an
+    allele's frequency, so it never linked a haplotype above a third of
+    its group (a Cyathostomum haplotype at 48% of an S-BSST527 group, 143
+    of 144 carriers shared). So two substitutions are also linked when
+    independence would give as many co-carriers less often than hap_p
+    (hypergeometric): that reaches those haplotypes without linking a
+    handful of reads in a small group (8 of 8 in 16 reads is 8e-5). Not
+    deletions: low-quality reads share error-prone positions, so their
+    deletions co-occur more than independence says - on S-BSST527 such
+    groups split into consensus sequences six deletions off the
+    sample's, no ASV, while each of the six haplotypes the test gained
+    that DADA2 has too differed by substitutions alone. The largest connected set of
     linked alleles is the signature - two or more alleles, because one
     frequent allele on its own cannot be told from a systematic error.
     """
@@ -295,7 +321,10 @@ def signature(pu: Pileup, st: Settings) -> list[tuple[int, str]] | None:
         a, b = carriers[x] & cov, carriers[y] & cov
         both = len(a & b)
         expect = len(a) * len(b) / len(cov)
-        if both >= st.min_cooccur and both >= st.cooccur_ratio * max(expect, 0.5):
+        if both >= st.min_cooccur and (
+                both >= st.cooccur_ratio * max(expect, 0.5)
+                or (x[1] != "-" and y[1] != "-" and
+                    hypergeom_sf(both, len(cov), len(a), len(b)) < st.hap_p)):
             adj[x].add(y)
             adj[y].add(x)
     best: list = []

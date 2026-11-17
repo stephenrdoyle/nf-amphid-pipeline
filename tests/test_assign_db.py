@@ -203,6 +203,23 @@ def test_linkage_signature() -> None:
     sig = adb.signature(adb.Pileup(ref, alns), st)
     check("a 30% haplotype three bases off is found", sig is not None and
           sorted(p for p, _ in sig) == diffs, str(sig))
+    for n_b in (40, 50):
+        ref, alns = _two_haplotypes(rng, 100 - n_b, n_b, diffs, err=0.02)
+        sig = adb.signature(adb.Pileup(ref, alns), st)
+        check(f"a {n_b}% haplotype is found too (the ratio alone cannot "
+              f"reach 3 above a third)", sig is not None and
+              sorted(p for p, _ in sig) == diffs, str(sig))
+        ref, alns = _two_haplotypes(rng, 100 - n_b, n_b, diffs, err=0.02,
+                                    linked=False)
+        sig = adb.signature(adb.Pileup(ref, alns), st)
+        check(f"... and unlinked alleles at {n_b}% are not", sig is None,
+              str(sig))
+    # deletions shared by 45% of reads: as many low-quality reads have
+    ref = rand(rng, 400)
+    rows = [ref] * 55 + [ref[:100] + "-" + ref[101:200] + "-" + ref[201:]] * 45
+    alns = [aln(f"d{i}", ref, r) for i, r in enumerate(rows)]
+    check("linked deletions at 45% are not split by the stronger test",
+          adb.signature(adb.Pileup(ref, alns), st) is None)
     ref, alns = _two_haplotypes(rng, 70, 30, diffs, err=0.02, linked=False)
     sig = adb.signature(adb.Pileup(ref, alns), st)
     check("the same alleles at the same frequency but unlinked are not "
