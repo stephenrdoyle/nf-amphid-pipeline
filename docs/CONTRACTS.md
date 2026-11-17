@@ -364,15 +364,46 @@ to 1 of 602. It was enabled on what was measured:
 
     It also gathers reads that share a CCS homopolymer error - which tie
     on records of their own - back with their sequence's other reads.
-    What it costs: a haplotype that ties a commoner record joins that
-    record's group, and where they differ only in run lengths the split
-    does not part them. One such *Cyathostomum* haplotype, 13% of
-    HRG14-084 and kept by DADA2 at genus, is now counted as
-    *C. catinatum* (that sample's Bray-Curtis 0.017 -> 0.116). Grouping
-    by the whole set of tied records kept it but rebuilt the error groups
-    (98.16% to species, *Haemonchus* at genus 1.13%, 2.4x the time), and
-    giving only sets of 5+ reads their own group did no better (97.97%,
-    1.30%, 3.1x). Most-tied costs 1.2x the assignment time.
+    It cost a *Cyathostomum* haplotype, 13% of HRG14-084 and kept by
+    DADA2 at genus: tied with a commoner record, it joined that record's
+    group and was counted as *C. catinatum* (that sample's Bray-Curtis
+    0.017 -> 0.116). Grouping by the whole set of tied records kept it
+    but rebuilt the error groups (98.16% to species, *Haemonchus* at
+    genus 1.13%, 2.4x the time), and giving only sets of 5+ reads their
+    own group did no better (97.97%, 1.30%, 3.1x). Most-tied costs 1.2x
+    the assignment time.
+
+    **Splitting haplotypes above a third of a group (2026-11-17).** The
+    haplotype was in its group at 48%, two adjacent substitutions, 143
+    of 144 carriers shared - and the split's linkage test never linked
+    it: co-occurrence 3x what independence gives cannot happen for
+    alleles above a third of the reads. Two substitutions are now also
+    linked when independence would give that many co-carriers with a
+    hypergeometric chance below `hap_p` (1e-6). Deletions are left to
+    the ratio: low-quality CCS reads share error-prone positions, and
+    linking their deletions split *H. contortus* groups into consensus
+    sequences six deletions off the sample's, matching no ASV (17 such,
+    1,333 reads, before deletions were excluded). On S-BSST527:
+
+    | S-BSST527, tiered, v0.2.4 | most-tied | + split |
+    |---|---|---|
+    | haplotype splits | 100 | 109 |
+    | clustered reads named to species | 98.90% | 98.84% |
+    | *Haemonchus* at genus, study-wide, paper filter | 0.50% | 0.50% |
+    | per-sample Bray-Curtis, median / 90th / max | 0.0043 / 0.029 / 0.116 | 0.0043 / 0.026 / 0.072 |
+    | consensus gained identical to an ASV of the sample | | 6 (802 reads) |
+    | consensus gained 2+ edits from every ASV of the sample | | 4 (177 reads) |
+    | reads naming another species than the nearest ASV | 5 | 5 |
+
+    The six gained are haplotypes DADA2 finds too (HRG14-084's among
+    them; *Teladorsagia*, *Cylicocyclus* and *Trichostrongylus* in
+    others), each differing from its group's other consensus by
+    substitutions alone; none was lost. Species calls fall 0.06 points
+    because some of them are named only to genus, as DADA2 names them.
+    Release-to-release churn stays 0.50% (v0.2.2 against v0.2.4). The
+    nanopore leave-out simulation (`tests/bench_db_gap.py`, v0.2.4, 150
+    samples) is byte-identical, though its samples carry no hidden
+    haplotypes to find.
     `single_long_noisy` is unchanged, byte for byte.
 
   HiFi from Sequel II or Revio is more accurate than RSII CCS, so the

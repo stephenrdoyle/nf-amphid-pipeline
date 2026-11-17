@@ -298,7 +298,10 @@ So `bin/assign_db.py`, per sample:
    candidate allele must be ≥10% of the reads at its position and
    binomially improbable under the error rate *measured on that group*,
    not a homopolymer deletion; two alleles are linked when ≥3 reads
-   carry both and that is ≥3x their chance co-occurrence; the largest
+   carry both and that is ≥3x their chance co-occurrence - or, for two
+   substitutions, that many co-carriers has a hypergeometric chance
+   below 1e-6, since the ratio cannot reach 3 for a haplotype above a
+   third of its group; the largest
    connected set of linked alleles (≥2) is the signature, reads carrying
    at least half of it form a second group, and both are resolved again
    (at most two levels deep);
