@@ -24,12 +24,19 @@ protocol's own call is scored:
   genus_out    its genus held out             family (a confamilial is in)
 
 A call deeper than that, or naming anything wrong at any rank down to it,
-is WRONG - unless its best hit is identical to the source wherever both
-have sequence (one record contained exactly in the other: 151 record
-pairs of 57 species pairs in v0.2.2, none in livestock strongylids; the
-release flags them in contained_in / contains), which is
-INDISTINGUISHABLE: no classifier can tell that held-out species from the
-one named, and with both in the database the gap rule stops at genus.
+is WRONG - unless the release itself cannot separate the source from the
+species named, which is INDISTINGUISHABLE: the source record lies within
+the gap rule's reach of a typical record of the named species (fewer than
+nemits2.GAP_EDITS edits, each record placed inside the other), so with
+both species in the database a read of either stops at genus. That takes
+in the contained pairs (0 edits: 151 record pairs of 57 species pairs in
+v0.2.2, flagged in contained_in / contains) and species that share an
+ITS2 to an edit or two (H. sinense / H. liparis). A record far from every
+other record of its own species does not count (see typical): it is more
+likely misidentified than evidence the two species share an ITS2, and a
+call through it is a database error. A wrong call is then a
+database error or a classifier error, not a limit of the marker; both
+counts are reported, and the pairs behind each.
 
   python3 tests/bench_db_gap.py --release <nemits2 release> \\
       --workdir /tmp/gap --samples 150 [--families Strongylidae,...]
@@ -57,6 +64,7 @@ sys.path.insert(0, os.path.join(ROOT, "bin"))
 import ampseqlib as al            # noqa: E402
 import assign_db as adb           # noqa: E402
 import simulate as sim            # noqa: E402
+from protocols import nemits2     # noqa: E402
 
 NC1 = "ACGTCTGGTTCAGGGTTGTT"
 NC2 = "TTAGTTTCTTTTCCTCCGCT"
@@ -190,9 +198,44 @@ def one_sample(job: dict) -> list[dict]:
     return rows
 
 
-def contained(a: str, b: str) -> bool:
-    """One sequence is the other with bases missing from an end."""
-    return bool(a and b) and (a in b or b in a)
+def span_edits(a: str, b: str) -> int:
+    """Edits between two records, each placed inside the other with its
+    overhangs free and the better direction taken (the release's margins);
+    a record contained in the other is 0."""
+    return min(al.infix_distance(a, b), al.infix_distance(b, a))
+
+
+_REACH: dict = {}
+_TYPICAL: dict = {}
+
+
+def typical(i: str, tax, seqs: dict) -> bool:
+    """A record within the gap of another record of its own species, or
+    its species' only record. A record that is not - an H. aduncum ITS2
+    labelled H. fabri, 47 edits from every other H. fabri (v0.2.4) - is
+    taken for a misidentification, and a call through it stays wrong."""
+    if i not in _TYPICAL:
+        sp = tax.get(i, {}).get("species", "")
+        own = [k for k in seqs if k != i and tax.get(k, {}).get("species") == sp]
+        _TYPICAL[i] = not sp or not own or any(
+            span_edits(seqs[i], seqs[k]) < nemits2.GAP_EDITS for k in own)
+    return _TYPICAL[i]
+
+
+def within_gap(source: str, r: dict, tax, seqs: dict) -> bool:
+    """The release cannot separate the source from what it was named:
+    some typical record of the species named (or the best hit, for a call
+    above species) is fewer than GAP_EDITS edits from the source record."""
+    named = r["taxon"] if r["rank"] == "species" else ""
+    key = (source, named or r["best_hit"])
+    if key not in _REACH:
+        cands = [i for i in seqs if tax.get(i, {}).get("species") == named] \
+            if named else [r["best_hit"]]
+        s = seqs.get(source, "")
+        _REACH[key] = bool(s) and any(
+            i in seqs and span_edits(s, seqs[i]) < nemits2.GAP_EDITS
+            and typical(i, tax, seqs) for i in cands)
+    return _REACH[key]
 
 
 def outcome(r: dict, tax, ranks: list[str], seqs: dict) -> str:
@@ -209,8 +252,7 @@ def outcome(r: dict, tax, ranks: list[str], seqs: dict) -> str:
     if depth > lim or any(call[k] != t[ranks[k]]
                           for k in range(min(depth, lim) + 1)
                           if k < len(call)):
-        if r["category"] != "in_db" and contained(
-                seqs.get(r["source"], ""), seqs.get(r["best_hit"], "")):
+        if r["category"] != "in_db" and within_gap(r["source"], r, tax, seqs):
             return "indistinguishable"
         return "wrong"
     return "deepest" if depth == lim else "higher"
@@ -247,6 +289,19 @@ def report(rows: list[dict], tax, ranks: list[str], seqs: dict,
         print(f"{ge:>9}  {cat:12s} {n:4d}  {c['deepest'] / n:7.1%} "
               f"{c['wrong'] / n:6.1%} {c['indistinguishable'] / n:7.1%} "
               f"{c['higher'] / n:7.1%} {c['none'] / n:8.1%}")
+    pairs = defaultdict(Counter)
+    for d in src.values():
+        r = d[max(d)]
+        o = outcome(r, tax, ranks, seqs)
+        if o in ("wrong", "indistinguishable"):
+            pairs[o][(r["category"], tax[r["source"]]["species"],
+                      r["taxon"])] += 1
+    for o in ("wrong", "indistinguishable"):
+        print(f"\n{o} (gap_exact {max(max(d) for d in src.values())}), "
+              "source species -> named:")
+        for (cat, a, b), n in sorted(pairs[o].items(),
+                                     key=lambda kv: (kv[0][0], -kv[1])):
+            print(f"  {cat:12s} {n:4d}  {a} -> {b}")
     print("\ncalls the clause changes (gap_exact 0 -> 2):")
     changed = Counter()
     for (_s, s_), d in sorted(src.items()):

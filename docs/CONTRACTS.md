@@ -306,6 +306,43 @@ to 1 of 602. It was enabled on what was measured:
     v0.2.0 gave it; the synthesis tables differ only in the release's
     version: no consensus there ties with a flagged record.
 
+    **Indistinguishable, widened (2026-11-17).** Exact containment
+    missed pairs the release cannot separate either. *H. sinense* and
+    *H. liparis* share an ITS2 to an edit (31 of v0.2.4's 54 wrong
+    calls). The benchmark now counts a held-out species' call as
+    indistinguishable when its source record is fewer than `GAP_EDITS`
+    edits from a typical record of the species named. A typical record
+    is one within the gap of another record of its own species, or that
+    species' only record. A record far from the rest of its species is
+    taken as misidentified, so a call through it stays wrong. One case
+    still slips through: a group of misidentified records, being close
+    to each other, passes as typical. That is v0.2.4's short croaker
+    lineage under "*H. fabri*", which accounts for 2 calls.
+
+    Rescored from the same calls (whole release, `nanopore_hac`, 300
+    samples, `--gap-exact` 2; v0.2.5 holds out a different draw):
+
+    | species held out | wrong | indistinguishable |
+    |---|---|---|
+    | v0.2.4, exact containment | 18.0% | 0.0% |
+    | v0.2.4, within the gap | 8.0% | 10.0% |
+    | v0.2.5, exact containment | 19.0% | 0.7% |
+    | v0.2.5, within the gap | 5.7% | 14.0% |
+
+    On v0.2.4 the wrong calls are mostly through two records v0.2.5
+    drops: MW370746 (an *H. aduncum* ITS2 labelled *H. fabri*, 8 calls)
+    and MW413285 (*H. zhoushanense*, 3 edits from *H. amoyense*, 7
+    calls). On v0.2.5 they are:
+    - 7 *H. sinense* sources beyond the gap of every *H. liparis*
+      record;
+    - 7 through PV138334, an *H. urticae* record 5 edits from the
+      species' other record and 1 from *H. cruciferae*;
+    - 3 single calls (*P. vulnus* -> *P. penetrans*, one *H. elachista*
+      -> *H. oryzae*, *Heterorhabditis taysearae* -> Steinernematidae).
+
+    The genus held out has one wrong call (0.3%): *Orloffia bisonis*
+    named *Teladorsagia*.
+
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 
     **Under the tiered rule (2026-11-16).** The figures above are the gap
