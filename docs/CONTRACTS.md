@@ -337,9 +337,11 @@ to 1 of 602. It was enabled on what was measured:
       record;
     - 7 through PV138334, an *H. urticae* record 5 edits from the
       species' other record and 1 from *H. cruciferae*;
-    - 4 single calls (*Orloffia bisonis* -> *Teladorsagia*, *P. vulnus* ->
-      *P. penetrans*, one *H. elachista* -> *H. oryzae*, *Heterorhabditis
-      taysearae* -> Steinernematidae).
+    - 3 single calls (*P. vulnus* -> *P. penetrans*, one *H. elachista*
+      -> *H. oryzae*, *Heterorhabditis taysearae* -> Steinernematidae).
+
+    The genus held out has one wrong call (0.3%): *Orloffia bisonis*
+    named *Teladorsagia*.
 
     `single_long_noisy` is unchanged, byte for byte, on every fixture.
 

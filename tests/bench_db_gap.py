@@ -294,12 +294,14 @@ def report(rows: list[dict], tax, ranks: list[str], seqs: dict,
         r = d[max(d)]
         o = outcome(r, tax, ranks, seqs)
         if o in ("wrong", "indistinguishable"):
-            pairs[o][(tax[r["source"]]["species"], r["taxon"])] += 1
+            pairs[o][(r["category"], tax[r["source"]]["species"],
+                      r["taxon"])] += 1
     for o in ("wrong", "indistinguishable"):
         print(f"\n{o} (gap_exact {max(max(d) for d in src.values())}), "
               "source species -> named:")
-        for (a, b), n in pairs[o].most_common():
-            print(f"  {n:4d}  {a} -> {b}")
+        for (cat, a, b), n in sorted(pairs[o].items(),
+                                     key=lambda kv: (kv[0][0], -kv[1])):
+            print(f"  {cat:12s} {n:4d}  {a} -> {b}")
     print("\ncalls the clause changes (gap_exact 0 -> 2):")
     changed = Counter()
     for (_s, s_), d in sorted(src.items()):
